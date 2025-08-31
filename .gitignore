@@ -53,8 +53,11 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+# Python build directories (not frontend src/lib)
+backend/lib/
 lib64/
+**/lib/
+!frontend/**/src/lib/
 parts/
 sdist/
 var/
