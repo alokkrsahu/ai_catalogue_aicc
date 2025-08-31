@@ -81,14 +81,14 @@ fi
 
 # Get commit message from user
 echo ""
-echo "💬 Enter commit message (or press Enter for auto-generated message):"
+echo "💬 Enter commit message:"
 read -r COMMIT_MESSAGE
 
-# Generate automatic commit message if none provided
-if [ -z "$COMMIT_MESSAGE" ]; then
-    COMMIT_MESSAGE="updating"
-    echo "📝 Auto-generated commit message: $COMMIT_MESSAGE"
-fi
+# Require commit message
+while [ -z "$COMMIT_MESSAGE" ]; do
+    echo "⚠️  Commit message is required. Please enter a message:"
+    read -r COMMIT_MESSAGE
+done
 
 # Commit the changes
 echo ""
