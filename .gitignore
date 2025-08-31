@@ -240,7 +240,12 @@ deleted/
 
 # Large Data Files
 *.csv
+# Ignore large JSON data files but not package.json files
 *.json
+!package.json
+!package-lock.json
+!**/package.json
+!**/package-lock.json
 data/
 datasets/
 
