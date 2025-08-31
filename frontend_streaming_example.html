@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Public Chatbot Streaming Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; }
+        .chat-container { border: 1px solid #ccc; padding: 20px; margin: 20px 0; min-height: 400px; }
+        .message { margin: 10px 0; padding: 10px; border-radius: 5px; }
+        .user { background-color: #e3f2fd; text-align: right; }
+        .assistant { background-color: #f1f8e9; }
+        .streaming { color: #666; font-style: italic; }
+        input, button { padding: 10px; margin: 5px; }
+        input { width: 60%; }
+        button { width: 20%; }
+        .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .success { background-color: #d4edda; color: #155724; }
+        .error { background-color: #f8d7da; color: #721c24; }
+        .info { background-color: #d1ecf1; color: #0c5460; }
+    </style>
+</head>
+<body>
+    <h1>🤖 Public Chatbot Streaming Test</h1>
+    
+    <div class="status info">
+        <strong>Usage:</strong> Type a message and press "Send" to test the streaming API.
+        Make sure your backend is running on <code>http://localhost:8000</code>
+    </div>
+
+    <div>
+        <input type="text" id="messageInput" placeholder="Type your message here..." value="Tell me about artificial intelligence">
+        <button onclick="sendMessage()">Send</button>
+        <button onclick="clearChat()">Clear</button>
+    </div>
+
+    <div class="chat-container" id="chatContainer"></div>
+
+    <div id="status" class="status" style="display: none;"></div>
+
+    <script>
+        let currentResponse = '';
+        
+        function showStatus(message, type = 'info') {
+            const statusDiv = document.getElementById('status');
+            statusDiv.className = `status ${type}`;
+            statusDiv.textContent = message;
+            statusDiv.style.display = 'block';
+            
+            if (type === 'success' || type === 'info') {
+                setTimeout(() => {
+                    statusDiv.style.display = 'none';
+                }, 3000);
+            }
+        }
+        
+        function addMessage(content, isUser = false, isStreaming = false) {
+            const chatContainer = document.getElementById('chatContainer');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${isUser ? 'user' : 'assistant'}`;
+            
+            if (isStreaming) {
+                messageDiv.classList.add('streaming');
+                messageDiv.id = 'streamingMessage';
+            }
+            
+            messageDiv.innerHTML = content;
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+            
+            return messageDiv;
+        }
+        
+        function updateStreamingMessage(content) {
+            const streamingDiv = document.getElementById('streamingMessage');
+            if (streamingDiv) {
+                streamingDiv.innerHTML = content;
+                streamingDiv.parentElement.scrollTop = streamingDiv.parentElement.scrollHeight;
+            }
+        }
+        
+        function finalizeStreamingMessage() {
+            const streamingDiv = document.getElementById('streamingMessage');
+            if (streamingDiv) {
+                streamingDiv.classList.remove('streaming');
+                streamingDiv.id = '';
+            }
+        }
+        
+        async function sendMessage() {
+            const messageInput = document.getElementById('messageInput');
+            const message = messageInput.value.trim();
+            
+            if (!message) {
+                showStatus('Please enter a message', 'error');
+                return;
+            }
+            
+            // Add user message to chat
+            addMessage(message, true);
+            messageInput.value = '';
+            
+            // Show connecting status
+            showStatus('🔄 Connecting to streaming API...', 'info');
+            
+            try {
+                const response = await fetch('http://localhost:8000/api/public-chatbot/stream/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'text/event-stream',
+                    },
+                    body: JSON.stringify({
+                        message: message,
+                        session_id: 'web_test_' + Date.now()
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                showStatus('✅ Connected! Streaming response...', 'success');
+                
+                // Create streaming message container
+                addMessage('⏳ Generating response...', false, true);
+                currentResponse = '';
+                
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    
+                    const chunk = decoder.decode(value, { stream: true });
+                    const lines = chunk.split('\n');
+                    
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            const dataStr = line.slice(6); // Remove 'data: ' prefix
+                            
+                            if (dataStr === '[DONE]') {
+                                finalizeStreamingMessage();
+                                showStatus('✅ Response completed!', 'success');
+                                return;
+                            }
+                            
+                            try {
+                                const data = JSON.parse(dataStr);
+                                
+                                if (data.type === 'content') {
+                                    currentResponse += data.content;
+                                    updateStreamingMessage(currentResponse);
+                                    
+                                } else if (data.type === 'completion') {
+                                    finalizeStreamingMessage();
+                                    const time = data.response_time_ms;
+                                    showStatus(`✅ Completed in ${time}ms`, 'success');
+                                    
+                                } else if (data.type === 'error') {
+                                    finalizeStreamingMessage();
+                                    showStatus(`❌ Error: ${data.error}`, 'error');
+                                    updateStreamingMessage(`Error: ${data.error}`);
+                                }
+                                
+                            } catch (parseError) {
+                                console.error('Failed to parse SSE data:', dataStr, parseError);
+                            }
+                        }
+                    }
+                }
+                
+            } catch (error) {
+                finalizeStreamingMessage();
+                showStatus(`❌ Connection failed: ${error.message}`, 'error');
+                updateStreamingMessage(`Connection error: ${error.message}`);
+            }
+        }
+        
+        function clearChat() {
+            document.getElementById('chatContainer').innerHTML = '';
+            showStatus('Chat cleared', 'info');
+        }
+        
+        // Allow Enter key to send message
+        document.getElementById('messageInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+        
+        // Test connection on page load
+        window.addEventListener('load', function() {
+            fetch('http://localhost:8000/api/public-chatbot/health/')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'healthy') {
+                        showStatus('✅ Backend is healthy and ready', 'success');
+                    } else {
+                        showStatus('⚠️ Backend health check failed', 'error');
+                    }
+                })
+                .catch(error => {
+                    showStatus('❌ Cannot connect to backend. Make sure it\'s running on localhost:8000', 'error');
+                });
+        });
+    </script>
+</body>
+</html>

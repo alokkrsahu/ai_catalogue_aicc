@@ -1,0 +1,2189 @@
+"""
+Real Agent Orchestration Engine
+==============================
+
+Custom agent orchestration framework that chains conversations between agents
+using different LLM providers for REAL execution (not simulation).
+"""
+
+import os
+import logging
+import asyncio
+import time
+from typing import Dict, List, Any, Optional, Tuple
+from django.utils import timezone
+from django.conf import settings
+from asgiref.sync import sync_to_async
+
+# Import existing LLM infrastructure
+from llm_eval.providers.openai_provider import OpenAIProvider
+from llm_eval.providers.claude_provider import ClaudeProvider  
+from llm_eval.providers.gemini_provider import GeminiProvider
+from llm_eval.providers.base import LLMResponse
+
+from users.models import AgentWorkflow, WorkflowExecution, WorkflowExecutionMessage, WorkflowExecutionStatus, HumanInputInteraction
+
+# Import DocAware services
+from .docaware import EnhancedDocAwareAgentService, SearchMethod
+
+logger = logging.getLogger('conversation_orchestrator')
+
+class ConversationOrchestrator:
+    """
+    Real conversation orchestration engine for agent workflows
+    """
+    
+    def __init__(self):
+        self.api_keys = {
+            'openai': os.getenv('OPENAI_API_KEY'),
+            'anthropic': os.getenv('ANTHROPIC_API_KEY'), 
+            'google': os.getenv('GOOGLE_API_KEY') or os.getenv('GEMINI_API_KEY')  # Try both variables
+        }
+        
+        # Debug API key availability
+        for provider, key in self.api_keys.items():
+            if key:
+                logger.info(f"✅ ORCHESTRATOR: {provider.upper()} API key loaded (length: {len(key)})")
+            else:
+                logger.warning(f"⚠️ ORCHESTRATOR: {provider.upper()} API key NOT found")
+                
+        logger.info("🤖 ORCHESTRATOR: Initialized real conversation orchestrator")
+        
+    def get_llm_provider(self, agent_config: Dict[str, Any]) -> Optional[object]:
+        """
+        Create LLM provider instance based on agent configuration
+        """
+        provider_type = agent_config.get('llm_provider', 'openai')
+        model = agent_config.get('llm_model', 'gpt-4')
+        max_tokens = agent_config.get('max_tokens', 2048)
+        
+        # Apply model-specific token limits
+        if 'gpt-4' in model.lower():
+            max_tokens = min(max_tokens, 4096)  # GPT-4 limit
+        elif 'gpt-3.5' in model.lower():
+            max_tokens = min(max_tokens, 4096)  # GPT-3.5-turbo limit
+        else:
+            max_tokens = min(max_tokens, 2048)  # Safe default
+        
+        logger.info(f"🔧 LLM PROVIDER: Creating {provider_type} provider with model {model}, max_tokens: {max_tokens}")
+        logger.info(f"🔧 LLM PROVIDER: Available API keys: {list(k for k, v in self.api_keys.items() if v)}")
+        
+        try:
+            if provider_type == 'openai':
+                api_key = self.api_keys.get('openai')
+                if not api_key:
+                    logger.error("❌ LLM PROVIDER: OpenAI API key not found")
+                    logger.error(f"❌ LLM PROVIDER: Available keys: {list(self.api_keys.keys())}")
+                    return None
+                logger.info(f"✅ LLM PROVIDER: Creating OpenAI provider with model {model}, max_tokens: {max_tokens}, key length: {len(api_key)}")
+                try:
+                    provider = OpenAIProvider(api_key=api_key, model=model, max_tokens=max_tokens)
+                    logger.info(f"✅ LLM PROVIDER: Successfully created OpenAI provider")
+                    return provider
+                except Exception as openai_error:
+                    logger.error(f"❌ LLM PROVIDER: Failed to create OpenAI provider: {openai_error}")
+                    return None
+                
+            elif provider_type in ['anthropic', 'claude']:
+                api_key = self.api_keys.get('anthropic')
+                if not api_key:
+                    logger.error("❌ LLM PROVIDER: Anthropic API key not found")
+                    return None
+                logger.info(f"✅ LLM PROVIDER: Creating Anthropic provider with model {model}, max_tokens: {max_tokens}")
+                return ClaudeProvider(api_key=api_key, model=model, max_tokens=max_tokens)
+                
+            elif provider_type in ['google', 'gemini']:
+                api_key = self.api_keys.get('google')
+                if not api_key:
+                    logger.error("❌ LLM PROVIDER: Google API key not found")
+                    return None
+                logger.info(f"✅ LLM PROVIDER: Creating Google provider with model {model}, max_tokens: {max_tokens}")
+                return GeminiProvider(api_key=api_key, model=model, max_tokens=max_tokens)
+                
+            else:
+                logger.error(f"❌ LLM PROVIDER: Unknown provider type: {provider_type}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ LLM PROVIDER: Failed to create LLM provider: {e}")
+            logger.error(f"❌ LLM PROVIDER: Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"❌ LLM PROVIDER: Traceback: {traceback.format_exc()}")
+            return None
+    
+    def parse_workflow_graph(self, graph_json: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Parse workflow graph into linear execution sequence using TOPOLOGICAL SORT
+        This respects the visual flow by processing nodes in dependency order
+        
+        Returns:
+            List of nodes in execution order following the visual graph flow
+        """
+        nodes = graph_json.get('nodes', [])
+        edges = graph_json.get('edges', [])
+        
+        if not nodes:
+            logger.warning("⚠️ ORCHESTRATOR: No nodes found in workflow graph")
+            return []
+        
+        logger.info(f"🔗 ORCHESTRATOR: Parsing workflow with {len(nodes)} nodes and {len(edges)} edges")
+        
+        # Create node lookup for fast access
+        node_map = {node['id']: node for node in nodes}
+        
+        # Build adjacency list and calculate in-degrees
+        adjacency = {node['id']: [] for node in nodes}
+        in_degree = {node['id']: 0 for node in nodes}
+        
+        # Process edges to build graph structure
+        for edge in edges:
+            source = edge['source']
+            target = edge['target']
+            if source in adjacency and target in in_degree:
+                adjacency[source].append(target)
+                in_degree[target] += 1
+                logger.debug(f"🔗 Edge: {source} → {target}")
+        
+        # KAHN'S ALGORITHM for Topological Sort
+        # This ensures we follow the visual flow correctly
+        execution_sequence = []
+        queue = []
+        
+        # Find all nodes with in-degree 0 (start nodes)
+        for node_id, degree in in_degree.items():
+            if degree == 0:
+                queue.append(node_id)
+                logger.info(f"🚀 ORCHESTRATOR: Found start node: {node_map[node_id].get('data', {}).get('name', node_id)}")
+        
+        # If no start nodes found, look specifically for StartNode type
+        if not queue:
+            start_nodes = [n for n in nodes if n.get('type') == 'StartNode']
+            if start_nodes:
+                queue = [start_nodes[0]['id']]
+                logger.warning("⚠️ ORCHESTRATOR: No zero in-degree nodes, using StartNode")
+            else:
+                queue = [nodes[0]['id']]
+                logger.warning("⚠️ ORCHESTRATOR: No StartNode found, using first node")
+        
+        # Process nodes in topological order
+        processed_count = 0
+        while queue:
+            # Sort queue to ensure consistent ordering when multiple nodes are available
+            queue.sort()
+            current_node_id = queue.pop(0)
+            
+            if current_node_id not in node_map:
+                logger.error(f"❌ ORCHESTRATOR: Node {current_node_id} not found in node_map")
+                continue
+            
+            current_node = node_map[current_node_id]
+            execution_sequence.append(current_node)
+            processed_count += 1
+            
+            node_name = current_node.get('data', {}).get('name', current_node_id)
+            node_type = current_node.get('type', 'Unknown')
+            logger.info(f"🎯 ORCHESTRATOR: [{processed_count}] Added to sequence: {node_name} (type: {node_type})")
+            
+            # Process all neighbors of the current node
+            for neighbor_id in adjacency[current_node_id]:
+                in_degree[neighbor_id] -= 1
+                
+                # If neighbor has no more incoming edges, add to queue
+                if in_degree[neighbor_id] == 0:
+                    queue.append(neighbor_id)
+                    neighbor_name = node_map[neighbor_id].get('data', {}).get('name', neighbor_id)
+                    logger.info(f"🔗 ORCHESTRATOR: Queued next node: {neighbor_name}")
+        
+        # Check for cycles (if we didn't process all nodes)
+        if len(execution_sequence) < len(nodes):
+            unprocessed = [node['id'] for node in nodes if node not in execution_sequence]
+            logger.warning(f"⚠️ ORCHESTRATOR: Possible cycle detected. Unprocessed nodes: {unprocessed}")
+            
+            # Add remaining nodes to avoid execution failure
+            for node in nodes:
+                if node not in execution_sequence:
+                    execution_sequence.append(node)
+                    logger.warning(f"⚠️ ORCHESTRATOR: Force-added unprocessed node: {node.get('data', {}).get('name', node['id'])}")
+        
+        # Log the final execution order for debugging
+        sequence_names = [f"{node.get('data', {}).get('name', 'Unknown')} ({node.get('type')})" for node in execution_sequence]
+        logger.info(f"🔗 ORCHESTRATOR: TOPOLOGICAL execution sequence: {' → '.join(sequence_names)}")
+        
+        logger.info(f"✅ ORCHESTRATOR: Parsed {len(execution_sequence)} nodes using topological sort")
+        return execution_sequence
+    
+    def find_multiple_inputs_to_node(self, target_node_id: str, graph_json: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Find all nodes that feed into the target node (multiple inputs support)
+        Returns list of input node data with metadata
+        """
+        input_nodes = []
+        edges = graph_json.get('edges', [])
+        node_map = {node['id']: node for node in graph_json.get('nodes', [])}
+        
+        logger.info(f"🔍 MULTI-INPUT: Finding input sources for node {target_node_id}")
+        
+        for edge in edges:
+            if edge.get('target') == target_node_id:
+                source_id = edge.get('source')
+                if source_id in node_map:
+                    source_node = node_map[source_id]
+                    input_nodes.append({
+                        'node': source_node,
+                        'edge': edge,
+                        'source_id': source_id,
+                        'name': source_node.get('data', {}).get('name', source_id),
+                        'type': source_node.get('type', 'Unknown')
+                    })
+                    logger.info(f"🔗 MULTI-INPUT: Found input source: {source_node.get('data', {}).get('name', source_id)} (type: {source_node.get('type')})")
+        
+        logger.info(f"✅ MULTI-INPUT: Found {len(input_nodes)} input sources for {target_node_id}")
+        return input_nodes
+    
+    def aggregate_multiple_inputs(self, input_sources: List[Dict[str, Any]], executed_nodes: Dict[str, str]) -> Dict[str, Any]:
+        """
+        Aggregate multiple input sources into structured context
+        
+        Args:
+            input_sources: List of input node metadata
+            executed_nodes: Dict mapping node_id to their output/response
+        
+        Returns:
+            Dict with aggregated context information
+        """
+        logger.info(f"🔄 MULTI-INPUT: Aggregating {len(input_sources)} input sources")
+        
+        aggregated_context = {
+            'primary_input': '',
+            'secondary_inputs': [],
+            'input_summary': '',
+            'all_inputs': [],
+            'input_count': len(input_sources)
+        }
+        
+        # Sort inputs by type priority (StartNode first, then others)
+        sorted_inputs = sorted(input_sources, key=lambda x: (
+            0 if x['type'] == 'StartNode' else
+            1 if x['type'] in ['AssistantAgent', 'UserProxyAgent'] else
+            2
+        ))
+        
+        input_contexts = []
+        
+        for i, input_source in enumerate(sorted_inputs):
+            input_id = input_source['source_id']
+            input_name = input_source['name']
+            input_type = input_source['type']
+            
+            # Get the output/response from this input node
+            input_content = executed_nodes.get(input_id, f"[No output from {input_name}]")
+            
+            input_context = {
+                'name': input_name,
+                'type': input_type,
+                'content': input_content,
+                'priority': i + 1
+            }
+            
+            input_contexts.append(input_context)
+            aggregated_context['all_inputs'].append(input_context)
+            
+            logger.info(f"📥 MULTI-INPUT: Processed input {i+1}: {input_name} ({input_type}) - {len(str(input_content))} chars")
+        
+        # Set primary input (first/highest priority)
+        if input_contexts:
+            aggregated_context['primary_input'] = input_contexts[0]['content']
+            aggregated_context['secondary_inputs'] = input_contexts[1:] if len(input_contexts) > 1 else []
+        
+        # Create formatted summary
+        summary_parts = []
+        for ctx in input_contexts:
+            summary_parts.append(f"Input {ctx['priority']} ({ctx['type']} - {ctx['name']}): {ctx['content'][:100]}{'...' if len(str(ctx['content'])) > 100 else ''}")
+        
+        aggregated_context['input_summary'] = "\n".join(summary_parts)
+        
+        logger.info(f"✅ MULTI-INPUT: Aggregation complete - Primary: {len(str(aggregated_context['primary_input']))} chars, Secondary: {len(aggregated_context['secondary_inputs'])} inputs")
+        
+        return aggregated_context
+    
+    def format_multiple_inputs_prompt(self, aggregated_context: Dict[str, Any]) -> str:
+        """
+        Format multiple inputs into a structured prompt section
+        
+        Args:
+            aggregated_context: Output from aggregate_multiple_inputs
+        
+        Returns:
+            Formatted string for inclusion in prompts
+        """
+        if aggregated_context['input_count'] <= 1:
+            return aggregated_context['primary_input']
+        
+        prompt_parts = []
+        prompt_parts.append(f"Multiple Input Sources ({aggregated_context['input_count']} total):")
+        prompt_parts.append("")
+        
+        # Add primary input
+        prompt_parts.append("PRIMARY INPUT:")
+        prompt_parts.append(aggregated_context['primary_input'])
+        prompt_parts.append("")
+        
+        # Add secondary inputs
+        if aggregated_context['secondary_inputs']:
+            prompt_parts.append("ADDITIONAL INPUTS:")
+            for i, secondary in enumerate(aggregated_context['secondary_inputs']):
+                prompt_parts.append(f"Input {i + 2} ({secondary['type']} - {secondary['name']}):")
+                prompt_parts.append(secondary['content'])
+                prompt_parts.append("")
+        
+        return "\n".join(prompt_parts)
+    
+    async def execute_group_chat_manager_with_multiple_inputs(self, chat_manager_node: Dict[str, Any], llm_provider, input_sources: List[Dict[str, Any]], executed_nodes: Dict[str, str], execution_sequence: List[Dict[str, Any]], graph_json: Dict[str, Any], project_id: Optional[str] = None) -> str:
+        """
+        Execute GroupChatManager with multiple inputs support
+        Enhanced version that handles multiple input sources
+        
+        Args:
+            chat_manager_node: The GroupChatManager node data
+            llm_provider: LLM provider instance
+            input_sources: List of input node metadata
+            executed_nodes: Dict mapping node_id to their outputs
+            execution_sequence: Complete workflow execution sequence
+            graph_json: Full workflow graph data
+            project_id: Project ID for DocAware functionality
+        
+        Returns:
+            GroupChatManager response string
+        """
+        manager_name = chat_manager_node.get('data', {}).get('name', 'Chat Manager')
+        manager_data = chat_manager_node.get('data', {})
+        chat_manager_id = chat_manager_node.get('id')
+        
+        logger.info(f"👥 GROUP CHAT MANAGER (MULTI-INPUT): Starting enhanced execution for {manager_name}")
+        logger.info(f"📥 GROUP CHAT MANAGER (MULTI-INPUT): Processing {len(input_sources)} input sources")
+        
+        # Aggregate multiple inputs into structured context
+        aggregated_context = self.aggregate_multiple_inputs(input_sources, executed_nodes)
+        formatted_context = self.format_multiple_inputs_prompt(aggregated_context)
+        
+        # Find all delegate agents connected to this GroupChatManager
+        delegate_nodes = []
+        edges = graph_json.get('edges', [])
+        
+        # Find all nodes that have incoming edges from this GroupChatManager
+        connected_delegate_ids = set()
+        for edge in edges:
+            if edge.get('source') == chat_manager_id:
+                target_id = edge.get('target')
+                # Find the target node in execution sequence
+                for node in execution_sequence:
+                    if node.get('id') == target_id and node.get('type') == 'DelegateAgent':
+                        connected_delegate_ids.add(target_id)
+                        delegate_nodes.append(node)
+                        logger.info(f"🔗 GROUP CHAT MANAGER (MULTI-INPUT): Found connected delegate: {node.get('data', {}).get('name', target_id)}")
+        
+        # Also check for bidirectional edges
+        for edge in edges:
+            if edge.get('target') == chat_manager_id:
+                source_id = edge.get('source')
+                for node in execution_sequence:
+                    if node.get('id') == source_id and node.get('type') == 'DelegateAgent' and source_id not in connected_delegate_ids:
+                        connected_delegate_ids.add(source_id)
+                        delegate_nodes.append(node)
+                        logger.info(f"🔗 GROUP CHAT MANAGER (MULTI-INPUT): Found bidirectionally connected delegate: {node.get('data', {}).get('name', source_id)}")
+        
+        logger.info(f"🤝 GROUP CHAT MANAGER (MULTI-INPUT): Found {len(delegate_nodes)} connected delegate agents")
+        
+        if not delegate_nodes:
+            error_message = f"GroupChatManager {manager_name} has no connected delegate agents. Please connect DelegateAgent nodes to this GroupChatManager via edges in the workflow graph."
+            logger.error(f"❌ GROUP CHAT MANAGER (MULTI-INPUT): {error_message}")
+            raise Exception(error_message)
+        
+        # Get configuration
+        max_rounds = manager_data.get('max_rounds', 10)
+        if max_rounds <= 0:
+            logger.warning(f"⚠️ GROUP CHAT MANAGER (MULTI-INPUT): max_rounds was {max_rounds}, setting to 1")
+            max_rounds = 1
+        
+        termination_strategy = manager_data.get('termination_strategy', 'all_delegates_complete')
+        
+        logger.info(f"🔧 GROUP CHAT MANAGER (MULTI-INPUT): Configuration - max_rounds: {max_rounds}, inputs: {aggregated_context['input_count']}")
+        
+        # Initialize delegate tracking
+        delegate_status = {}
+        for delegate in delegate_nodes:
+            delegate_name = delegate.get('data', {}).get('name', 'Delegate')
+            delegate_status[delegate_name] = {
+                'iterations': 0,
+                'max_iterations': delegate.get('data', {}).get('number_of_iterations', 5),
+                'termination_condition': delegate.get('data', {}).get('termination_condition', ''),  # NO DEFAULT - must come from UI
+                'completed': False,
+                'node': delegate
+            }
+        
+        # Process delegates with multiple input context
+        conversation_log = []
+        total_iterations = 0
+        
+        logger.info(f"📊 GROUP CHAT MANAGER (MULTI-INPUT): Delegate status before execution: {delegate_status}")
+        logger.info(f"📊 GROUP CHAT MANAGER (MULTI-INPUT): About to enter execution loop with max_rounds: {max_rounds}")
+        
+        # Execute all delegates with multi-input context
+        logger.info(f"🔄 GROUP CHAT MANAGER (MULTI-INPUT): Starting execution loop with {len(delegate_nodes)} delegates")
+        
+        for round_num in range(max_rounds):
+            logger.info(f"🔄 GROUP CHAT MANAGER (MULTI-INPUT): Round {round_num + 1}/{max_rounds}")
+            
+            delegates_processed_this_round = 0
+            
+            for delegate_name, status in list(delegate_status.items()):
+                logger.info(f"🔄 GROUP CHAT MANAGER (MULTI-INPUT): Checking delegate {delegate_name}, completed: {status['completed']}, iterations: {status['iterations']}/{status['max_iterations']}")
+                
+                # Only skip if both completed AND has run at least once
+                if status['completed'] and status['iterations'] > 0:
+                    logger.info(f"🔄 GROUP CHAT MANAGER (MULTI-INPUT): Skipping completed delegate {delegate_name}")
+                    continue
+                
+                logger.info(f"🔄 GROUP CHAT MANAGER (MULTI-INPUT): About to execute delegate {delegate_name}")
+                delegates_processed_this_round += 1
+                
+                # Execute delegate with multiple input context
+                try:
+                    logger.info(f"📊 GROUP CHAT MANAGER (MULTI-INPUT): Calling execute_delegate_conversation_with_multiple_inputs for {delegate_name}")
+                    delegate_response = await self.execute_delegate_conversation_with_multiple_inputs(
+                        status['node'], 
+                        llm_provider, 
+                        formatted_context,  # Use multi-input formatted context
+                        aggregated_context,  # Pass raw context for metadata
+                        conversation_log,
+                        status,
+                        project_id  # Add project_id for DocAware functionality
+                    )
+                    logger.info(f"✅ GROUP CHAT MANAGER (MULTI-INPUT): Successfully executed delegate {delegate_name} - response length: {len(delegate_response)} chars")
+                    
+                    # Ensure we have a valid response
+                    if not delegate_response or len(delegate_response.strip()) == 0:
+                        logger.warning(f"⚠️ GROUP CHAT MANAGER (MULTI-INPUT): {delegate_name} returned empty response, creating default")
+                        delegate_response = f"I am {delegate_name} and I have processed the multiple input sources. No specific output generated."
+                        
+                except Exception as delegate_exec_error:
+                    logger.error(f"❌ GROUP CHAT MANAGER (MULTI-INPUT): Failed to execute delegate {delegate_name}: {delegate_exec_error}")
+                    import traceback
+                    logger.error(f"❌ GROUP CHAT MANAGER (MULTI-INPUT): Full traceback: {traceback.format_exc()}")
+                    delegate_response = f"ERROR: Delegate execution failed: {delegate_exec_error}"
+                
+                # Always add response to conversation log
+                conversation_log.append(f"[Round {round_num + 1}] {delegate_name}: {delegate_response}")
+                
+                # Check if delegate response is an error
+                if delegate_response.startswith("ERROR:"):
+                    logger.error(f"❌ GROUP CHAT MANAGER (MULTI-INPUT): {delegate_name} failed: {delegate_response}")
+                    status['completed'] = True
+                else:
+                    logger.info(f"✅ GROUP CHAT MANAGER (MULTI-INPUT): {delegate_name} response added to conversation log")
+                
+                # Update iteration count
+                status['iterations'] += 1
+                total_iterations += 1
+                logger.info(f"📊 GROUP CHAT MANAGER (MULTI-INPUT): {delegate_name} iteration count: {status['iterations']}/{status['max_iterations']}")
+                
+                # Check termination conditions - ONLY terminate if:
+                # 1. Explicit termination condition is set AND appears at end of response, OR
+                # 2. Maximum iterations reached
+                termination_met = False
+                
+                # Check for explicit termination condition (only if one is set)
+                if status['termination_condition'] and status['termination_condition'].strip():
+                    # Only check at the END of the response to avoid false positives
+                    if delegate_response.strip().endswith(status['termination_condition']):
+                        termination_met = True
+                        logger.info(f"✅ GROUP CHAT MANAGER (MULTI-INPUT): Delegate {delegate_name} used explicit termination: '{status['termination_condition']}'")
+                
+                # Check for max iterations reached
+                if status['iterations'] >= status['max_iterations']:
+                    termination_met = True
+                    logger.info(f"✅ GROUP CHAT MANAGER (MULTI-INPUT): Delegate {delegate_name} reached max iterations: {status['iterations']}/{status['max_iterations']}")
+                
+                if termination_met:
+                    status['completed'] = True
+                    logger.info(f"✅ GROUP CHAT MANAGER (MULTI-INPUT): Delegate {delegate_name} completed")
+                else:
+                    logger.info(f"🔄 GROUP CHAT MANAGER (MULTI-INPUT): Delegate {delegate_name} continuing ({status['iterations']}/{status['max_iterations']})")
+                
+                # Check global termination strategy after each delegate
+                try:
+                    if self.check_termination_strategy(delegate_status, termination_strategy):
+                        logger.info(f"🏁 GROUP CHAT MANAGER (MULTI-INPUT): Termination strategy '{termination_strategy}' triggered after {delegate_name}")
+                        break
+                except Exception as term_error:
+                    logger.error(f"❌ GROUP CHAT MANAGER (MULTI-INPUT): Termination strategy check failed: {term_error}")
+            
+            logger.info(f"📊 GROUP CHAT MANAGER (MULTI-INPUT): Round {round_num + 1} completed - processed {delegates_processed_this_round} delegates")
+            
+            # Check if all delegates completed
+            if delegates_processed_this_round == 0:
+                all_completed = all(status['completed'] and status['iterations'] > 0 for status in delegate_status.values())
+                if all_completed:
+                    logger.info(f"✅ GROUP CHAT MANAGER (MULTI-INPUT): All delegates completed, ending execution")
+                    break
+                else:
+                    logger.warning(f"⚠️ GROUP CHAT MANAGER (MULTI-INPUT): No delegates processed in round {round_num + 1} but not all complete - continuing")
+            
+            # Check global termination
+            try:
+                if self.check_termination_strategy(delegate_status, termination_strategy):
+                    logger.info(f"🏁 GROUP CHAT MANAGER (MULTI-INPUT): Global termination after round {round_num + 1}")
+                    break
+            except Exception as term_error:
+                logger.error(f"❌ GROUP CHAT MANAGER (MULTI-INPUT): Final termination check failed: {term_error}")
+                break
+        
+        logger.info(f"📊 GROUP CHAT MANAGER (MULTI-INPUT): Execution loop completed after {max_rounds} rounds or early termination")
+        
+        # Ensure we have delegate conversations
+        if not conversation_log:
+            error_message = f"GroupChatManager {manager_name} with multiple inputs completed execution but no delegate conversations were generated. Check delegate configurations and API keys."
+            logger.error(f"❌ GROUP CHAT MANAGER (MULTI-INPUT): {error_message}")
+            raise Exception(error_message)
+        
+        # Generate final response from GroupChatManager with multi-input awareness
+        final_prompt = f"""
+        You are the Group Chat Manager named {manager_name}.
+        
+        You have processed multiple input sources and coordinated delegate responses.
+        
+        {formatted_context}
+        
+        Delegate Conversation Log:
+        {"; ".join(conversation_log)}
+        
+        Based on the multiple input sources and delegate conversations, provide a comprehensive summary and final output.
+        Focus on synthesizing insights from all inputs and delegate responses into actionable conclusions.
+        Highlight how the different input sources contributed to the final result.
+        """
+        
+        final_response = await llm_provider.generate_response(
+            prompt=final_prompt,
+            temperature=manager_data.get('temperature', 0.5)
+        )
+        
+        if final_response.error:
+            raise Exception(f"GroupChatManager multi-input final response error: {final_response.error}")
+        
+        final_output = f"""GroupChatManager Multi-Input Summary (processed {total_iterations} delegate iterations from {aggregated_context['input_count']} input sources):
+        
+        {final_response.text.strip()}
+        
+        Input Sources Summary:
+        {aggregated_context['input_summary']}
+        
+        Delegate Processing Summary:
+        {self.generate_delegate_summary(delegate_status)}
+        """
+        
+        logger.info(f"✅ GROUP CHAT MANAGER (MULTI-INPUT): Completed execution with {total_iterations} total iterations from {aggregated_context['input_count']} inputs")
+        return final_output
+    
+    async def execute_delegate_conversation_with_multiple_inputs(self, delegate_node: Dict[str, Any], llm_provider, formatted_context: str, aggregated_context: Dict[str, Any], conversation_log: List[str], status: Dict[str, Any], project_id: Optional[str] = None) -> str:
+        """
+        Execute a single conversation round with a delegate agent using multiple inputs
+        Enhanced version that handles multiple input sources and DocAware integration
+        
+        Args:
+            delegate_node: The delegate node data
+            llm_provider: LLM provider instance
+            formatted_context: Formatted multi-input context string
+            aggregated_context: Raw aggregated context data
+            conversation_log: Previous delegate conversation log
+            status: Delegate status tracking
+            project_id: Project ID for DocAware functionality
+        
+        Returns:
+            Delegate response string
+        """
+        delegate_name = delegate_node.get('data', {}).get('name', 'Delegate')
+        delegate_data = delegate_node.get('data', {})
+        
+        logger.info(f"🤝 DELEGATE (MULTI-INPUT): Starting execution for {delegate_name}")
+        logger.info(f"🤝 DELEGATE (MULTI-INPUT): Processing {aggregated_context['input_count']} input sources")
+        logger.info(f"🤝 DELEGATE (MULTI-INPUT): DocAware enabled: {self.is_docaware_enabled(delegate_node)}")
+        
+        # Create delegate-specific LLM provider if needed
+        delegate_config = {
+            'llm_provider': delegate_data.get('llm_provider', 'openai'),
+            'llm_model': delegate_data.get('llm_model', 'gpt-4'),
+            'temperature': delegate_data.get('temperature', 0.4),
+            'max_tokens': delegate_data.get('max_tokens', 1024)
+        }
+        
+        logger.info(f"🔧 DELEGATE (MULTI-INPUT): Config for {delegate_name}: {delegate_config}")
+        
+        # Try to create delegate-specific LLM provider
+        delegate_llm = None
+        try:
+            logger.info(f"🔧 DELEGATE (MULTI-INPUT): Attempting to create LLM provider for {delegate_name}")
+            delegate_llm = self.get_llm_provider(delegate_config)
+            if delegate_llm:
+                logger.info(f"✅ DELEGATE (MULTI-INPUT): Successfully created LLM provider for {delegate_name}")
+            else:
+                logger.warning(f"⚠️ DELEGATE (MULTI-INPUT): Failed to create LLM provider for {delegate_name}, trying fallback")
+        except Exception as provider_error:
+            logger.error(f"❌ DELEGATE (MULTI-INPUT): Error creating provider for {delegate_name}: {provider_error}")
+        
+        # Fallback to provided LLM provider
+        if not delegate_llm:
+            logger.info(f"🔄 DELEGATE (MULTI-INPUT): Using fallback LLM provider for {delegate_name}")
+            delegate_llm = llm_provider
+            
+        if not delegate_llm:
+            error_msg = f"No LLM provider available for delegate {delegate_name}"
+            logger.error(f"❌ DELEGATE (MULTI-INPUT): {error_msg}")
+            return f"ERROR: {error_msg}"
+        
+        # 📚 DOCAWARE INTEGRATION FOR DELEGATE AGENTS
+        document_context = ""
+        if self.is_docaware_enabled(delegate_node) and project_id:
+            try:
+                # Use aggregated input as search query for DocAware
+                search_query = self.extract_search_query_from_aggregated_input(aggregated_context)
+                
+                if search_query:
+                    logger.info(f"📚 DOCAWARE: Delegate {delegate_name} using aggregated input as search query")
+                    logger.info(f"📚 DOCAWARE: Query: {search_query[:100]}...")
+                    
+                    document_context = await self.get_docaware_context_from_query(
+                        delegate_node, search_query, project_id, aggregated_context
+                    )
+                    
+                    if document_context:
+                        logger.info(f"📚 DOCAWARE: Added document context to delegate {delegate_name} prompt ({len(document_context)} chars)")
+                else:
+                    logger.warning(f"📚 DOCAWARE: No search query could be extracted from aggregated input for delegate {delegate_name}")
+                    
+            except Exception as e:
+                logger.error(f"❌ DOCAWARE: Failed to get document context for delegate {delegate_name}: {e}")
+                import traceback
+                logger.error(f"❌ DOCAWARE: Traceback: {traceback.format_exc()}")
+        
+        # Craft enhanced delegate prompt with multiple inputs and optional DocAware context
+        prompt_parts = []
+        prompt_parts.append(f"You are {delegate_name}, a specialized delegate agent.")
+        prompt_parts.append(f"")
+        prompt_parts.append(f"System Message: {delegate_data.get('system_message', 'You are a helpful specialized agent.')}")
+        
+        # Add DocAware document context if available
+        if document_context:
+            prompt_parts.append("")
+            prompt_parts.append("=== RELEVANT DOCUMENTS ===")
+            prompt_parts.append(document_context)
+            prompt_parts.append("=== END DOCUMENTS ===")
+        
+        prompt_parts.extend([
+            f"",
+            f"Multiple Input Context ({aggregated_context['input_count']} sources):",
+            formatted_context,
+            f"",
+            f"Previous Delegate Conversations:",
+            f"{'; '.join(conversation_log[-3:]) if conversation_log else 'None'}",
+            f"",
+            f"Current Iteration: {status['iterations'] + 1}/{status['max_iterations']}",
+            f"",
+            f"Instructions:",
+            f"- Analyze and synthesize information from ALL input sources"
+        ])
+        
+        if document_context:
+            prompt_parts.append(f"- Use the relevant documents to provide accurate and contextual information")
+            prompt_parts.append(f"- Reference specific information from the documents when applicable")
+        
+        prompt_parts.extend([
+            f"- Provide specialized analysis based on your role and the multiple inputs",
+            f"- Consider how different input sources relate to each other",
+            f"- Be specific and actionable in your response",
+            f"- If you have completed your analysis and want to terminate early, end your response with '{status['termination_condition']}'",
+            f"- Consider the previous delegate conversations to avoid duplication",
+            f"",
+            f"Your response:"
+        ])
+        
+        delegate_prompt = "\n".join(prompt_parts)
+        
+        logger.info(f"🤝 DELEGATE (MULTI-INPUT): Executing {delegate_name} iteration {status['iterations'] + 1}")
+        logger.info(f"🤝 DELEGATE (MULTI-INPUT): About to call LLM with prompt length: {len(delegate_prompt)} chars")
+        logger.info(f"🤝 DELEGATE (MULTI-INPUT): Using provider type: {type(delegate_llm).__name__}")
+        
+        try:
+            logger.info(f"🤝 DELEGATE (MULTI-INPUT): About to call generate_response for {delegate_name}")
+            
+            delegate_response = await delegate_llm.generate_response(
+                prompt=delegate_prompt,
+                temperature=delegate_config.get('temperature', 0.4)
+            )
+            logger.info(f"🤝 DELEGATE (MULTI-INPUT): LLM call completed for {delegate_name}")
+            logger.info(f"🤝 DELEGATE (MULTI-INPUT): Response type: {type(delegate_response)}")
+            
+            # Enhanced error checking
+            if hasattr(delegate_response, 'error') and delegate_response.error:
+                error_msg = f"Delegate {delegate_name} encountered an error: {delegate_response.error}"
+                logger.error(f"❌ DELEGATE (MULTI-INPUT): {error_msg}")
+                return f"ERROR: {error_msg}"
+            
+            # Check for text attribute
+            if not hasattr(delegate_response, 'text'):
+                error_msg = f"Delegate {delegate_name} response missing 'text' attribute. Response type: {type(delegate_response)}"
+                logger.error(f"❌ DELEGATE (MULTI-INPUT): {error_msg}")
+                return f"ERROR: {error_msg}"
+            
+            if not delegate_response.text:
+                error_msg = f"Delegate {delegate_name} received empty response from LLM"
+                logger.error(f"❌ DELEGATE (MULTI-INPUT): {error_msg}")
+                return f"ERROR: {error_msg}"
+            
+            response_text = delegate_response.text.strip()
+            logger.info(f"✅ DELEGATE (MULTI-INPUT): {delegate_name} generated response ({len(response_text)} chars)")
+            
+            # Log a preview of the response for debugging
+            preview = response_text[:100] + "..." if len(response_text) > 100 else response_text
+            logger.info(f"📝 DELEGATE (MULTI-INPUT): {delegate_name} response preview: {preview}")
+            
+            return response_text
+            
+        except Exception as e:
+            error_msg = f"Delegate {delegate_name} execution failed: {str(e)}"
+            logger.error(f"❌ DELEGATE (MULTI-INPUT): {error_msg}")
+            logger.error(f"❌ DELEGATE (MULTI-INPUT): Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"❌ DELEGATE (MULTI-INPUT): Traceback: {traceback.format_exc()}")
+            return f"ERROR: {error_msg}"
+    
+    async def craft_conversation_prompt(self, conversation_history: str, agent_node: Dict[str, Any], project_id: Optional[str] = None) -> str:
+        """
+        Craft conversation prompt for an agent including full conversation history
+        Enhanced with DocAware RAG capabilities
+        """
+        agent_name = agent_node.get('data', {}).get('name', 'Agent')
+        agent_system_message = agent_node.get('data', {}).get('system_message', '')
+        agent_instructions = agent_node.get('data', {}).get('instructions', '')
+        
+        # Build the prompt with conversation context
+        prompt_parts = []
+        
+        # Add system message if available
+        if agent_system_message:
+            prompt_parts.append(f"System: {agent_system_message}")
+        
+        # Add agent-specific instructions
+        if agent_instructions:
+            prompt_parts.append(f"Instructions for {agent_name}: {agent_instructions}")
+        
+        # 📚 DOCAWARE INTEGRATION: Add document context if enabled (FIXED FOR SINGLE AGENTS)
+        if self.is_docaware_enabled(agent_node) and project_id:
+            try:
+                # Use conversation history as search query for single agents
+                search_query = self.extract_query_from_conversation(conversation_history)
+                
+                if search_query:
+                    logger.info(f"📚 DOCAWARE: Single agent {agent_name} using conversation-based search query")
+                    logger.info(f"📚 DOCAWARE: Query: {search_query[:100]}...")
+                    
+                    document_context = await self.get_docaware_context_from_conversation_query(
+                        agent_node, search_query, project_id, conversation_history
+                    )
+                    
+                    if document_context:
+                        prompt_parts.append("\n=== RELEVANT DOCUMENTS ===")
+                        prompt_parts.append(document_context)
+                        prompt_parts.append("=== END DOCUMENTS ===\n")
+                        logger.info(f"📚 DOCAWARE: Added document context to single agent {agent_name} prompt ({len(document_context)} chars)")
+                else:
+                    logger.warning(f"📚 DOCAWARE: No search query could be extracted from conversation history for {agent_name}")
+                    
+            except Exception as e:
+                logger.error(f"❌ DOCAWARE: Failed to get document context for single agent {agent_name}: {e}")
+                import traceback
+                logger.error(f"❌ DOCAWARE: Traceback: {traceback.format_exc()}")
+        
+        # Add conversation history
+        if conversation_history.strip():
+            prompt_parts.append("Conversation History:")
+            prompt_parts.append(conversation_history)
+        
+        # Add agent prompt
+        prompt_parts.append(f"\n{agent_name}, please provide your response:")
+        
+        return "\n".join(prompt_parts)
+    
+    async def craft_conversation_prompt_with_docaware(self, aggregated_context: Dict[str, Any], agent_node: Dict[str, Any], project_id: Optional[str] = None, conversation_history: str = "") -> str:
+        """
+        Enhanced conversation prompt crafting with DocAware using aggregated input as search query
+        
+        Args:
+            aggregated_context: Output from aggregate_multiple_inputs containing all agent inputs
+            agent_node: Agent node configuration
+            project_id: Project ID for DocAware search
+            conversation_history: Traditional conversation history (fallback)
+        
+        Returns:
+            Enhanced prompt with document context from aggregated input search
+        """
+        agent_name = agent_node.get('data', {}).get('name', 'Agent')
+        agent_system_message = agent_node.get('data', {}).get('system_message', '')
+        agent_instructions = agent_node.get('data', {}).get('instructions', '')
+        
+        # Build the prompt with conversation context
+        prompt_parts = []
+        
+        # Add system message if available
+        if agent_system_message:
+            prompt_parts.append(f"System: {agent_system_message}")
+        
+        # Add agent-specific instructions
+        if agent_instructions:
+            prompt_parts.append(f"Instructions for {agent_name}: {agent_instructions}")
+        
+        # 📚 ENHANCED DOCAWARE INTEGRATION: Use aggregated input as search query
+        if self.is_docaware_enabled(agent_node) and project_id:
+            try:
+                # Use aggregated input as search query instead of conversation history
+                search_query = self.extract_search_query_from_aggregated_input(aggregated_context)
+                
+                if search_query:
+                    logger.info(f"📚 DOCAWARE: Using aggregated input as search query for {agent_name}")
+                    logger.info(f"📚 DOCAWARE: Search query: {search_query[:100]}...")
+                    
+                    document_context = await self.get_docaware_context_from_query(
+                        agent_node, search_query, project_id, aggregated_context
+                    )
+                    
+                    if document_context:
+                        prompt_parts.append("\n=== RELEVANT DOCUMENTS ===")
+                        prompt_parts.append(document_context)
+                        prompt_parts.append("=== END DOCUMENTS ===\n")
+                        logger.info(f"📚 DOCAWARE: Added document context to {agent_name} prompt ({len(document_context)} chars)")
+                else:
+                    logger.warning(f"📚 DOCAWARE: No search query could be extracted from aggregated input for {agent_name}")
+                    
+            except Exception as e:
+                logger.error(f"❌ DOCAWARE: Failed to get document context for {agent_name}: {e}")
+                import traceback
+                logger.error(f"❌ DOCAWARE: Traceback: {traceback.format_exc()}")
+        
+        # Add aggregated input context
+        if aggregated_context['input_count'] > 0:
+            formatted_context = self.format_multiple_inputs_prompt(aggregated_context)
+            prompt_parts.append("=== INPUT FROM CONNECTED AGENTS ===")
+            prompt_parts.append(formatted_context)
+            prompt_parts.append("=== END INPUT ===")
+        
+        # Add conversation history if available (for context)
+        if conversation_history.strip():
+            prompt_parts.append("\n=== CONVERSATION HISTORY ===")
+            prompt_parts.append(conversation_history)
+            prompt_parts.append("=== END HISTORY ===")
+        
+        # Add agent prompt
+        prompt_parts.append(f"\n{agent_name}, please analyze the inputs and provide your response:")
+        
+        return "\n".join(prompt_parts)
+    
+    async def execute_group_chat_manager(self, chat_manager_node: Dict[str, Any], llm_provider, conversation_history: str, execution_sequence: List[Dict[str, Any]], graph_json: Dict[str, Any]) -> str:
+        """
+        Execute GroupChatManager with delegate processing using enhanced logic
+        """
+        manager_name = chat_manager_node.get('data', {}).get('name', 'Chat Manager')
+        manager_data = chat_manager_node.get('data', {})
+        chat_manager_id = chat_manager_node.get('id')
+        
+        logger.info(f"👥 GROUP CHAT MANAGER: Starting enhanced execution for {manager_name}")
+        
+        # Find all delegate agents connected to this GroupChatManager by checking graph edges
+        delegate_nodes = []
+        edges = graph_json.get('edges', [])
+        
+        # Find all nodes that have incoming edges from this GroupChatManager
+        connected_delegate_ids = set()
+        for edge in edges:
+            if edge.get('source') == chat_manager_id:
+                target_id = edge.get('target')
+                # Find the target node in execution sequence
+                for node in execution_sequence:
+                    if node.get('id') == target_id and node.get('type') == 'DelegateAgent':
+                        connected_delegate_ids.add(target_id)
+                        delegate_nodes.append(node)
+                        logger.info(f"🔗 GROUP CHAT MANAGER: Found connected delegate: {node.get('data', {}).get('name', target_id)}")
+        
+        # Also check for edges going TO the GroupChatManager from delegates (bidirectional)
+        for edge in edges:
+            if edge.get('target') == chat_manager_id:
+                source_id = edge.get('source')
+                # Find the source node in execution sequence
+                for node in execution_sequence:
+                    if node.get('id') == source_id and node.get('type') == 'DelegateAgent' and source_id not in connected_delegate_ids:
+                        connected_delegate_ids.add(source_id)
+                        delegate_nodes.append(node)
+                        logger.info(f"🔗 GROUP CHAT MANAGER: Found bidirectionally connected delegate: {node.get('data', {}).get('name', source_id)}")
+        
+        logger.info(f"🤝 GROUP CHAT MANAGER: Found {len(delegate_nodes)} connected delegate agents")
+        
+        # CRITICAL FIX: If no delegates found, return error instead of fake response
+        if not delegate_nodes:
+            error_message = f"GroupChatManager {manager_name} has no connected delegate agents. Please connect DelegateAgent nodes to this GroupChatManager via edges in the workflow graph."
+            logger.error(f"❌ GROUP CHAT MANAGER: {error_message}")
+            raise Exception(error_message)
+        
+        # Get configuration
+        max_rounds = manager_data.get('max_rounds', 10)
+        
+        # Debug configuration values
+        logger.info(f"🔧 GROUP CHAT MANAGER: Configuration - max_rounds: {max_rounds}")
+        
+        # Ensure max_rounds is at least 1
+        if max_rounds <= 0:
+            logger.warning(f"⚠️ GROUP CHAT MANAGER: max_rounds was {max_rounds}, setting to 1")
+            max_rounds = 1
+        termination_strategy = manager_data.get('termination_strategy', 'all_delegates_complete')
+        
+        # Initialize delegate tracking
+        delegate_status = {}
+        for delegate in delegate_nodes:
+            delegate_name = delegate.get('data', {}).get('name', 'Delegate')
+            delegate_status[delegate_name] = {
+                'iterations': 0,
+                'max_iterations': delegate.get('data', {}).get('number_of_iterations', 5),
+                'termination_condition': delegate.get('data', {}).get('termination_condition', ''),  # NO DEFAULT - must come from UI
+                'completed': False,
+                'node': delegate
+            }
+        
+        # Process delegates based on strategy
+        conversation_log = []
+        total_iterations = 0
+        
+        # Debug delegate status before execution
+        logger.info(f"📊 GROUP CHAT MANAGER: Delegate status before execution: {delegate_status}")
+        logger.info(f"📊 GROUP CHAT MANAGER: About to enter execution loop with max_rounds: {max_rounds}")
+        
+        # Execute all delegates at least once regardless of strategy
+        logger.info(f"🔄 GROUP CHAT MANAGER: Starting execution loop with {len(delegate_nodes)} delegates")
+        
+        for round_num in range(max_rounds):
+            logger.info(f"🔄 GROUP CHAT MANAGER: Round {round_num + 1}/{max_rounds}")
+            
+            # Track if any delegates were processed this round
+            delegates_processed_this_round = 0
+            
+            for delegate_name, status in list(delegate_status.items()):
+                logger.info(f"🔄 GROUP CHAT MANAGER: Checking delegate {delegate_name}, completed: {status['completed']}, iterations: {status['iterations']}/{status['max_iterations']}")
+                
+                # Only skip if both completed AND has run at least once
+                if status['completed'] and status['iterations'] > 0:
+                    logger.info(f"🔄 GROUP CHAT MANAGER: Skipping completed delegate {delegate_name}")
+                    continue
+                
+                logger.info(f"🔄 GROUP CHAT MANAGER: About to execute delegate {delegate_name}")
+                delegates_processed_this_round += 1
+                
+                # Execute delegate conversation
+                try:
+                    logger.info(f"📊 GROUP CHAT MANAGER: Calling execute_delegate_conversation for {delegate_name}")
+                    delegate_response = await self.execute_delegate_conversation(
+                        status['node'], 
+                        llm_provider, 
+                        conversation_history, 
+                        conversation_log,
+                        status
+                    )
+                    logger.info(f"✅ GROUP CHAT MANAGER: Successfully executed delegate {delegate_name} - response length: {len(delegate_response)} chars")
+                    
+                    # Ensure we have a valid response
+                    if not delegate_response or len(delegate_response.strip()) == 0:
+                        logger.warning(f"⚠️ GROUP CHAT MANAGER: {delegate_name} returned empty response, creating default")
+                        delegate_response = f"I am {delegate_name} and I have processed the request. No specific output generated."
+                        
+                except Exception as delegate_exec_error:
+                    logger.error(f"❌ GROUP CHAT MANAGER: Failed to execute delegate {delegate_name}: {delegate_exec_error}")
+                    import traceback
+                    logger.error(f"❌ GROUP CHAT MANAGER: Full traceback: {traceback.format_exc()}")
+                    delegate_response = f"ERROR: Delegate execution failed: {delegate_exec_error}"
+                
+                # Always add response to conversation log
+                conversation_log.append(f"[Round {round_num + 1}] {delegate_name}: {delegate_response}")
+                
+                # Check if delegate response is an error
+                if delegate_response.startswith("ERROR:"):
+                    logger.error(f"❌ GROUP CHAT MANAGER: {delegate_name} failed: {delegate_response}")
+                    status['completed'] = True
+                else:
+                    logger.info(f"✅ GROUP CHAT MANAGER: {delegate_name} response added to conversation log")
+                
+                # Update iteration count
+                status['iterations'] += 1
+                total_iterations += 1
+                logger.info(f"📊 GROUP CHAT MANAGER: {delegate_name} iteration count: {status['iterations']}/{status['max_iterations']}")
+                
+                # Check termination conditions - ONLY terminate if:
+                # 1. Explicit termination condition is set AND appears at end of response, OR
+                # 2. Maximum iterations reached
+                termination_met = False
+                
+                # Check for explicit termination condition (only if one is set)
+                if status['termination_condition'] and status['termination_condition'].strip():
+                    # Only check at the END of the response to avoid false positives
+                    if delegate_response.strip().endswith(status['termination_condition']):
+                        termination_met = True
+                        logger.info(f"✅ GROUP CHAT MANAGER: Delegate {delegate_name} used explicit termination: '{status['termination_condition']}'")
+                
+                # Check for max iterations reached
+                if status['iterations'] >= status['max_iterations']:
+                    termination_met = True
+                    logger.info(f"✅ GROUP CHAT MANAGER: Delegate {delegate_name} reached max iterations: {status['iterations']}/{status['max_iterations']}")
+                
+                if termination_met:
+                    status['completed'] = True
+                    logger.info(f"✅ GROUP CHAT MANAGER: Delegate {delegate_name} completed")
+                else:
+                    logger.info(f"🔄 GROUP CHAT MANAGER: Delegate {delegate_name} continuing ({status['iterations']}/{status['max_iterations']})")
+                
+                # Check global termination strategy after each delegate
+                try:
+                    if self.check_termination_strategy(delegate_status, termination_strategy):
+                        logger.info(f"🏁 GROUP CHAT MANAGER: Termination strategy '{termination_strategy}' triggered after {delegate_name}")
+                        break
+                except Exception as term_error:
+                    logger.error(f"❌ GROUP CHAT MANAGER: Termination strategy check failed: {term_error}")
+                    # Continue execution despite termination check failure
+            
+            logger.info(f"📊 GROUP CHAT MANAGER: Round {round_num + 1} completed - processed {delegates_processed_this_round} delegates")
+            
+            # If no delegates were processed this round, check if all are truly complete
+            if delegates_processed_this_round == 0:
+                all_completed = all(status['completed'] and status['iterations'] > 0 for status in delegate_status.values())
+                if all_completed:
+                    logger.info(f"✅ GROUP CHAT MANAGER: All delegates completed, ending execution")
+                    break
+                else:
+                    logger.warning(f"⚠️ GROUP CHAT MANAGER: No delegates processed in round {round_num + 1} but not all complete - continuing")
+            
+            # Check global termination after processing all delegates in this round
+            try:
+                if self.check_termination_strategy(delegate_status, termination_strategy):
+                    logger.info(f"🏁 GROUP CHAT MANAGER: Global termination after round {round_num + 1}")
+                    break
+            except Exception as term_error:
+                logger.error(f"❌ GROUP CHAT MANAGER: Final termination check failed: {term_error}")
+                break  # Exit to prevent infinite loop
+        
+        logger.info(f"📊 GROUP CHAT MANAGER: Execution loop completed after {max_rounds} rounds or early termination")
+        
+        # CRITICAL FIX: Ensure we actually have delegate conversations before generating summary
+        if not conversation_log:
+            error_message = f"GroupChatManager {manager_name} completed execution but no delegate conversations were generated. Check delegate configurations and API keys."
+            logger.error(f"❌ GROUP CHAT MANAGER: {error_message}")
+            logger.error(f"❌ GROUP CHAT MANAGER: Debug info - Delegate status: {delegate_status}")
+            logger.error(f"❌ GROUP CHAT MANAGER: Debug info - Total iterations: {total_iterations}")
+            logger.error(f"❌ GROUP CHAT MANAGER: Debug info - Max rounds: {max_rounds}")
+            logger.error(f"❌ GROUP CHAT MANAGER: Debug info - Number of delegate nodes: {len(delegate_nodes)}")
+            
+            # Try to get more debug info about why delegates didn't execute
+            for delegate_name, status in delegate_status.items():
+                node_data = status['node'].get('data', {})
+                logger.error(f"❌ GROUP CHAT MANAGER: Delegate {delegate_name} config: provider={node_data.get('llm_provider', 'unknown')}, model={node_data.get('llm_model', 'unknown')}")
+            
+            raise Exception(error_message)
+        
+        # Generate final response from GroupChatManager
+        final_prompt = f"""
+        You are the Group Chat Manager named {manager_name}.
+        
+        Original Conversation History:
+        {conversation_history}
+        
+        Delegate Conversation Log:
+        {"; ".join(conversation_log)}
+        
+        Based on the delegate conversations and original context, provide a comprehensive summary and final output.
+        Focus on synthesizing the delegate insights into actionable conclusions.
+        """
+        
+        final_response = await llm_provider.generate_response(
+            prompt=final_prompt,
+            temperature=manager_data.get('temperature', 0.5)
+        )
+        
+        if final_response.error:
+            raise Exception(f"GroupChatManager final response error: {final_response.error}")
+        
+        final_output = f"""GroupChatManager Summary (processed {total_iterations} delegate iterations):
+        
+        {final_response.text.strip()}
+        
+        Delegate Processing Summary:
+        {self.generate_delegate_summary(delegate_status)}
+        """
+        
+        logger.info(f"✅ GROUP CHAT MANAGER: Completed execution with {total_iterations} total iterations")
+        return final_output
+    
+    async def execute_delegate_conversation(self, delegate_node: Dict[str, Any], llm_provider, conversation_history: str, conversation_log: List[str], status: Dict[str, Any]) -> str:
+        """
+        Execute a single conversation round with a delegate agent
+        """
+        delegate_name = delegate_node.get('data', {}).get('name', 'Delegate')
+        delegate_data = delegate_node.get('data', {})
+        
+        logger.info(f"🤝 DELEGATE: Starting execution for {delegate_name}")
+        logger.info(f"🤝 DELEGATE: Delegate data keys: {list(delegate_data.keys())}")
+        
+        # Create delegate-specific LLM provider if needed
+        delegate_config = {
+            'llm_provider': delegate_data.get('llm_provider', 'openai'),  # Changed default to openai
+            'llm_model': delegate_data.get('llm_model', 'gpt-4'),  # Use gpt-4 by default
+            'temperature': delegate_data.get('temperature', 0.4),
+            'max_tokens': delegate_data.get('max_tokens', 1024)
+        }
+        
+        logger.info(f"🔧 DELEGATE: Config for {delegate_name}: {delegate_config}")
+        
+        # Try to create delegate-specific LLM provider
+        delegate_llm = None
+        try:
+            logger.info(f"🔧 DELEGATE: Attempting to create LLM provider for {delegate_name}")
+            delegate_llm = self.get_llm_provider(delegate_config)
+            if delegate_llm:
+                logger.info(f"✅ DELEGATE: Successfully created LLM provider for {delegate_name}")
+            else:
+                logger.warning(f"⚠️ DELEGATE: Failed to create LLM provider for {delegate_name}, trying fallback")
+        except Exception as provider_error:
+            logger.error(f"❌ DELEGATE: Error creating provider for {delegate_name}: {provider_error}")
+        
+        # Fallback to provided LLM provider
+        if not delegate_llm:
+            logger.info(f"🔄 DELEGATE: Using fallback LLM provider for {delegate_name}")
+            delegate_llm = llm_provider
+            
+        if not delegate_llm:
+            error_msg = f"No LLM provider available for delegate {delegate_name}"
+            logger.error(f"❌ DELEGATE: {error_msg}")
+            return f"ERROR: {error_msg}"
+        
+        # Craft delegate prompt
+        delegate_prompt = f"""
+        You are {delegate_name}, a specialized delegate agent.
+        
+        System Message: {delegate_data.get('system_message', 'You are a helpful specialized agent.')}
+        
+        Original Task Context:
+        {conversation_history}
+        
+        Previous Delegate Conversations:
+        {"; ".join(conversation_log[-3:]) if conversation_log else "None"}
+        
+        Current Iteration: {status['iterations'] + 1}/{status['max_iterations']}
+        
+        Instructions:
+        - Provide specialized analysis or assistance based on your role
+        - Be specific and actionable in your response
+        - If you have completed your analysis and want to terminate early, end your response with "{status['termination_condition']}"
+        - Consider the previous delegate conversations to avoid duplication
+        
+        Your response:
+        """
+        
+        logger.info(f"🤝 DELEGATE: Executing {delegate_name} iteration {status['iterations'] + 1}")
+        logger.info(f"🤝 DELEGATE: About to call LLM with prompt length: {len(delegate_prompt)} chars")
+        logger.info(f"🤝 DELEGATE: Using provider type: {type(delegate_llm).__name__}")
+        
+        try:
+            logger.info(f"🤝 DELEGATE: About to call generate_response for {delegate_name}")
+            
+            # Add debugging for the actual API call
+            logger.info(f"🤝 DELEGATE: API Key available: {bool(delegate_llm)}")
+            
+            delegate_response = await delegate_llm.generate_response(
+                prompt=delegate_prompt,
+                temperature=delegate_config.get('temperature', 0.4)
+            )
+            logger.info(f"🤝 DELEGATE: LLM call completed for {delegate_name}")
+            logger.info(f"🤝 DELEGATE: Response type: {type(delegate_response)}")
+            
+            # Enhanced error checking
+            if hasattr(delegate_response, 'error') and delegate_response.error:
+                error_msg = f"Delegate {delegate_name} encountered an error: {delegate_response.error}"
+                logger.error(f"❌ DELEGATE: {error_msg}")
+                return f"ERROR: {error_msg}"
+            
+            # Check for text attribute
+            if not hasattr(delegate_response, 'text'):
+                error_msg = f"Delegate {delegate_name} response missing 'text' attribute. Response type: {type(delegate_response)}"
+                logger.error(f"❌ DELEGATE: {error_msg}")
+                return f"ERROR: {error_msg}"
+            
+            if not delegate_response.text:
+                error_msg = f"Delegate {delegate_name} received empty response from LLM"
+                logger.error(f"❌ DELEGATE: {error_msg}")
+                return f"ERROR: {error_msg}"
+            
+            response_text = delegate_response.text.strip()
+            logger.info(f"✅ DELEGATE: {delegate_name} generated response ({len(response_text)} chars)")
+            
+            # Log a preview of the response for debugging
+            preview = response_text[:100] + "..." if len(response_text) > 100 else response_text
+            logger.info(f"📝 DELEGATE: {delegate_name} response preview: {preview}")
+            
+            return response_text
+            
+        except Exception as e:
+            error_msg = f"Delegate {delegate_name} execution failed: {str(e)}"
+            logger.error(f"❌ DELEGATE: {error_msg}")
+            logger.error(f"❌ DELEGATE: Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"❌ DELEGATE: Traceback: {traceback.format_exc()}")
+            return f"ERROR: {error_msg}"
+    
+    def check_termination_strategy(self, delegate_status: Dict[str, Dict], strategy: str) -> bool:
+        """
+        Check if the termination strategy condition is met
+        """
+        completed_count = sum(1 for status in delegate_status.values() if status['completed'])
+        total_delegates = len(delegate_status)
+        
+        if strategy == 'all_delegates_complete':
+            return completed_count == total_delegates
+        elif strategy == 'any_delegate_complete':
+            return completed_count > 0
+        elif strategy == 'max_iterations_reached':
+            return all(status['iterations'] >= status['max_iterations'] for status in delegate_status.values())
+        
+        return False
+    
+    def generate_delegate_summary(self, delegate_status: Dict[str, Dict]) -> str:
+        """
+        Generate a summary of delegate processing results
+        """
+        summary_parts = []
+        for delegate_name, status in delegate_status.items():
+            completion_status = "✅ Completed" if status['completed'] else "⏳ Incomplete"
+            summary_parts.append(f"- {delegate_name}: {status['iterations']}/{status['max_iterations']} iterations ({completion_status})")
+        
+        return "\n".join(summary_parts)
+    
+    def is_docaware_enabled(self, agent_node: Dict[str, Any]) -> bool:
+        """
+        Check if DocAware is enabled for this agent
+        """
+        agent_data = agent_node.get('data', {})
+        return agent_data.get('doc_aware', False) and agent_data.get('search_method')
+    
+    async def get_docaware_context_from_conversation_query(self, agent_node: Dict[str, Any], search_query: str, project_id: str, conversation_history: str) -> str:
+        """
+        Retrieve document context using conversation-based search query for single agents
+        
+        Args:
+            agent_node: Agent configuration
+            search_query: Search query extracted from conversation
+            project_id: Project ID for document search
+            conversation_history: Full conversation history for context
+            
+        Returns:
+            Formatted document context string
+        """
+        agent_data = agent_node.get('data', {})
+        search_method = agent_data.get('search_method', 'semantic_search')
+        search_parameters = agent_data.get('search_parameters', {})
+        
+        logger.info(f"📚 DOCAWARE: Single agent searching with method {search_method}")
+        logger.info(f"📚 DOCAWARE: Query: {search_query[:100]}...")
+        
+        try:
+            # Initialize DocAware service for this project using sync_to_async
+            def create_docaware_service():
+                return EnhancedDocAwareAgentService(project_id)
+            
+            docaware_service = await sync_to_async(create_docaware_service)()
+            
+            # Extract conversation context for contextual search methods
+            conversation_context = self.extract_conversation_context(conversation_history)
+            
+            # Perform document search with the conversation-based query using sync_to_async
+            def perform_search():
+                return docaware_service.search_documents(
+                    query=search_query,
+                    search_method=SearchMethod(search_method),
+                    method_parameters=search_parameters,
+                    conversation_context=conversation_context
+                )
+            
+            search_results = await sync_to_async(perform_search)()
+            
+            if not search_results:
+                logger.info(f"📚 DOCAWARE: No relevant documents found for single agent query")
+                return ""
+            
+            # Format results for prompt inclusion
+            context_parts = []
+            context_parts.append(f"Found {len(search_results)} relevant documents based on conversation context:\n")
+            
+            for i, result in enumerate(search_results[:5], 1):  # Limit to top 5 results
+                content = result['content']
+                metadata = result['metadata']
+                
+                # Truncate content for prompt efficiency
+                if len(content) > 400:
+                    content = content[:400] + f"... [content truncated]"
+                
+                context_parts.append(f"📄 Document {i} (Relevance: {metadata.get('score', 0):.3f}):")
+                context_parts.append(f"   Source: {metadata.get('source', 'Unknown')}")
+                
+                if metadata.get('page'):
+                    context_parts.append(f"   Page: {metadata['page']}")
+                    
+                context_parts.append(f"   Content: {content}")
+                context_parts.append("")  # Empty line separator
+            
+            # Add search metadata
+            context_parts.append(f"Search performed using: {search_method}")
+            context_parts.append(f"Query derived from conversation history")
+            
+            result_text = "\n".join(context_parts)
+            logger.info(f"📚 DOCAWARE: Generated context from {len(search_results)} results ({len(result_text)} chars)")
+            
+            return result_text
+            
+        except Exception as e:
+            logger.error(f"❌ DOCAWARE: Error retrieving document context from conversation query: {e}")
+            import traceback
+            logger.error(f"❌ DOCAWARE: Traceback: {traceback.format_exc()}")
+            return f"⚠️ Document search failed: {str(e)}"
+    
+    def get_docaware_context(self, agent_node: Dict[str, Any], conversation_history: str, project_id: str) -> str:
+        """
+        Retrieve document context using DocAware service
+        """
+        agent_data = agent_node.get('data', {})
+        search_method = agent_data.get('search_method', 'semantic_search')
+        search_parameters = agent_data.get('search_parameters', {})
+        
+        logger.info(f"📚 DOCAWARE: Getting context for agent with method {search_method}")
+        
+        try:
+            # Initialize DocAware service for this project
+            docaware_service = EnhancedDocAwareAgentService(project_id)
+            
+            # Extract query from recent conversation history
+            query = self.extract_query_from_conversation(conversation_history)
+            
+            if not query:
+                logger.warning(f"📚 DOCAWARE: No query could be extracted from conversation history")
+                return ""
+            
+            # Get conversation context for contextual search
+            conversation_context = self.extract_conversation_context(conversation_history)
+            
+            # Perform document search
+            search_results = docaware_service.search_documents(
+                query=query,
+                search_method=SearchMethod(search_method),
+                method_parameters=search_parameters,
+                conversation_context=conversation_context
+            )
+            
+            if not search_results:
+                logger.info(f"📚 DOCAWARE: No relevant documents found for query: {query[:50]}...")
+                return ""
+            
+            # Format results for prompt
+            context_parts = []
+            context_parts.append(f"Found {len(search_results)} relevant documents for your query:\n")
+            
+            for i, result in enumerate(search_results[:5], 1):  # Limit to top 5 results
+                content = result['content'][:500] + "..." if len(result['content']) > 500 else result['content']
+                metadata = result['metadata']
+                
+                context_parts.append(f"Document {i} (Score: {metadata.get('score', 0):.3f}):")
+                context_parts.append(f"Source: {metadata.get('source', 'Unknown')}")
+                if metadata.get('page'):
+                    context_parts.append(f"Page: {metadata['page']}")
+                context_parts.append(f"Content: {content}")
+                context_parts.append("")  # Empty line separator
+            
+            result_text = "\n".join(context_parts)
+            logger.info(f"📚 DOCAWARE: Generated context with {len(search_results)} results ({len(result_text)} chars)")
+            
+            return result_text
+            
+        except Exception as e:
+            logger.error(f"❌ DOCAWARE: Error retrieving document context: {e}")
+            return ""
+    
+    def extract_query_from_conversation(self, conversation_history: str, max_length: int = 200) -> str:
+        """
+        Extract a search query from the conversation history
+        """
+        logger.info(f"📚 DOCAWARE QUERY EXTRACTION: Starting with conversation: '{conversation_history[:200]}...'")
+        
+        if not conversation_history.strip():
+            logger.warning(f"📚 DOCAWARE QUERY EXTRACTION: Empty conversation history")
+            return ""
+        
+        # Split conversation into turns
+        lines = conversation_history.strip().split('\n')
+        logger.info(f"📚 DOCAWARE QUERY EXTRACTION: Split into {len(lines)} lines: {lines}")
+        
+        # Get the last few meaningful lines (skip empty lines)
+        recent_lines = [line.strip() for line in lines[-5:] if line.strip()]
+        logger.info(f"📚 DOCAWARE QUERY EXTRACTION: Recent lines: {recent_lines}")
+        
+        if not recent_lines:
+            logger.warning(f"📚 DOCAWARE QUERY EXTRACTION: No recent meaningful lines found")
+            return ""
+        
+        # Use the last user message or a combination of recent context
+        query_text = " ".join(recent_lines)
+        logger.info(f"📚 DOCAWARE QUERY EXTRACTION: Combined query text: '{query_text}'")
+        
+        # Truncate if too long
+        if len(query_text) > max_length:
+            query_text = query_text[:max_length].rsplit(' ', 1)[0] + "..."
+            logger.info(f"📚 DOCAWARE QUERY EXTRACTION: Truncated to: '{query_text}'")
+        
+        # Check for forbidden patterns
+        rejected_queries = ['test query', 'test query for document search', 'sample query', 'example query']
+        if query_text.lower().strip() in rejected_queries:
+            logger.error(f"📚 DOCAWARE QUERY EXTRACTION: DETECTED FORBIDDEN QUERY: '{query_text}' - This should not happen!")
+            logger.error(f"📚 DOCAWARE QUERY EXTRACTION: Original conversation history was: '{conversation_history}'")
+            # Return empty to prevent the forbidden query from being used
+            return ""
+        
+        logger.info(f"📚 DOCAWARE QUERY EXTRACTION: Final extracted query: '{query_text[:100]}...'")
+        return query_text
+    
+    def extract_conversation_context(self, conversation_history: str, max_turns: int = 3) -> List[str]:
+        """
+        Extract conversation context for contextual search
+        """
+        if not conversation_history.strip():
+            return []
+        
+        # Split into turns and get recent ones
+        lines = conversation_history.strip().split('\n')
+        meaningful_lines = [line.strip() for line in lines if line.strip()]
+        
+        # Take last few turns
+        recent_context = meaningful_lines[-max_turns:] if meaningful_lines else []
+        
+        logger.debug(f"📚 DOCAWARE: Extracted context with {len(recent_context)} turns")
+        return recent_context
+    
+    def extract_search_query_from_aggregated_input(self, aggregated_context: Dict[str, Any]) -> str:
+        """
+        Extract search query from aggregated input context (all connected agent outputs)
+        
+        Args:
+            aggregated_context: Output from aggregate_multiple_inputs
+            
+        Returns:
+            Search query string extracted from aggregated inputs
+        """
+        logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Starting with {aggregated_context['input_count']} inputs")
+        logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Primary input: '{str(aggregated_context.get('primary_input', ''))[:200]}...'")
+        logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Secondary inputs count: {len(aggregated_context.get('secondary_inputs', []))}")
+        
+        # Combine all input content for search query
+        query_parts = []
+        
+        # Add primary input
+        if aggregated_context['primary_input']:
+            primary_input = str(aggregated_context['primary_input'])
+            query_parts.append(primary_input)
+            logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Added primary input: '{primary_input[:100]}...'")
+        
+        # Add secondary inputs
+        for i, secondary in enumerate(aggregated_context['secondary_inputs']):
+            if secondary.get('content'):
+                secondary_content = str(secondary['content'])
+                query_parts.append(secondary_content)
+                logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Added secondary input {i+1}: '{secondary_content[:100]}...'")
+        
+        # Combine and clean up
+        combined_query = " ".join(query_parts).strip()
+        logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Combined query before processing: '{combined_query[:200]}...'")
+        
+        if not combined_query:
+            logger.warning(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Empty combined query")
+            return ""
+        
+        # Limit query length for search efficiency
+        max_query_length = 500
+        if len(combined_query) > max_query_length:
+            # Try to break at sentence boundary
+            truncated = combined_query[:max_query_length]
+            last_sentence_end = max(truncated.rfind('.'), truncated.rfind('!'), truncated.rfind('?'))
+            
+            if last_sentence_end > max_query_length * 0.7:  # If we can get at least 70% with complete sentences
+                combined_query = truncated[:last_sentence_end + 1]
+            else:
+                # Break at word boundary
+                combined_query = truncated.rsplit(' ', 1)[0] + "..."
+            logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Truncated to: '{combined_query}'")
+        
+        # Check for forbidden patterns
+        rejected_queries = ['test query', 'test query for document search', 'sample query', 'example query']
+        if combined_query.lower().strip() in rejected_queries:
+            logger.error(f"📚 AGGREGATED INPUT QUERY EXTRACTION: DETECTED FORBIDDEN QUERY: '{combined_query}' - This should not happen!")
+            logger.error(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Original aggregated context was: {aggregated_context}")
+            # Return empty to prevent the forbidden query from being used
+            return ""
+        
+        logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Final extracted query: '{combined_query[:100]}...'")
+        
+        return combined_query
+    
+    async def get_docaware_context_from_query(self, agent_node: Dict[str, Any], search_query: str, project_id: str, aggregated_context: Dict[str, Any]) -> str:
+        """
+        Retrieve document context using a specific search query (from aggregated input)
+        
+        Args:
+            agent_node: Agent configuration
+            search_query: Search query extracted from aggregated inputs
+            project_id: Project ID for document search
+            aggregated_context: Full aggregated context for metadata
+            
+        Returns:
+            Formatted document context string
+        """
+        agent_data = agent_node.get('data', {})
+        search_method = agent_data.get('search_method', 'semantic_search')
+        search_parameters = agent_data.get('search_parameters', {})
+        
+        logger.info(f"📚 DOCAWARE: Searching documents with method {search_method}")
+        logger.info(f"📚 DOCAWARE: Query: {search_query[:100]}...")
+        
+        try:
+            # Initialize DocAware service for this project using sync_to_async
+            def create_docaware_service():
+                return EnhancedDocAwareAgentService(project_id)
+            
+            docaware_service = await sync_to_async(create_docaware_service)()
+            
+            # Extract conversation context from aggregated input for contextual search methods
+            conversation_context = self.extract_conversation_context_from_aggregated_input(aggregated_context)
+            
+            # Perform document search with the aggregated input query using sync_to_async
+            def perform_search():
+                return docaware_service.search_documents(
+                    query=search_query,
+                    search_method=SearchMethod(search_method),
+                    method_parameters=search_parameters,
+                    conversation_context=conversation_context
+                )
+            
+            search_results = await sync_to_async(perform_search)()
+            
+            if not search_results:
+                logger.info(f"📚 DOCAWARE: No relevant documents found for aggregated input query")
+                return ""
+            
+            # Format results for prompt inclusion
+            context_parts = []
+            context_parts.append(f"Found {len(search_results)} relevant documents based on connected agent inputs:\n")
+            
+            for i, result in enumerate(search_results[:5], 1):  # Limit to top 5 results
+                content = result['content']
+                metadata = result['metadata']
+                
+                # Truncate content for prompt efficiency
+                if len(content) > 400:
+                    content = content[:400] + f"... [content truncated]"
+                
+                context_parts.append(f"📄 Document {i} (Relevance: {metadata.get('score', 0):.3f}):")
+                context_parts.append(f"   Source: {metadata.get('source', 'Unknown')}")
+                
+                if metadata.get('page'):
+                    context_parts.append(f"   Page: {metadata['page']}")
+                    
+                context_parts.append(f"   Content: {content}")
+                context_parts.append("")  # Empty line separator
+            
+            # Add search metadata
+            context_parts.append(f"Search performed using: {search_method}")
+            context_parts.append(f"Query derived from {aggregated_context['input_count']} connected agent outputs")
+            
+            result_text = "\n".join(context_parts)
+            logger.info(f"📚 DOCAWARE: Generated context from {len(search_results)} results ({len(result_text)} chars)")
+            
+            return result_text
+            
+        except Exception as e:
+            logger.error(f"❌ DOCAWARE: Error retrieving document context from aggregated input: {e}")
+            import traceback
+            logger.error(f"❌ DOCAWARE: Traceback: {traceback.format_exc()}")
+            return f"⚠️ Document search failed: {str(e)}"
+    
+    def extract_conversation_context_from_aggregated_input(self, aggregated_context: Dict[str, Any]) -> List[str]:
+        """
+        Extract conversation context from aggregated input for contextual search methods
+        
+        Args:
+            aggregated_context: Output from aggregate_multiple_inputs
+            
+        Returns:
+            List of conversation context strings
+        """
+        context_list = []
+        
+        # Add primary input as context
+        if aggregated_context['primary_input']:
+            context_list.append(str(aggregated_context['primary_input']))
+        
+        # Add secondary inputs as context
+        for secondary in aggregated_context['secondary_inputs']:
+            if secondary.get('content'):
+                context_list.append(f"{secondary['name']}: {secondary['content']}")
+        
+        logger.debug(f"📚 DOCAWARE: Extracted {len(context_list)} context items from aggregated input")
+        return context_list
+    
+    # ============================================================================
+    # PHASE 2: HUMAN INPUT PAUSE/RESUME LOGIC
+    # ============================================================================
+    
+    async def pause_for_human_input(self, workflow, node, executed_nodes, conversation_history, execution_record):
+        """
+        Pause workflow execution and prepare human input interface data
+        
+        This is called when a UserProxyAgent with require_human_input=True is encountered
+        """
+        node_id = node.get('id')
+        node_name = node.get('data', {}).get('name', 'User Proxy')
+        node_data = node.get('data', {})
+        
+        logger.info(f"⏸️ HUMAN INPUT: Pausing workflow at {node_name} ({node_id})")
+        
+        # Find input sources (connected agents that feed into this UserProxyAgent)
+        input_sources = self.find_multiple_inputs_to_node(node_id, workflow.graph_json)
+        aggregated_context = self.aggregate_multiple_inputs(input_sources, executed_nodes)
+        
+        logger.info(f"📥 HUMAN INPUT: Found {len(input_sources)} input sources for {node_name}")
+        
+        # Update execution record to paused state
+        await sync_to_async(self.update_execution_for_human_input)(
+            execution_record, node_id, node_name, aggregated_context
+        )
+        
+        return {
+            'status': 'awaiting_human_input',
+            'execution_id': execution_record.execution_id,
+            'agent_name': node_name,
+            'agent_id': node_id,
+            'input_context': aggregated_context,
+            'conversation_history': conversation_history,
+            'message': f'Workflow paused - {node_name} requires human input'
+        }
+    
+    def update_execution_for_human_input(self, execution_record, agent_id, agent_name, context):
+        """
+        Update execution record to indicate human input required (sync function)
+        """
+        execution_record.human_input_required = True
+        execution_record.awaiting_human_input_agent = agent_name
+        execution_record.human_input_agent_id = agent_id
+        execution_record.human_input_context = {
+            'agent_id': agent_id,
+            'input_sources': context['all_inputs'],
+            'input_count': context['input_count'],
+            'primary_input': context['primary_input']
+        }
+        execution_record.human_input_requested_at = timezone.now()
+        execution_record.save()
+        
+        logger.info(f"💾 HUMAN INPUT: Updated execution record {execution_record.execution_id} for human input")
+    
+    async def resume_workflow_with_human_input(self, execution_id: str, human_input: str, user):
+        """
+        Resume paused workflow with human input
+        """
+        logger.info(f"▶️ HUMAN INPUT: Resuming workflow {execution_id} with human input")
+        
+        # Load paused execution
+        execution_record = await sync_to_async(WorkflowExecution.objects.get)(
+            execution_id=execution_id,
+            human_input_required=True
+        )
+        
+        # Record human input interaction
+        await sync_to_async(HumanInputInteraction.objects.create)(
+            execution=execution_record,
+            agent_name=execution_record.awaiting_human_input_agent,
+            agent_id=execution_record.human_input_agent_id,
+            input_messages=execution_record.human_input_context.get('input_sources', []),
+            human_response=human_input,
+            conversation_context=execution_record.conversation_history,
+            requested_at=execution_record.human_input_requested_at,
+            input_sources_count=execution_record.human_input_context.get('input_count', 0),
+            workflow_paused_at_sequence=execution_record.total_messages,
+            aggregated_input_summary=f"{execution_record.human_input_context.get('input_count', 0)} input sources processed"
+        )
+        
+        # Update execution state
+        execution_record.human_input_required = False
+        execution_record.human_input_received_at = timezone.now()
+        await sync_to_async(execution_record.save)()
+        
+        logger.info(f"✅ HUMAN INPUT: Recorded interaction and updated execution state")
+        
+        # Resume workflow execution from where we left off
+        return await self.resume_workflow_execution(execution_record, human_input)
+    
+    async def resume_workflow_execution(self, execution_record, human_input):
+        """
+        Resume workflow execution after human input
+        """
+        logger.info(f"🚀 HUMAN INPUT: Resuming workflow execution for {execution_record.execution_id}")
+        
+        # Get workflow and rebuild execution state
+        workflow = execution_record.workflow
+        
+        # Add human input to conversation history
+        updated_conversation = execution_record.conversation_history + f"\n{execution_record.awaiting_human_input_agent}: {human_input}"
+        
+        # Update the execution record with human input in conversation
+        execution_record.conversation_history = updated_conversation
+        await sync_to_async(execution_record.save)()
+        
+        # Create a message record for the human input
+        await sync_to_async(WorkflowExecutionMessage.objects.create)(
+            execution=execution_record,
+            sequence=execution_record.total_messages,
+            agent_name=execution_record.awaiting_human_input_agent,
+            agent_type='UserProxyAgent',
+            content=human_input,
+            message_type='user_input',
+            timestamp=timezone.now(),
+            response_time_ms=0,
+            metadata={'human_input': True}
+        )
+        
+        return {
+            'status': 'success',
+            'message': 'Workflow resumed successfully',
+            'execution_id': execution_record.execution_id,
+            'updated_conversation': updated_conversation
+        }
+    
+    async def execute_workflow(self, workflow: AgentWorkflow, executed_by) -> Dict[str, Any]:
+        """
+        Execute the complete workflow with REAL LLM calls and conversation chaining
+        Returns execution results as dictionary instead of database records
+        """
+        # Get workflow data using sync_to_async to avoid async context issues
+        workflow_id = await sync_to_async(lambda: workflow.workflow_id)()
+        graph_json = await sync_to_async(lambda: workflow.graph_json)()
+        workflow_name = await sync_to_async(lambda: workflow.name)()
+        project_id = await sync_to_async(lambda: workflow.project.project_id)()
+        
+        logger.info(f"🚀 ORCHESTRATOR: Starting REAL workflow execution for {workflow_id}")
+        
+        start_time = timezone.now()
+        execution_id = f"exec_{int(time.time())}"
+        
+        # CRITICAL FIX: Create execution record IMMEDIATELY so it's available for human input pausing
+        execution_record = await sync_to_async(WorkflowExecution.objects.create)(
+            workflow=workflow,
+            execution_id=execution_id,
+            start_time=start_time,
+            status=WorkflowExecutionStatus.RUNNING,
+            executed_by=executed_by,
+            conversation_history="",
+            total_messages=0,
+            total_agents_involved=0,
+            providers_used=[],
+            result_summary=""
+        )
+        logger.info(f"💾 ORCHESTRATOR: Created execution record {execution_id}")
+        
+        try:
+            # Parse workflow into execution sequence
+            execution_sequence = self.parse_workflow_graph(graph_json)
+            
+            if not execution_sequence:
+                raise Exception("No execution sequence could be built from workflow graph")
+            
+            # Initialize conversation tracking
+            conversation_history = ""
+            messages = []
+            agents_involved = set()
+            total_response_time = 0
+            providers_used = []
+            executed_nodes = {}  # Track node outputs for multiple input support
+            
+            # Execute each node in sequence
+            for sequence_number, node in enumerate(execution_sequence):
+                node_type = node.get('type')
+                node_data = node.get('data', {})
+                node_name = node_data.get('name', f'Node_{node.get("id", "unknown")}')
+                node_id = node.get('id')
+                
+                logger.info(f"🎯 ORCHESTRATOR: Executing node {node_name} (type: {node_type})")
+                
+                if node_type == 'StartNode':
+                    # Handle start node
+                    start_prompt = node_data.get('prompt', 'Please begin the conversation.')
+                    conversation_history = f"Start Node: {start_prompt}"
+                    
+                    # 🔍 DEBUG: Log StartNode details
+                    logger.info(f"📝 STARTNODE DEBUG: Raw node_data: {node_data}")
+                    logger.info(f"📝 STARTNODE DEBUG: Extracted prompt: '{start_prompt}'")
+                    logger.info(f"📝 STARTNODE DEBUG: Conversation history set to: '{conversation_history}'")
+                    
+                    # CRITICAL: Validate StartNode prompt is not hardcoded test query
+                    if start_prompt.lower().strip() in ['test query', 'test query for document search', 'sample query', 'example query']:
+                        logger.error(f"❌ STARTNODE ERROR: StartNode contains forbidden hardcoded query: '{start_prompt}'")
+                        logger.error(f"❌ STARTNODE ERROR: This should never happen! Check frontend/workflow definition.")
+                        # Force replace with a valid query to prevent system failure
+                        start_prompt = "Please provide information about the requested topic."
+                        conversation_history = f"Start Node: {start_prompt}"
+                        logger.info(f"🔧 STARTNODE FIX: Replaced with safe prompt: '{start_prompt}'")
+                    
+                    # Store node output for multi-input support
+                    executed_nodes[node_id] = f"Start Node: {start_prompt}"
+                    
+                    # Track start message
+                    messages.append({
+                        'sequence': sequence_number,
+                        'agent_name': 'Start',
+                        'agent_type': 'StartNode',
+                        'content': start_prompt,
+                        'message_type': 'workflow_start',
+                        'timestamp': timezone.now().isoformat(),
+                        'response_time_ms': 0
+                    })
+                    
+                elif node_type in ['AssistantAgent', 'UserProxyAgent', 'GroupChatManager', 'DelegateAgent']:
+                    # ============================================================================
+                    # PHASE 2: USERPROXYAGENT HUMAN INPUT DETECTION
+                    # ============================================================================
+                    if node_type == 'UserProxyAgent' and node_data.get('require_human_input', True):
+                        logger.info(f"👤 HUMAN INPUT: UserProxyAgent {node_name} requires human input")
+                        
+                        # PAUSE WORKFLOW - NEW IMPLEMENTATION
+                        human_input_data = await self.pause_for_human_input(
+                            workflow, node, executed_nodes, conversation_history, execution_record
+                        )
+                        return human_input_data  # Return paused state
+                    
+                    # Handle agent nodes with real LLM calls
+                    agent_config = {
+                        'llm_provider': node_data.get('llm_provider', 'openai'),
+                        'llm_model': node_data.get('llm_model', 'gpt-3.5-turbo'),
+                        'max_tokens': min(node_data.get('max_tokens', 2048), 4096),  # Cap at 4096 for GPT-4
+                        'temperature': node_data.get('temperature', 0.7)
+                    }
+                    
+                    # Get LLM provider for this agent
+                    llm_provider = self.get_llm_provider(agent_config)
+                    if not llm_provider:
+                        raise Exception(f"Failed to create LLM provider for agent {node_name}")
+                    
+                    # Special handling for GroupChatManager with multiple inputs support
+                    if node_type == 'GroupChatManager':
+                        logger.info(f"👥 ORCHESTRATOR: Executing GroupChatManager {node_name}")
+                        
+                        # Check for multiple inputs to this GroupChatManager
+                        input_sources = self.find_multiple_inputs_to_node(node_id, graph_json)
+                        
+                        try:
+                            if len(input_sources) > 1:
+                                # Use enhanced multi-input version
+                                logger.info(f"📥 ORCHESTRATOR: GroupChatManager {node_name} has {len(input_sources)} input sources - using multi-input mode")
+                                agent_response = await self.execute_group_chat_manager_with_multiple_inputs(
+                                    node, llm_provider, input_sources, executed_nodes, execution_sequence, graph_json, str(project_id)
+                                )
+                            else:
+                                # Use traditional single-input version for backward compatibility
+                                logger.info(f"📥 ORCHESTRATOR: GroupChatManager {node_name} has {len(input_sources)} input source - using single-input mode")
+                                agent_response = await self.execute_group_chat_manager(
+                                    node, llm_provider, conversation_history, execution_sequence, graph_json
+                                )
+                            
+                            logger.info(f"✅ ORCHESTRATOR: GroupChatManager {node_name} completed successfully")
+                        except Exception as gcm_error:
+                            logger.error(f"❌ ORCHESTRATOR: GroupChatManager {node_name} failed: {gcm_error}")
+                            raise gcm_error
+                    elif node_type == 'DelegateAgent':
+                        # Delegate agents are handled by GroupChatManager, skip standalone execution
+                        logger.info(f"🤝 ORCHESTRATOR: Skipping standalone DelegateAgent {node_name} - handled by GroupChatManager")
+                        continue
+                    else:
+                        # Handle regular agents with potential multiple inputs
+                        input_sources = self.find_multiple_inputs_to_node(node_id, graph_json)
+                        
+                        if len(input_sources) > 1:
+                            # Create enhanced prompt with multiple inputs and DocAware integration
+                            aggregated_context = self.aggregate_multiple_inputs(input_sources, executed_nodes)
+                            
+                            # Use enhanced DocAware method that searches with aggregated input
+                            logger.info(f"📥 ORCHESTRATOR: Agent {node_name} processing {len(input_sources)} input sources with DocAware integration")
+                            prompt = await self.craft_conversation_prompt_with_docaware(
+                                aggregated_context, node, str(project_id), conversation_history
+                            )
+                        else:
+                            # Use traditional single-input approach with DocAware enhancement
+                            prompt = await self.craft_conversation_prompt(conversation_history, node, str(project_id))
+                        
+                        logger.info(f"🤖 ORCHESTRATOR: Calling {agent_config['llm_provider']}/{agent_config['llm_model']} for {node_name}")
+                        
+                        # Make REAL LLM call
+                        llm_response: LLMResponse = await llm_provider.generate_response(
+                            prompt=prompt,
+                            temperature=agent_config.get('temperature', 0.7)
+                        )
+                        
+                        if llm_response.error:
+                            raise Exception(f"LLM error for {node_name}: {llm_response.error}")
+                        
+                        agent_response = llm_response.text.strip()
+                    
+                    # Store node output for multi-input support
+                    executed_nodes[node_id] = agent_response
+                    
+                    # Add response to conversation history
+                    conversation_history += f"\n{node_name}: {agent_response}"
+                    
+                    # Track agent message
+                    messages.append({
+                        'sequence': sequence_number,
+                        'agent_name': node_name,
+                        'agent_type': node_type,
+                        'content': agent_response,
+                        'message_type': 'chat',
+                        'timestamp': timezone.now().isoformat(),
+                        'response_time_ms': getattr(llm_response, 'response_time_ms', 0) if 'llm_response' in locals() else 0,
+                        'token_count': getattr(llm_response, 'token_count', None) if 'llm_response' in locals() else None,
+                        'metadata': {
+                            'llm_provider': agent_config['llm_provider'],
+                            'llm_model': agent_config['llm_model'],
+                            'temperature': agent_config['temperature'],
+                            'cost_estimate': getattr(llm_response, 'cost_estimate', None) if 'llm_response' in locals() else None
+                        }
+                    })
+                    
+                    agents_involved.add(node_name)
+                    if 'llm_response' in locals():
+                        total_response_time += llm_response.response_time_ms
+                    
+                    # Track provider usage
+                    if agent_config['llm_provider'] not in providers_used:
+                        providers_used.append(agent_config['llm_provider'])
+                    
+                elif node_type == 'EndNode':
+                    # Handle end node
+                    end_message = node_data.get('message', 'Workflow completed successfully.')
+                    
+                    # Store node output for completeness
+                    executed_nodes[node_id] = end_message
+                    
+                    messages.append({
+                        'sequence': sequence_number,
+                        'agent_name': 'End',
+                        'agent_type': 'EndNode',
+                        'content': end_message,
+                        'message_type': 'workflow_end',
+                        'timestamp': timezone.now().isoformat(),
+                        'response_time_ms': 0
+                    })
+                    
+                else:
+                    logger.warning(f"⚠️ ORCHESTRATOR: Unknown node type {node_type}, skipping")
+            
+            # Calculate execution metrics
+            end_time = timezone.now()
+            duration = (end_time - start_time).total_seconds()
+            
+            # Update workflow execution stats using sync_to_async
+            def update_workflow_stats():
+                workflow.total_executions += 1
+                workflow.successful_executions += 1
+                workflow.last_executed_at = timezone.now()
+                
+                # Update average execution time
+                if workflow.average_execution_time:
+                    workflow.average_execution_time = (
+                        (workflow.average_execution_time * (workflow.total_executions - 1) + duration) 
+                        / workflow.total_executions
+                    )
+                else:
+                    workflow.average_execution_time = duration
+                
+                workflow.save()
+            
+            await sync_to_async(update_workflow_stats)()
+            
+            # ✅ SAVE EXECUTION TO DATABASE
+            execution_record = await sync_to_async(WorkflowExecution.objects.create)(
+                workflow=workflow,
+                execution_id=execution_id,
+                status=WorkflowExecutionStatus.COMPLETED,
+                start_time=start_time,
+                end_time=end_time,
+                duration_seconds=duration,
+                total_messages=len(messages),
+                total_agents_involved=len(agents_involved),
+                average_response_time_ms=total_response_time / len(agents_involved) if agents_involved else 0,
+                providers_used=providers_used,
+                conversation_history=conversation_history,
+                result_summary=f"Successfully executed {len(execution_sequence)} nodes with {len(agents_involved)} agents",
+                executed_by=executed_by
+            )
+            
+            # ✅ SAVE MESSAGES TO DATABASE
+            for message in messages:
+                # Parse timestamp from message
+                from datetime import datetime
+                try:
+                    message_timestamp = datetime.fromisoformat(message['timestamp'].replace('Z', '+00:00'))
+                    if message_timestamp.tzinfo is None:
+                        message_timestamp = timezone.make_aware(message_timestamp)
+                except (KeyError, ValueError):
+                    message_timestamp = timezone.now()
+                
+                await sync_to_async(WorkflowExecutionMessage.objects.create)(
+                    execution=execution_record,
+                    sequence=message['sequence'],
+                    agent_name=message['agent_name'],
+                    agent_type=message['agent_type'],
+                    content=message['content'],
+                    message_type=message['message_type'],
+                    timestamp=message_timestamp,
+                    response_time_ms=message['response_time_ms'],
+                    token_count=message.get('token_count'),
+                    metadata=message.get('metadata', {})
+                )
+            
+            # Return execution results
+            execution_result = {
+                'execution_id': execution_id,
+                'workflow_id': str(workflow_id),
+                'workflow_name': workflow_name,
+                'status': 'completed',
+                'start_time': start_time.isoformat(),
+                'end_time': end_time.isoformat(),
+                'duration_seconds': duration,
+                'total_messages': len(messages),
+                'total_agents_involved': len(agents_involved),
+                'average_response_time_ms': total_response_time / len(agents_involved) if agents_involved else 0,
+                'providers_used': providers_used,
+                'conversation_history': conversation_history,
+                'messages': messages,
+                'result_summary': f"Successfully executed {len(execution_sequence)} nodes with {len(agents_involved)} agents"
+            }
+            
+            logger.info(f"✅ ORCHESTRATOR: REAL workflow execution completed successfully")
+            return execution_result
+            
+        except Exception as e:
+            logger.error(f"❌ ORCHESTRATOR: REAL workflow execution failed: {e}")
+            
+            # Update workflow stats for failed execution using sync_to_async
+            def update_failed_stats():
+                workflow.total_executions += 1
+                workflow.last_executed_at = timezone.now()
+                workflow.save()
+            
+            await sync_to_async(update_failed_stats)()
+            
+            # ⚠️ SAVE FAILED EXECUTION TO DATABASE
+            end_time = timezone.now()
+            duration = (end_time - start_time).total_seconds()
+            
+            await sync_to_async(WorkflowExecution.objects.create)(
+                workflow=workflow,
+                execution_id=execution_id,
+                status=WorkflowExecutionStatus.FAILED,
+                start_time=start_time,
+                end_time=end_time,
+                duration_seconds=duration,
+                total_messages=0,
+                total_agents_involved=0,
+                providers_used=[],
+                conversation_history='',
+                result_summary=f"Execution failed: {str(e)}",
+                error_message=str(e),
+                executed_by=executed_by
+            )
+            
+            # Return error result
+            return {
+                'execution_id': execution_id,
+                'workflow_id': str(workflow_id),
+                'workflow_name': workflow_name,
+                'status': 'failed',
+                'start_time': start_time.isoformat(),
+                'end_time': end_time.isoformat(),
+                'duration_seconds': duration,
+                'total_messages': 0,
+                'total_agents_involved': 0,
+                'average_response_time_ms': 0,
+                'providers_used': [],
+                'conversation_history': '',
+                'messages': [],
+                'error_message': str(e),
+                'result_summary': f"Execution failed: {str(e)}"
+            }
+    
+    def get_workflow_execution_summary(self, workflow: AgentWorkflow) -> Dict[str, Any]:
+        """
+        Get execution summary with recent execution history and messages
+        """
+        # Get recent executions from database
+        recent_executions = WorkflowExecution.objects.filter(
+            workflow=workflow
+        ).order_by('-start_time')[:10]
+        
+        execution_history = []
+        for execution in recent_executions:
+            # Get messages for this execution
+            messages = WorkflowExecutionMessage.objects.filter(
+                execution=execution
+            ).order_by('sequence')
+            
+            execution_data = {
+                'execution_id': execution.execution_id,
+                'status': execution.status,
+                'start_time': execution.start_time.isoformat(),
+                'end_time': execution.end_time.isoformat() if execution.end_time else None,
+                'duration_seconds': execution.duration_seconds,
+                'total_messages': execution.total_messages,
+                'total_agents_involved': execution.total_agents_involved,
+                'providers_used': execution.providers_used,
+                'result_summary': execution.result_summary,
+                'error_message': execution.error_message,
+                'messages': [
+                    {
+                        'sequence': msg.sequence,
+                        'agent_name': msg.agent_name,
+                        'agent_type': msg.agent_type,
+                        'content': msg.content,
+                        'message_type': msg.message_type,
+                        'timestamp': msg.timestamp.isoformat(),
+                        'response_time_ms': msg.response_time_ms,
+                        'token_count': msg.token_count,
+                        'metadata': msg.metadata
+                    } for msg in messages
+                ]
+            }
+            execution_history.append(execution_data)
+        
+        return {
+            'workflow_id': str(workflow.workflow_id),
+            'workflow_name': workflow.name,
+            'total_executions': workflow.total_executions,
+            'successful_executions': workflow.successful_executions,
+            'success_rate': workflow.success_rate,
+            'average_execution_time': workflow.average_execution_time,
+            'last_executed': workflow.last_executed_at.isoformat() if workflow.last_executed_at else None,
+            'status': 'real_orchestration_enabled',
+            'recent_executions': execution_history
+        }
+
+# Create singleton instance
+conversation_orchestrator = ConversationOrchestrator()

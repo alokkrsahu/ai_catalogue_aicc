@@ -1,0 +1,29 @@
+# SSL/HTTPS Configuration for AI Catalogue
+# This extends the main docker-compose.yml with Let's Encrypt SSL support
+version: '3.8'
+
+services:
+  # Certbot service for Let's Encrypt certificate management
+  certbot:
+    image: certbot/certbot:latest
+    container_name: ai_catalogue_certbot
+    volumes:
+      - ./certbot/certs:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/logs:/var/log/letsencrypt
+    command: certonly --webroot --webroot-path=/var/www/certbot --email ${SSL_EMAIL} --agree-tos --no-eff-email -d ${DOMAIN_NAME}
+    networks:
+      - ai_catalogue_network
+
+  # Override Nginx configuration for SSL
+  nginx:
+    volumes:
+      - ./nginx/nginx.ssl.conf:/etc/nginx/nginx.conf:ro
+      - ./certbot/certs:/etc/nginx/ssl:ro
+      - ./certbot/www:/var/www/certbot:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - frontend
+      - backend

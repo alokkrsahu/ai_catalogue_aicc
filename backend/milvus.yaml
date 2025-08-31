@@ -1,0 +1,132 @@
+# Milvus 2.4.x Configuration
+# Enhanced configuration for multi-vector support and performance
+
+etcd:
+  endpoints:
+    - etcd:2379
+  rootPath: by-dev
+  metaSubPath: meta
+  kvSubPath: kv
+
+metastore:
+  type: etcd
+
+minio:
+  address: minio
+  port: 9000
+  accessKeyID: minioadmin
+  secretAccessKey: SecureMinioPassword123!
+  useSSL: false
+  bucketName: "a-bucket"
+  rootPath: files
+
+localStorage:
+  path: /var/lib/milvus/data
+
+mq:
+  type: rocksmq
+  rocksmq:
+    path: /var/lib/milvus/rdb_data
+    lrucacheratio: 0.06
+    rocksmqPageSize: 67108864
+    retentionTimeInMinutes: 4320
+    retentionSizeInMB: 8192
+    compactionInterval: 86400
+
+# Enhanced proxy settings for multi-vector support
+proxy:
+  port: 19530
+  internalPort: 19529
+  http:
+    enabled: true
+    port: 9091
+  grpc:
+    serverMaxRecvSize: 67108864
+    serverMaxSendSize: 67108864
+    clientMaxRecvSize: 104857600
+    clientMaxSendSize: 104857600
+  # Multi-vector field configuration
+  maxVectorFieldNum: 10  # Support up to 10 vector fields per collection
+  maxDimension: 32768
+  maxUserNum: 100
+  maxRoleNum: 10
+
+# Query node configuration
+queryNode:
+  cacheSize: 32
+  enableDisk: true
+  maxDiskUsagePercentage: 95
+
+# Data node configuration  
+dataNode:
+  dataSync:
+    flushManager:
+      flushCheckInterval: 1000
+  memory:
+    forceSyncEnable: true
+    forceSyncSegmentNum: 1
+
+# Index node configuration
+indexNode:
+  scheduler:
+    buildParallel: 1
+  enableDisk: true
+  maxDiskUsagePercentage: 95
+
+# Root coordinator configuration
+rootCoord:
+  minSegmentSizeToEnableIndex: 1024
+  maxPartitionNum: 4096
+  minSegmentSizeToEnableIndex: 1024
+
+# Enhanced logging
+log:
+  level: info
+  file:
+    maxSize: 300
+    maxAge: 10
+    maxBackups: 20
+  format: text
+
+# Common configuration
+common:
+  defaultPartitionName: "_default"
+  defaultIndexName: "_default_idx"
+  entityExpiration: -1
+  indexSliceSize: 16
+  # Enable dynamic field for flexibility
+  enableDynamicField: true
+  
+# Security settings
+common:
+  security:
+    authorizationEnabled: true
+    tlsMode: 0
+
+# Performance tuning
+queryCoord:
+  autoHandoff: true
+  autoBalance: true
+  balanceIntervalSeconds: 60
+  overloadedMemoryThresholdPercentage: 90
+
+dataCoord:
+  segment:
+    maxSize: 1024
+    sealProportion: 0.12
+    assignmentExpiration: 2000
+  compaction:
+    enableAutoCompaction: true
+    
+# Memory management
+quotaAndLimits:
+  enabled: true
+  limits:
+    allocProtection:
+      enabled: true
+      memProtection:
+        enabled: true
+        dataNodeMemoryLowWaterLevel: 0.85
+        dataNodeMemoryHighWaterLevel: 0.95
+        queryNodeMemoryLowWaterLevel: 0.85
+        queryNodeMemoryHighWaterLevel: 0.95

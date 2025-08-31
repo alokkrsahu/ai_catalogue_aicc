@@ -1,0 +1,36 @@
+# Minimal Milvus Configuration for Apple Silicon Compatibility
+etcd:
+  endpoints:
+    - localhost:2379
+  rootPath: by-dev
+
+minio:
+  address: localhost
+  port: 9000
+  accessKeyID: minioadmin
+  secretAccessKey: minioadmin
+  useSSL: false
+  bucketName: "a-bucket"
+  rootPath: files
+
+# Use RocksMQ instead of Pulsar for better ARM64 compatibility
+mq:
+  type: rocksmq
+
+# Simplified proxy settings
+proxy:
+  port: 19530
+  http:
+    enabled: true
+    port: 9091
+  # Enable multi-vector support
+  maxVectorFieldNum: 10
+
+# Minimal logging
+log:
+  level: info
+
+# Basic settings
+common:
+  defaultPartitionName: "_default"
+  defaultIndexName: "_default_idx"

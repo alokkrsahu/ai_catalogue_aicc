@@ -1,0 +1,74 @@
+# Docker Compose Override for Development
+# This file provides development-specific configurations that override docker-compose.yml
+# Run with: docker-compose -f docker-compose.yml -f docker-compose.override.yml up
+
+services:
+  # Development Frontend with Hot Reload
+  frontend-dev:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+      target: development
+    container_name: ai_catalogue_frontend_dev
+    restart: unless-stopped
+    environment:
+      NODE_ENV: development
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "5173:5173"  # Vite dev server
+    volumes:
+      # Mount source code for hot reload
+      - ./frontend/my-sveltekit-app/src:/app/src:cached
+      - ./frontend/my-sveltekit-app/static:/app/static:cached
+      - ./frontend/my-sveltekit-app/package.json:/app/package.json:cached
+      - ./frontend/my-sveltekit-app/vite.config.ts:/app/vite.config.ts:cached
+      - ./frontend/my-sveltekit-app/svelte.config.js:/app/svelte.config.js:cached
+      - ./frontend/my-sveltekit-app/tailwind.config.ts:/app/tailwind.config.ts:cached
+      - ./frontend/my-sveltekit-app/tsconfig.json:/app/tsconfig.json:cached
+      # Exclude node_modules from mounting to avoid performance issues
+      - /app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - ai_catalogue_network
+
+  # Development Backend with Hot Reload
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+      target: development
+    environment:
+      # Override for development
+      DEBUG: "True"
+      DJANGO_SETTINGS_MODULE: core.settings
+      PYTHONPATH: /app
+      # Enable Django development features
+      DJANGO_DEBUG_TOOLBAR: "True"
+    volumes:
+      # Mount source code for hot reload
+      - ./backend:/app:cached
+      # Exclude certain directories to avoid permission issues
+      - /app/__pycache__
+      - /app/.pytest_cache
+      - backend_media_dev:/app/media
+      - backend_logs_dev:/app/logs
+    command: >
+      sh -c "python manage.py collectstatic --noinput &&
+             python manage.py migrate &&
+             python manage.py setup_container_data &&
+             python manage.py runserver 0.0.0.0:8000"
+
+  # Override Nginx for development
+  nginx:
+    volumes:
+      - ./nginx/nginx.dev.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - frontend-dev
+      - backend
+
+volumes:
+  backend_media_dev:
+    driver: local
+  backend_logs_dev:
+    driver: local

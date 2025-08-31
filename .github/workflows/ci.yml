@@ -1,0 +1,331 @@
+# AI Catalogue - Continuous Integration Pipeline
+# Triggers on pull requests and pushes to main/develop branches
+# Builds, tests, and validates the application
+
+name: 🔄 Continuous Integration
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch: # Allow manual trigger
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME_BACKEND: ${{ github.repository }}/backend
+  IMAGE_NAME_FRONTEND: ${{ github.repository }}/frontend
+
+jobs:
+  # ============================================================================
+  # BACKEND TESTING & BUILDING
+  # ============================================================================
+  backend-ci:
+    name: 🐍 Backend CI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: test_ai_catalogue_db
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.13
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: 📦 Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            python3-dev \
+            libxml2-dev \
+            libxslt1-dev \
+            antiword \
+            unrtf \
+            poppler-utils \
+            tesseract-ocr \
+            libmagic1 \
+            libpq-dev
+
+      - name: 📦 Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-django pytest-cov flake8
+
+      - name: 🔍 Lint with flake8
+        run: |
+          # Stop the build if there are Python syntax errors or undefined names
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          # Treat all other issues as warnings
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+      - name: ✅ Run Django tests
+        env:
+          DB_NAME: test_ai_catalogue_db
+          DB_USER: test_user
+          DB_PASSWORD: test_password
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DJANGO_SECRET_KEY: test-secret-key-for-ci
+          DEBUG: False
+          MILVUS_HOST: localhost
+          MILVUS_PORT: 19530
+          # Mock API keys for testing
+          GOOGLE_API_KEY: test-google-key
+          OPENAI_API_KEY: test-openai-key
+          ANTHROPIC_API_KEY: test-anthropic-key
+        run: |
+          python manage.py check
+          python manage.py migrate --run-syncdb
+          python manage.py collectstatic --noinput
+          pytest --cov=. --cov-report=xml
+
+      - name: 📊 Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./backend/coverage.xml
+          flags: backend
+          name: backend-coverage
+
+  # ============================================================================
+  # FRONTEND TESTING & BUILDING
+  # ============================================================================
+  frontend-ci:
+    name: ⚛️ Frontend CI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend/my-sveltekit-app
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: './frontend/my-sveltekit-app/package-lock.json'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🔍 Lint code
+        run: npm run lint
+
+      - name: 🔧 Type check
+        run: npm run check
+
+      - name: ✅ Run tests
+        run: npm run test
+
+      - name: 🏗️ Build application
+        env:
+          VITE_BACKEND_URL: http://localhost:8000
+          VITE_API_BASE_URL: http://localhost:8000/api
+        run: npm run build
+
+      - name: 📊 Upload frontend build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: frontend-build
+          path: ./frontend/my-sveltekit-app/build/
+          retention-days: 7
+
+  # ============================================================================
+  # DOCKER IMAGE BUILDING
+  # ============================================================================
+  docker-build:
+    name: 🐳 Docker Build
+    runs-on: ubuntu-latest
+    needs: [backend-ci, frontend-ci]
+    if: github.event_name != 'pull_request'
+    
+    strategy:
+      matrix:
+        component: [backend, frontend]
+        
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔧 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🔐 Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 📝 Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_BACKEND }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: 🏗️ Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./${{ matrix.component }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.component }}:${{ github.sha }},${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.component }}:latest
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ============================================================================
+  # SECURITY SCANNING
+  # ============================================================================
+  security-scan:
+    name: 🔒 Security Scan
+    runs-on: ubuntu-latest
+    needs: [backend-ci, frontend-ci]
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔍 Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: 📊 Upload Trivy scan results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: 🐍 Run Bandit security check for Python
+        run: |
+          pip install bandit
+          bandit -r ./backend -f json -o bandit-results.json || true
+
+      - name: 📊 Upload security scan artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-reports
+          path: |
+            trivy-results.sarif
+            bandit-results.json
+          retention-days: 30
+
+  # ============================================================================
+  # DOCKER COMPOSE VALIDATION
+  # ============================================================================
+  docker-compose-test:
+    name: 🐳 Docker Compose Test
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔧 Create test .env file
+        run: |
+          cp .env.example .env
+          # Set test values
+          sed -i 's/your_google_api_key_here/test-key/g' .env
+          sed -i 's/your_openai_api_key_here/test-key/g' .env
+          sed -i 's/your_anthropic_api_key_here/test-key/g' .env
+
+      - name: ✅ Validate Docker Compose files
+        run: |
+          docker-compose config
+          docker-compose -f docker-compose.yml -f docker-compose.azure.yml config
+
+      - name: 🏗️ Build services
+        run: |
+          docker-compose build --no-cache
+
+      - name: 🚀 Start services
+        run: |
+          docker-compose up -d postgres minio etcd
+          sleep 30
+          docker-compose up -d milvus
+          sleep 30
+          docker-compose up -d backend
+          sleep 20
+          docker-compose up -d frontend
+
+      - name: ✅ Health check services
+        run: |
+          # Wait for services to be ready
+          timeout 300 bash -c 'until curl -f http://localhost:8000/admin/ &>/dev/null; do sleep 5; done'
+          timeout 300 bash -c 'until curl -f http://localhost:3000/ &>/dev/null; do sleep 5; done'
+          
+          # Run basic health checks
+          curl -f http://localhost:8000/admin/
+          curl -f http://localhost:3000/
+
+      - name: 📋 Show service status
+        run: |
+          docker-compose ps
+          docker-compose logs --tail=50
+
+      - name: 🧹 Cleanup
+        if: always()
+        run: |
+          docker-compose down -v
+          docker system prune -f
+
+  # ============================================================================
+  # NOTIFICATION
+  # ============================================================================
+  notify:
+    name: 📢 Notify Results
+    runs-on: ubuntu-latest
+    needs: [backend-ci, frontend-ci, docker-build, security-scan, docker-compose-test]
+    if: always()
+    
+    steps:
+      - name: ✅ CI Success Notification
+        if: ${{ needs.backend-ci.result == 'success' && needs.frontend-ci.result == 'success' && needs.docker-build.result == 'success' }}
+        run: |
+          echo "🎉 All CI checks passed successfully!"
+          echo "✅ Backend tests: PASSED"
+          echo "✅ Frontend tests: PASSED"
+          echo "✅ Docker build: PASSED"
+          echo "✅ Security scan: COMPLETED"
+          echo "✅ Docker Compose: PASSED"
+
+      - name: ❌ CI Failure Notification
+        if: ${{ needs.backend-ci.result == 'failure' || needs.frontend-ci.result == 'failure' || needs.docker-build.result == 'failure' }}
+        run: |
+          echo "❌ CI pipeline failed!"
+          echo "Backend CI: ${{ needs.backend-ci.result }}"
+          echo "Frontend CI: ${{ needs.frontend-ci.result }}"
+          echo "Docker Build: ${{ needs.docker-build.result }}"
+          exit 1

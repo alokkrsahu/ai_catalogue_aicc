@@ -1,0 +1,914 @@
+<!-- History Template Selection Page -->
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
+  import { createTemplateLogger } from '$lib/logging/logger';
+  import { cleanUniversalApi } from '$lib/services/cleanUniversalApi';
+  import { toasts } from '$lib/stores/toast';
+  import type { HistoryTemplate, UniversalProject } from '$lib/templates/types';
+  
+  const logger = createTemplateLogger('history', 'SelectionPage');
+  
+  let template: any | null = null;
+  let loading = true;
+  let showCreateForm = false;
+  let creatingProject = false;
+  
+  // Project creation form data
+  let projectName = '';
+  let projectDescription = '';
+  
+  onMount(() => {
+    logger.componentMount('HistorySelectionPage');
+    loadTemplateConfiguration();
+  });
+  
+  async function loadTemplateConfiguration() {
+    logger.templateAction('load_configuration', 'history');
+    
+    try {
+      loading = true;
+      const configResult = await cleanUniversalApi.getTemplateConfiguration('history');
+      template = configResult.discovery || configResult;
+      logger.templateAction('configuration_loaded', 'history', template);
+    } catch (error) {
+      logger.error('Failed to load template configuration', error);
+      toasts.error('Failed to load History template configuration');
+    } finally {
+      loading = false;
+    }
+  }
+  
+  async function createProject() {
+    if (!projectName.trim() || !projectDescription.trim()) {
+      toasts.error('Please fill in all required fields');
+      return;
+    }
+    
+    logger.templateAction('create_project_start', 'history', {
+      name: projectName,
+      description: projectDescription
+    });
+    
+    try {
+      creatingProject = true;
+      
+      const projectData = {
+        name: projectName.trim(),
+        description: projectDescription.trim(),
+        template_id: 'history'
+      };
+      
+      const newProject = await cleanUniversalApi.createProject(projectData);
+      
+      logger.templateAction('project_created', 'history', newProject);
+      toasts.success(`History project "${projectName}" created successfully`);
+      
+      // Navigate to the UNIVERSAL project interface (template independent)
+      logger.templateNavigation('template_selection', 'universal_project', 'universal');
+      goto(`/features/intellidoc/project/${newProject.project_id}`);
+      
+    } catch (error) {
+      logger.error('Failed to create project', error);
+      toasts.error('Failed to create project. Please try again.');
+    } finally {
+      creatingProject = false;
+    }
+  }
+  
+  function openCreateForm() {
+    showCreateForm = true;
+    projectName = '';
+    projectDescription = '';
+    logger.userInteraction('open_create_form', 'create_button');
+  }
+  
+  function closeCreateForm() {
+    showCreateForm = false;
+    projectName = '';
+    projectDescription = '';
+    logger.userInteraction('close_create_form', 'close_button');
+  }
+</script>
+
+<svelte:head>
+  <title>History Template - AI Catalogue</title>
+</svelte:head>
+
+<div class="template-selection-page">
+  <!-- Header Section -->
+  <div class="header-section history-theme">
+    <div class="template-hero">
+      <div class="hero-icon">
+        <i class="fas fa-university"></i>
+      </div>
+      <div class="hero-content">
+        <h1>Historical Document Template</h1>
+        <p class="hero-description">
+          Specialized historical document analysis with period categorization and research methodologies
+        </p>
+        {#if template}
+          <div class="template-version">
+            Version {template.version} • {template.template_type}
+          </div>
+        {/if}
+      </div>
+    </div>
+    
+    <div class="hero-actions">
+      <button class="create-project-button" on:click={openCreateForm}>
+        <i class="fas fa-plus"></i>
+        Create History Project
+      </button>
+    </div>
+  </div>
+  
+  <!-- Template Information -->
+  {#if loading}
+    <div class="loading-state">
+      <div class="spinner"></div>
+      <p>Loading history template configuration...</p>
+    </div>
+  {:else if template}
+    <div class="template-details">
+      <!-- Historical Periods -->
+      {#if template.historical_periods && template.historical_periods.length > 0}
+        <div class="periods-section">
+          <h2>Supported Historical Periods</h2>
+          <div class="periods-timeline">
+            {#each template.historical_periods as period}
+              <div class="period-card">
+                <div class="period-header">
+                  <h3>{period.period}</h3>
+                  <div class="period-years">
+                    {period.start_year} - {period.end_year}
+                  </div>
+                </div>
+                {#if period.key_themes && period.key_themes.length > 0}
+                  <div class="period-themes">
+                    <span class="themes-label">Key Themes:</span>
+                    <div class="themes-tags">
+                      {#each period.key_themes as theme}
+                        <span class="theme-tag">{theme}</span>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
+      
+      <!-- Source Types -->
+      {#if template.source_types && template.source_types.length > 0}
+        <div class="source-types-section">
+          <h2>Historical Source Types</h2>
+          <div class="source-types-grid">
+            {#each template.source_types as sourceType}
+              <div class="source-type-card">
+                <div class="source-type-header">
+                  <i class="fas fa-scroll"></i>
+                  <h3>{sourceType.type}</h3>
+                </div>
+                <p>{sourceType.description}</p>
+                {#if sourceType.authenticity_checks && sourceType.authenticity_checks.length > 0}
+                  <div class="authenticity-checks">
+                    <span class="checks-label">Authenticity Checks:</span>
+                    <ul>
+                      {#each sourceType.authenticity_checks as check}
+                        <li>{check}</li>
+                      {/each}
+                    </ul>
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
+      
+      <!-- Research Methodologies -->
+      {#if template.research_methodologies && template.research_methodologies.length > 0}
+        <div class="methodologies-section">
+          <h2>Research Methodologies</h2>
+          <div class="methodologies-grid">
+            {#each template.research_methodologies as methodology}
+              <div class="methodology-card">
+                <div class="methodology-header">
+                  <i class="fas fa-search"></i>
+                  <h3>{methodology.method}</h3>
+                </div>
+                <p>{methodology.description}</p>
+                {#if methodology.application_areas && methodology.application_areas.length > 0}
+                  <div class="application-areas">
+                    <span class="areas-label">Application Areas:</span>
+                    <div class="areas-tags">
+                      {#each methodology.application_areas as area}
+                        <span class="area-tag">{area}</span>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
+      
+      <!-- Key Features -->
+      <div class="features-section">
+        <h2>Key Features</h2>
+        <div class="features-grid">
+          <div class="feature-card history">
+            <div class="feature-icon">
+              <i class="fas fa-clock"></i>
+            </div>
+            <div class="feature-content">
+              <h3>Period Classification</h3>
+              <p>Automatic categorization of documents by historical period and era</p>
+            </div>
+          </div>
+          
+          <div class="feature-card history">
+            <div class="feature-icon">
+              <i class="fas fa-certificate"></i>
+            </div>
+            <div class="feature-content">
+              <h3>Authenticity Analysis</h3>
+              <p>Advanced verification techniques for historical document authenticity</p>
+            </div>
+          </div>
+          
+          <div class="feature-card history">
+            <div class="feature-icon">
+              <i class="fas fa-map"></i>
+            </div>
+            <div class="feature-content">
+              <h3>Contextual Mapping</h3>
+              <p>Geographic and temporal context mapping for historical sources</p>
+            </div>
+          </div>
+          
+          <div class="feature-card history">
+            <div class="feature-icon">
+              <i class="fas fa-book-open"></i>
+            </div>
+            <div class="feature-content">
+              <h3>Research Tools</h3>
+              <p>Comprehensive suite of tools for historical research and analysis</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  {:else}
+    <div class="error-state">
+      <div class="error-icon">
+        <i class="fas fa-exclamation-triangle"></i>
+      </div>
+      <h3>Template Not Available</h3>
+      <p>The History template configuration could not be loaded.</p>
+      <button class="retry-button" on:click={loadTemplateConfiguration}>
+        <i class="fas fa-redo"></i>
+        Retry
+      </button>
+    </div>
+  {/if}
+</div>
+
+<!-- Create Project Modal -->
+{#if showCreateForm}
+  <div class="modal-overlay" on:click={closeCreateForm}>
+    <div class="modal-container" on:click|stopPropagation>
+      <div class="modal-header history-theme">
+        <h2>Create History Project</h2>
+        <button class="close-button" on:click={closeCreateForm}>
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+      
+      <div class="modal-content">
+        <form on:submit|preventDefault={createProject}>
+          <div class="form-group">
+            <label for="projectName">Project Name *</label>
+            <input 
+              id="projectName"
+              type="text" 
+              bind:value={projectName}
+              placeholder="e.g., Medieval Manuscripts Analysis"
+              class="form-input"
+              required
+            />
+          </div>
+          
+          <div class="form-group">
+            <label for="projectDescription">Description *</label>
+            <textarea 
+              id="projectDescription"
+              bind:value={projectDescription}
+              placeholder="Describe the historical documents you'll be analyzing and your research objectives"
+              class="form-textarea"
+              rows="4"
+              required
+            ></textarea>
+          </div>
+          
+          <div class="template-info history">
+            <div class="info-icon">
+              <i class="fas fa-university"></i>
+            </div>
+            <div class="info-content">
+              <p><strong>This project will use the History template</strong></p>
+              <p>Specialized for historical document analysis with period classification, authenticity verification, and research methodologies.</p>
+            </div>
+          </div>
+          
+          <div class="form-actions">
+            <button type="button" class="action-button secondary" on:click={closeCreateForm}>
+              Cancel
+            </button>
+            <button 
+              type="submit" 
+              class="action-button primary history"
+              disabled={creatingProject || !projectName.trim() || !projectDescription.trim()}
+            >
+              {#if creatingProject}
+                <i class="fas fa-spinner fa-spin"></i>
+                Creating Project...
+              {:else}
+                <i class="fas fa-university"></i>
+                Create History Project
+              {/if}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<style>
+  .template-selection-page {
+    min-height: 100vh;
+    background: #f8fafc;
+    padding: 24px;
+  }
+  
+  .header-section.history-theme {
+    background: linear-gradient(135deg, #7c2d12 0%, #92400e 100%);
+    border-radius: 16px;
+    padding: 48px;
+    margin-bottom: 32px;
+    color: white;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  
+  .template-hero {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+  }
+  
+  .hero-icon {
+    width: 80px;
+    height: 80px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2rem;
+    color: white;
+  }
+  
+  .hero-content h1 {
+    margin: 0 0 12px 0;
+    font-size: 2.5rem;
+    font-weight: 700;
+    color: white;
+  }
+  
+  .hero-description {
+    margin: 0 0 12px 0;
+    font-size: 1.125rem;
+    color: rgba(255, 255, 255, 0.9);
+    line-height: 1.6;
+  }
+  
+  .template-version {
+    background: rgba(255, 255, 255, 0.1);
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 0.875rem;
+    color: rgba(255, 255, 255, 0.8);
+    width: fit-content;
+  }
+  
+  .create-project-button {
+    background: rgba(255, 255, 255, 0.1);
+    color: white;
+    border: 2px solid rgba(255, 255, 255, 0.2);
+    padding: 16px 32px;
+    border-radius: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 1.125rem;
+  }
+  
+  .create-project-button:hover {
+    background: rgba(255, 255, 255, 0.2);
+    border-color: rgba(255, 255, 255, 0.4);
+    transform: translateY(-2px);
+  }
+  
+  .loading-state, .error-state {
+    text-align: center;
+    padding: 64px 32px;
+    background: white;
+    border-radius: 16px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.05);
+  }
+  
+  .spinner {
+    width: 32px;
+    height: 32px;
+    border: 3px solid #e5e7eb;
+    border-top: 3px solid #7c2d12;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin: 0 auto 16px;
+  }
+  
+  @keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+  }
+  
+  .error-icon {
+    font-size: 3rem;
+    color: #ef4444;
+    margin-bottom: 16px;
+  }
+  
+  .retry-button {
+    background: #7c2d12;
+    color: white;
+    border: none;
+    padding: 12px 24px;
+    border-radius: 8px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  
+  .retry-button:hover {
+    background: #92400e;
+  }
+  
+  .template-details {
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+  }
+  
+  .periods-section, .source-types-section, .methodologies-section, .features-section {
+    background: white;
+    border-radius: 16px;
+    padding: 32px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.05);
+  }
+  
+  .periods-section h2, .source-types-section h2, .methodologies-section h2, .features-section h2 {
+    margin: 0 0 24px 0;
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #111827;
+  }
+  
+  .periods-timeline {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 20px;
+  }
+  
+  .period-card {
+    background: #fef7ed;
+    border: 1px solid #fed7aa;
+    border-radius: 12px;
+    padding: 20px;
+    position: relative;
+  }
+  
+  .period-header {
+    margin-bottom: 16px;
+  }
+  
+  .period-header h3 {
+    margin: 0 0 8px 0;
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #7c2d12;
+  }
+  
+  .period-years {
+    background: #7c2d12;
+    color: white;
+    padding: 4px 12px;
+    border-radius: 8px;
+    font-size: 0.875rem;
+    font-weight: 500;
+    width: fit-content;
+  }
+  
+  .themes-label {
+    font-weight: 600;
+    color: #7c2d12;
+    font-size: 0.875rem;
+    display: block;
+    margin-bottom: 8px;
+  }
+  
+  .themes-tags {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  
+  .theme-tag {
+    background: #f97316;
+    color: white;
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+  
+  .source-types-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 20px;
+  }
+  
+  .source-type-card {
+    background: #fef7ed;
+    border: 1px solid #fed7aa;
+    border-radius: 12px;
+    padding: 20px;
+  }
+  
+  .source-type-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  
+  .source-type-header i {
+    color: #7c2d12;
+    font-size: 1.125rem;
+  }
+  
+  .source-type-header h3 {
+    margin: 0;
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: #7c2d12;
+  }
+  
+  .source-type-card p {
+    margin: 0 0 12px 0;
+    color: #6b7280;
+    line-height: 1.5;
+    font-size: 0.875rem;
+  }
+  
+  .checks-label {
+    font-weight: 600;
+    color: #7c2d12;
+    font-size: 0.8rem;
+    display: block;
+    margin-bottom: 4px;
+  }
+  
+  .authenticity-checks ul {
+    margin: 0;
+    padding-left: 16px;
+    color: #6b7280;
+    font-size: 0.8rem;
+  }
+  
+  .authenticity-checks li {
+    margin-bottom: 2px;
+  }
+  
+  .methodologies-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+    gap: 20px;
+  }
+  
+  .methodology-card {
+    background: #fef7ed;
+    border: 1px solid #fed7aa;
+    border-radius: 12px;
+    padding: 20px;
+  }
+  
+  .methodology-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  
+  .methodology-header i {
+    color: #7c2d12;
+    font-size: 1.125rem;
+  }
+  
+  .methodology-header h3 {
+    margin: 0;
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: #7c2d12;
+  }
+  
+  .methodology-card p {
+    margin: 0 0 12px 0;
+    color: #6b7280;
+    line-height: 1.5;
+    font-size: 0.875rem;
+  }
+  
+  .areas-label {
+    font-weight: 600;
+    color: #7c2d12;
+    font-size: 0.8rem;
+    display: block;
+    margin-bottom: 8px;
+  }
+  
+  .areas-tags {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  
+  .area-tag {
+    background: #7c2d12;
+    color: white;
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 0.7rem;
+    font-weight: 500;
+  }
+  
+  .features-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 24px;
+  }
+  
+  .feature-card.history {
+    background: #fef7ed;
+    border-radius: 12px;
+    padding: 24px;
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    border: 1px solid #fed7aa;
+  }
+  
+  .feature-icon {
+    width: 48px;
+    height: 48px;
+    background: linear-gradient(135deg, #7c2d12, #92400e);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 1.125rem;
+    flex-shrink: 0;
+  }
+  
+  .feature-content h3 {
+    margin: 0 0 8px 0;
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: #7c2d12;
+  }
+  
+  .feature-content p {
+    margin: 0;
+    color: #6b7280;
+    line-height: 1.5;
+  }
+  
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 20px;
+  }
+  
+  .modal-container {
+    background: white;
+    border-radius: 16px;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
+    max-width: 600px;
+    width: 100%;
+    max-height: 90vh;
+    overflow-y: auto;
+  }
+  
+  .modal-header.history-theme {
+    padding: 24px 32px;
+    background: linear-gradient(135deg, #7c2d12 0%, #92400e 100%);
+    color: white;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-radius: 16px 16px 0 0;
+  }
+  
+  .modal-header h2 {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: white;
+  }
+  
+  .close-button {
+    background: none;
+    border: none;
+    font-size: 1.25rem;
+    color: rgba(255, 255, 255, 0.8);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    transition: all 0.2s ease;
+  }
+  
+  .close-button:hover {
+    color: white;
+    background: rgba(255, 255, 255, 0.1);
+  }
+  
+  .modal-content {
+    padding: 32px;
+  }
+  
+  .form-group {
+    margin-bottom: 24px;
+  }
+  
+  .form-group label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 500;
+    color: #374151;
+  }
+  
+  .form-input, .form-textarea {
+    width: 100%;
+    padding: 12px 16px;
+    border: 2px solid #e5e7eb;
+    border-radius: 8px;
+    font-size: 0.875rem;
+    transition: all 0.2s ease;
+    font-family: inherit;
+  }
+  
+  .form-input:focus, .form-textarea:focus {
+    outline: none;
+    border-color: #7c2d12;
+    box-shadow: 0 0 0 3px rgba(124, 45, 18, 0.1);
+  }
+  
+  .form-textarea {
+    resize: vertical;
+    min-height: 100px;
+  }
+  
+  .template-info.history {
+    background: #fef7ed;
+    border: 1px solid #fed7aa;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 24px;
+    display: flex;
+    gap: 16px;
+  }
+  
+  .info-icon {
+    color: #7c2d12;
+    font-size: 1.25rem;
+    flex-shrink: 0;
+  }
+  
+  .info-content p {
+    margin: 0 0 8px 0;
+    color: #7c2d12;
+    font-size: 0.875rem;
+    line-height: 1.5;
+  }
+  
+  .info-content p:last-child {
+    margin-bottom: 0;
+  }
+  
+  .form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+  }
+  
+  .action-button {
+    padding: 12px 24px;
+    border: none;
+    border-radius: 8px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.875rem;
+  }
+  
+  .action-button.primary.history {
+    background: linear-gradient(135deg, #7c2d12, #92400e);
+    color: white;
+  }
+  
+  .action-button.primary.history:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(124, 45, 18, 0.3);
+  }
+  
+  .action-button.secondary {
+    background: #f8fafc;
+    color: #64748b;
+    border: 1px solid #e2e8f0;
+  }
+  
+  .action-button.secondary:hover {
+    background: #f1f5f9;
+    color: #475569;
+  }
+  
+  .action-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+  }
+  
+  @media (max-width: 768px) {
+    .header-section {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 24px;
+      text-align: center;
+    }
+    
+    .template-hero {
+      flex-direction: column;
+      text-align: center;
+    }
+    
+    .periods-timeline, .source-types-grid, .methodologies-grid, .features-grid {
+      grid-template-columns: 1fr;
+    }
+    
+    .modal-container {
+      margin: 20px;
+      max-width: calc(100% - 40px);
+    }
+    
+    .modal-content {
+      padding: 24px;
+    }
+    
+    .form-actions {
+      flex-direction: column;
+    }
+  }
+</style>

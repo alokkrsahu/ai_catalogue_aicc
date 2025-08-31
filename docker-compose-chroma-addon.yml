@@ -1,0 +1,69 @@
+# ChromaDB Add-on for Public Chatbot API
+# ISOLATED from main AI Catalogue system
+# Run with: docker-compose -f docker-compose.yml -f docker-compose-chroma-addon.yml up -d
+
+services:
+  # ChromaDB for Public Chatbot - Completely Isolated
+  chroma_public:
+    image: ghcr.io/chroma-core/chroma:0.4.24
+    container_name: ai_catalogue_chroma_public
+    restart: unless-stopped
+    ports:
+      - "${CHROMA_PUBLIC_PORT:-8001}:8000"  # Different port from your main services
+    volumes:
+      - chroma_public_data:/chroma/chroma
+    environment:
+      # Security settings
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+      - ANONYMIZED_TELEMETRY=FALSE
+      - ALLOW_RESET=FALSE  # Security: prevent reset from API
+      
+      # Performance settings
+      - CHROMA_SERVER_HOST=0.0.0.0
+      - CHROMA_SERVER_HTTP_PORT=8000
+      - CHROMA_SERVER_CORS_ALLOW_ORIGINS=["http://localhost:3000","http://localhost:8000","http://127.0.0.1:8000"]
+      
+      # Logging
+      - CHROMA_LOG_LEVEL=${CHROMA_LOG_LEVEL:-INFO}
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+    
+    networks:
+      - ai_catalogue_network
+    
+    # Resource limits for isolation
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+        reservations:
+          memory: 512M
+          cpus: '0.25'
+    
+    # Security: run as non-root user
+    user: "1000:1000"
+    
+    labels:
+      - "traefik.enable=false"  # Not exposed through reverse proxy
+      - "ai_catalogue.service=chroma_public"
+      - "ai_catalogue.isolation=public_only"
+
+# Additional volumes for ChromaDB
+volumes:
+  chroma_public_data:
+    driver: local
+    labels:
+      - "ai_catalogue.volume=chroma_public"
+      - "ai_catalogue.isolation=public_only"
+
+# Use existing network from main docker-compose.yml
+networks:
+  ai_catalogue_network:
+    external: true
