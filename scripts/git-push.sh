@@ -86,48 +86,31 @@ read -r COMMIT_MESSAGE
 
 # Generate automatic commit message if none provided
 if [ -z "$COMMIT_MESSAGE" ]; then
-    # Count changes
-    ADDED=$(git diff --cached --name-status | grep -c "^A" || echo "0")
-    MODIFIED=$(git diff --cached --name-status | grep -c "^M" || echo "0")
-    DELETED=$(git diff --cached --name-status | grep -c "^D" || echo "0")
-    
-    COMMIT_MESSAGE="Update AI Catalogue"
-    if [ "$ADDED" -gt 0 ]; then
-        COMMIT_MESSAGE="$COMMIT_MESSAGE - Added $ADDED files"
-    fi
-    if [ "$MODIFIED" -gt 0 ]; then
-        COMMIT_MESSAGE="$COMMIT_MESSAGE - Modified $MODIFIED files"
-    fi
-    if [ "$DELETED" -gt 0 ]; then
-        COMMIT_MESSAGE="$COMMIT_MESSAGE - Deleted $DELETED files"
-    fi
-    
+    COMMIT_MESSAGE="updating"
     echo "📝 Auto-generated commit message: $COMMIT_MESSAGE"
 fi
 
 # Commit the changes
 echo ""
 echo "💾 Committing changes..."
-git commit -m "$COMMIT_MESSAGE
-
-🤖 Generated with [Claude Code](https://claude.ai/code)
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
+git commit -m "$COMMIT_MESSAGE"
 
 echo "✅ Changes committed successfully!"
 
 # Push to remote repository
 echo ""
 echo "🚀 Pushing to GitHub repository..."
-echo "   Repository: https://github.com/OxfordCompetencyCenters/ai_catalogue_aicc.git"
+REPO_URL=$(git remote get-url origin | sed 's|https://[^@]*@|https://|')
+echo "   Repository: $REPO_URL"
 echo "   Branch: main"
 
 # Push with upstream tracking
 if git push -u origin main; then
     echo "✅ Successfully pushed to GitHub!"
     echo ""
-    echo "🌐 Repository URL: https://github.com/OxfordCompetencyCenters/ai_catalogue_aicc"
-    echo "📊 View your changes: https://github.com/OxfordCompetencyCenters/ai_catalogue_aicc/commits/main"
+    CLEAN_URL=$(git remote get-url origin | sed 's|https://[^@]*@|https://|')
+    echo "🌐 Repository URL: $CLEAN_URL"
+    echo "📊 View your changes: $CLEAN_URL/commits/main"
 else
     echo "❌ Failed to push to GitHub."
     echo ""
