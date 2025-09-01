@@ -254,6 +254,7 @@ datasets/
 
 # Generated Documentation
 docs/_build/
+documentation/
 
 
 # =============================================================================
