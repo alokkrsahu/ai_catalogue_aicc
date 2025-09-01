@@ -31,6 +31,34 @@ except ImportError:
 from .services import PublicKnowledgeService, ChatbotSecurityService
 from .models import PublicChatRequest, IPUsageLimit, ChatbotConfiguration
 from .llm_integration import PublicLLMService
+from .cors_hotfix import force_cors_headers
+
+# IMMEDIATE CORS HOTFIX - Direct CORS handling
+def add_cors_headers_immediate(response, request):
+    """IMMEDIATE CORS fix - add headers directly to response"""
+    origin = request.META.get('HTTP_ORIGIN')
+    
+    # Allowed origins - must match exactly
+    allowed_origins = [
+        'https://oxfordcompetencycenters.github.io',
+        'https://aicc.uksouth.cloudapp.azure.com', 
+        'http://localhost:3000',
+        'http://localhost:5173',
+    ]
+    
+    # Always allow the request origin if it's in our whitelist, otherwise allow all for public API
+    if origin in allowed_origins:
+        response['Access-Control-Allow-Origin'] = origin
+        response['Vary'] = 'Origin'  # Important for caching
+    else:
+        response['Access-Control-Allow-Origin'] = '*'  # Fallback
+    
+    response['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response['Access-Control-Allow-Headers'] = 'Origin, Content-Type, Accept, Authorization, X-Requested-With, Cache-Control'
+    response['Access-Control-Allow-Credentials'] = 'false'  # Set to false for wildcard origin compatibility
+    response['Access-Control-Max-Age'] = '86400'
+    
+    return response
 
 logger = logging.getLogger('public_chatbot')
 
@@ -159,6 +187,7 @@ def _is_rate_limited(ip_address: str) -> bool:
 @require_http_methods(["POST", "OPTIONS"])
 @never_cache
 @_rate_limit_decorator()
+@force_cors_headers
 def public_chat_api(request):
     """
     Public Chatbot API Endpoint - Completely Isolated
@@ -567,6 +596,7 @@ def _update_ip_security_violation(ip_address: str):
 
 
 @require_http_methods(["GET", "OPTIONS"])
+@force_cors_headers
 def health_check(request):
     """
     Health check endpoint for monitoring
@@ -634,6 +664,7 @@ def health_check(request):
 @require_http_methods(["POST", "OPTIONS"])
 @never_cache
 @_rate_limit_decorator()
+@force_cors_headers
 def public_chat_stream_api(request):
     """
     Public Chatbot Streaming API Endpoint

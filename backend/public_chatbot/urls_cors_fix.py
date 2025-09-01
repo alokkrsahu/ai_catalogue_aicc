@@ -1,5 +1,5 @@
 """
-URL Configuration for Public Chatbot API
+URL Configuration for Public Chatbot API - WITH CORS HOTFIX
 Completely isolated endpoints - no impact on existing AI Catalogue URLs
 """
 from django.urls import path
@@ -9,7 +9,7 @@ from .cors_hotfix import cors_test_endpoint
 app_name = 'public_chatbot'
 
 urlpatterns = [
-    # CORS test endpoint (for debugging)
+    # CORS test endpoint (temporary)
     path('cors-test/', cors_test_endpoint, name='cors_test'),
     
     # Main public chatbot API endpoint
