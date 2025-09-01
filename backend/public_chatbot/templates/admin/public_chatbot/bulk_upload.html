@@ -331,15 +331,29 @@ document.addEventListener('DOMContentLoaded', function() {
         displayFileList(this.files);
     });
     
-    // Form submission with progress
+    // Form submission with progress and double-click protection
+    let formSubmitting = false;
+    
     document.getElementById('bulk-upload-form').addEventListener('submit', function(e) {
+        // Prevent double submission
+        if (formSubmitting) {
+            e.preventDefault();
+            return false;
+        }
+        
         if (fileInput.files.length === 0) {
             alert('Please select at least one file to upload.');
             e.preventDefault();
-            return;
+            return false;
         }
         
-        submitBtn.style.display = 'none';
+        // Set submitting flag
+        formSubmitting = true;
+        
+        // Disable submit button and show progress
+        submitBtn.disabled = true;
+        submitBtn.value = 'Processing...';
+        submitBtn.style.opacity = '0.6';
         uploadProgress.style.display = 'block';
         
         // Simulate progress (real progress would need AJAX)
@@ -356,6 +370,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 progressText.textContent = 'Finalizing upload...';
             }
         }, 200);
+        
+        // Allow form to continue submitting
+        return true;
     });
     
     function displayFileList(files) {

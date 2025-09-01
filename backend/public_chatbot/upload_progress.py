@@ -4,7 +4,7 @@ Simple progress tracking using Django cache or session storage
 """
 import uuid
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 from django.core.cache import cache
 from django.utils import timezone
