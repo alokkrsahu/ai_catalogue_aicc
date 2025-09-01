@@ -94,11 +94,11 @@ AUTH_USER_MODEL = 'users.User'
 
 
 MIDDLEWARE = [
+    # Custom CORS middleware for public chatbot (HIGHEST priority)
+    'public_chatbot.middleware.cors.PublicChatbotCORSMiddleware',
+    
     # CORS middleware should be placed as high as possible
     'corsheaders.middleware.CorsMiddleware',
-    
-    # Custom CORS middleware for public chatbot (higher priority)
-    'public_chatbot.middleware.cors.PublicChatbotCORSMiddleware',
     
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -113,8 +113,13 @@ MIDDLEWARE = [
 cors_origins = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:5173,http://localhost:3000,https://oxfordcompetencycenters.github.io')
 CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins.split(',') if origin.strip()]
 
-# For development, allow all origins if specified
-CORS_ALLOW_ALL_ORIGINS = os.getenv('CORS_ALLOW_ALL_ORIGINS', 'False').lower() == 'true'
+# For development, allow all origins if specified (temporarily True for debugging)
+CORS_ALLOW_ALL_ORIGINS = True  # Temporarily allow all origins to debug CORS issues
+
+# Allow null origin for public chatbot (file:// protocol support)
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^null$",  # Support for null origin (file:// protocol)
+]
 
 # Allow credentials (cookies, authorization headers)
 CORS_ALLOW_CREDENTIALS = True

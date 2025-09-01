@@ -255,8 +255,6 @@ datasets/
 # Generated Documentation
 docs/_build/
 
-# Markdown Files
-*.md
 
 # =============================================================================
 # SHELL SCRIPTS - ALLOWED

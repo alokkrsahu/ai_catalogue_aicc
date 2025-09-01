@@ -65,7 +65,12 @@ logger = logging.getLogger('public_chatbot')
 def _add_cors_headers(response, request):
     """
     Add CORS headers to response for public chatbot API
+    Only adds if not already present to avoid duplicates
     """
+    # Skip if headers already present (from Django CORS middleware)
+    if response.get('Access-Control-Allow-Origin'):
+        return response
+        
     origin = request.META.get('HTTP_ORIGIN')
     
     # Allowed origins for public chatbot
@@ -82,12 +87,17 @@ def _add_cors_headers(response, request):
     
     if origin in allowed_origins:
         response['Access-Control-Allow-Origin'] = origin
+        response['Access-Control-Allow-Credentials'] = 'true'
+    elif origin is None or origin == 'null':
+        # Handle null origin (file:// protocol, some testing environments)
+        response['Access-Control-Allow-Origin'] = '*'
+        response['Access-Control-Allow-Credentials'] = 'false'  # Cannot use credentials with *
     else:
         response['Access-Control-Allow-Origin'] = '*'  # Fallback for public API
+        response['Access-Control-Allow-Credentials'] = 'false'
     
     response['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     response['Access-Control-Allow-Headers'] = 'Origin, Content-Type, Accept, Authorization, X-Requested-With, Cache-Control'
-    response['Access-Control-Allow-Credentials'] = 'true'
     response['Access-Control-Max-Age'] = '86400'
     
     return response
@@ -593,6 +603,7 @@ def _update_ip_security_violation(ip_address: str):
         logger.error(f"Failed to update security violations for {ip_address}: {e}")
 
 
+@csrf_exempt
 @require_http_methods(["GET", "OPTIONS"])
 def health_check(request):
     """

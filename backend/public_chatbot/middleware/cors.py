@@ -51,18 +51,33 @@ class PublicChatbotCORSMiddleware(MiddlewareMixin):
         
         # DEBUG: Log all preflight requests for chatbot endpoints
         if request.method == 'OPTIONS':
-            logger.info(f"🌍 CORS DEBUG: Preflight request")
-            logger.info(f"   Origin: {origin}")
-            logger.info(f"   Path: {request.path}")
-            logger.info(f"   Method: {request.method}")
-            logger.info(f"   Allowed origins: {self.ALLOWED_ORIGINS}")
-            logger.info(f"   Origin in allowed: {origin in self.ALLOWED_ORIGINS}")
+            logger.error(f"🔥 CORS DEBUG: Preflight request (ERROR LEVEL FOR VISIBILITY)")
+            logger.error(f"   Origin: {repr(origin)} (type: {type(origin)})")
+            logger.error(f"   Path: {request.path}")
+            logger.error(f"   Method: {request.method}")
+            logger.error(f"   Allowed origins: {self.ALLOWED_ORIGINS}")
+            logger.error(f"   Origin in allowed: {origin in self.ALLOWED_ORIGINS}")
+            logger.error(f"   Is None: {origin is None}")
+            logger.error(f"   Is 'null': {origin == 'null'}")
+            logger.error(f"   Is empty: {origin == ''}")
+            logger.error(f"   All request headers with 'ORIGIN': {[k for k in request.META.keys() if 'ORIGIN' in k.upper()]}")
+            logger.error(f"   Raw HTTP_ORIGIN: {request.META.get('HTTP_ORIGIN', 'NOT_FOUND')}")
             
             # Check if origin is allowed
             if origin in self.ALLOWED_ORIGINS:
                 response = JsonResponse({'status': 'ok'})
                 self._add_cors_headers(response, origin)
                 logger.info(f"🌍 CORS: Allowed preflight for {origin}")
+                return response
+            elif origin is None or origin == 'null' or origin == '':
+                # Allow null origin with wildcard
+                response = JsonResponse({'status': 'ok'})
+                response['Access-Control-Allow-Origin'] = '*'
+                response['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+                response['Access-Control-Allow-Headers'] = 'Origin, Content-Type, Accept, Authorization, X-Requested-With'
+                response['Access-Control-Allow-Credentials'] = 'false'
+                response['Access-Control-Max-Age'] = '86400'
+                logger.info(f"🌍 CORS: Allowed preflight for null/missing origin")
                 return response
             else:
                 logger.warning(f"🚫 CORS: Blocked preflight from unauthorized origin {origin}")
@@ -84,12 +99,21 @@ class PublicChatbotCORSMiddleware(MiddlewareMixin):
         
         origin = request.META.get('HTTP_ORIGIN')
         
-        # Add CORS headers if origin is allowed
-        if origin in self.ALLOWED_ORIGINS:
-            self._add_cors_headers(response, origin)
-            logger.debug(f"🌍 CORS: Added headers for {origin} on {request.path}")
-        else:
-            logger.warning(f"🚫 CORS: Blocked response to unauthorized origin {origin} on {request.path}")
+        # Only add headers if they haven't been added by Django CORS middleware
+        if not response.get('Access-Control-Allow-Origin'):
+            if origin in self.ALLOWED_ORIGINS:
+                self._add_cors_headers(response, origin)
+                logger.debug(f"🌍 CORS: Added headers for {origin} on {request.path}")
+            elif origin is None or origin == 'null' or origin == '':
+                # Handle null origin (file:// protocol, local testing)
+                response['Access-Control-Allow-Origin'] = '*'
+                response['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+                response['Access-Control-Allow-Headers'] = 'Origin, Content-Type, Accept, Authorization, X-Requested-With'
+                response['Access-Control-Allow-Credentials'] = 'false'
+                response['Access-Control-Max-Age'] = '86400'
+                logger.debug(f"🌍 CORS: Added wildcard headers for null/missing origin on {request.path}")
+            else:
+                logger.warning(f"🚫 CORS: Blocked response to unauthorized origin {origin} on {request.path}")
         
         return response
     
