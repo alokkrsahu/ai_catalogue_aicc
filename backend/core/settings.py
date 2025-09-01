@@ -41,7 +41,7 @@ SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'django-insecure-lb=q(rt4#!kjg!ckx@t
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv('DEBUG', 'True').lower() == 'true'
 
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1,testserver,0.0.0.0').split(',')
+ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1,testserver,0.0.0.0,aicc.uksouth.cloudapp.azure.com').split(',')
 
 # JWT Configuration
 SIMPLE_JWT = {
@@ -97,6 +97,9 @@ MIDDLEWARE = [
     # CORS middleware should be placed as high as possible
     'corsheaders.middleware.CorsMiddleware',
     
+    # Custom CORS middleware for public chatbot (higher priority)
+    'public_chatbot.middleware.cors.PublicChatbotCORSMiddleware',
+    
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -106,8 +109,8 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-# CORS settings - Cloud-ready configuration
-cors_origins = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:5173,http://localhost:3000')
+# CORS settings - Cloud-ready configuration with Public Chatbot support
+cors_origins = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:5173,http://localhost:3000,https://oxfordcompetencycenters.github.io')
 CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins.split(',') if origin.strip()]
 
 # For development, allow all origins if specified
@@ -116,8 +119,22 @@ CORS_ALLOW_ALL_ORIGINS = os.getenv('CORS_ALLOW_ALL_ORIGINS', 'False').lower() ==
 # Allow credentials (cookies, authorization headers)
 CORS_ALLOW_CREDENTIALS = True
 
+# CORS headers for public chatbot
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+    'cache-control',  # For streaming responses
+]
+
 # CSRF settings for cloud deployment
-csrf_origins = os.getenv('CSRF_TRUSTED_ORIGINS', 'http://localhost:5173,http://localhost:3000')
+csrf_origins = os.getenv('CSRF_TRUSTED_ORIGINS', 'http://localhost:5173,http://localhost:3000,https://oxfordcompetencycenters.github.io,https://aicc.uksouth.cloudapp.azure.com')
 CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in csrf_origins.split(',') if origin.strip()]
 
 ROOT_URLCONF = 'core.urls'

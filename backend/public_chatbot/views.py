@@ -35,6 +35,35 @@ from .llm_integration import PublicLLMService
 logger = logging.getLogger('public_chatbot')
 
 
+def _add_cors_headers(response, request):
+    """
+    Add CORS headers to response for public chatbot API
+    """
+    origin = request.META.get('HTTP_ORIGIN')
+    
+    # Allowed origins for public chatbot
+    allowed_origins = [
+        'https://oxfordcompetencycenters.github.io',
+        'https://aicc.uksouth.cloudapp.azure.com',
+        'http://localhost:3000',
+        'http://localhost:5173',
+        'http://localhost:8080',
+        'http://127.0.0.1:3000',
+        'http://127.0.0.1:5173',
+        'http://127.0.0.1:8080',
+    ]
+    
+    if origin in allowed_origins:
+        response['Access-Control-Allow-Origin'] = origin
+    else:
+        response['Access-Control-Allow-Origin'] = '*'  # Fallback for public API
+    
+    response['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response['Access-Control-Allow-Headers'] = 'Origin, Content-Type, Accept, Authorization, X-Requested-With, Cache-Control'
+    response['Access-Control-Allow-Credentials'] = 'true'
+    response['Access-Control-Max-Age'] = '86400'
+    
+    return response
 
 
 def _rate_limit_decorator():
@@ -141,7 +170,9 @@ def public_chat_api(request):
     """
     # Handle CORS preflight
     if request.method == 'OPTIONS':
-        return JsonResponse({'status': 'ok'})
+        response = JsonResponse({'status': 'ok'})
+        _add_cors_headers(response, request)
+        return response
     
     # Generate unique request ID for tracking
     client_ip = _get_client_ip(request)
@@ -156,22 +187,26 @@ def public_chat_api(request):
         # Check if chatbot is enabled
         config = ChatbotConfiguration.get_config()
         if not config.is_enabled or config.maintenance_mode:
-            return JsonResponse({
+            response = JsonResponse({
                 'status': 'error',
                 'error': 'Service temporarily unavailable' if config.maintenance_mode else 'Service disabled',
                 'message': config.maintenance_message if config.maintenance_mode else 'Chatbot service is currently disabled',
                 'request_id': request_id
             }, status=503)
+            _add_cors_headers(response, request)
+            return response
         
         # Parse request body
         try:
             data = json.loads(request.body) if request.body else {}
         except json.JSONDecodeError:
-            return JsonResponse({
+            response = JsonResponse({
                 'status': 'error',
                 'error': 'Invalid JSON format',
                 'request_id': request_id
             }, status=400)
+            _add_cors_headers(response, request)
+            return response
         
         # Extract and validate parameters
         message = data.get('message', '').strip()
@@ -219,11 +254,13 @@ def public_chat_api(request):
             # Update IP tracking
             _update_ip_security_violation(client_ip)
             
-            return JsonResponse({
+            response = JsonResponse({
                 'status': 'error',
                 'error': security_result['error'],
                 'request_id': request_id
             }, status=400)
+            _add_cors_headers(response, request)
+            return response
         
         # Check IP-based rate limiting
         if ChatbotSecurityService.check_rate_limit_exceeded(client_ip):
@@ -238,12 +275,14 @@ def public_chat_api(request):
                 except:
                     pass
             
-            return JsonResponse({
+            response = JsonResponse({
                 'status': 'error',
                 'error': 'Rate limit exceeded. Please try again later.',
                 'retry_after': 3600,  # 1 hour
                 'request_id': request_id
             }, status=429)
+            _add_cors_headers(response, request)
+            return response
         
         logger.info(f"📨 PUBLIC API: Processing request [{request_id}] from {client_ip}: '{message[:50]}...'")
         
@@ -339,12 +378,14 @@ def public_chat_api(request):
                 response_json['sources'] = _format_sources(context_results)
                 
             logger.info(f"✅ SUCCESS: Request [{request_id}] completed in {total_time_ms}ms")
-            return JsonResponse(response_json)
+            response = JsonResponse(response_json)
+            _add_cors_headers(response, request)
+            return response
         
         else:
             # LLM error response
             logger.error(f"❌ LLM ERROR: Request [{request_id}] failed: {response_data.get('error')}")
-            return JsonResponse({
+            response = JsonResponse({
                 'status': 'error',
                 'error': 'Unable to generate response. Please try again.',
                 'request_id': request_id,
@@ -353,6 +394,8 @@ def public_chat_api(request):
                     'response_time_ms': total_time_ms
                 }
             }, status=500)
+            _add_cors_headers(response, request)
+            return response
             
     except Exception as e:
         # Handle unexpected errors
@@ -373,7 +416,7 @@ def public_chat_api(request):
             except:
                 pass
         
-        return JsonResponse({
+        response = JsonResponse({
             'status': 'error',
             'error': 'An unexpected error occurred. Please try again.',
             'request_id': request_id,
@@ -382,6 +425,8 @@ def public_chat_api(request):
                 'response_time_ms': total_time_ms
             }
         }, status=500)
+        _add_cors_headers(response, request)
+        return response
 
 
 def _generate_llm_response(message: str, context_results: List[Dict], conversation_context: List[Dict], config: ChatbotConfiguration, request_id: str) -> Dict[str, Any]:
@@ -521,12 +566,18 @@ def _update_ip_security_violation(ip_address: str):
         logger.error(f"Failed to update security violations for {ip_address}: {e}")
 
 
-@require_http_methods(["GET"])
+@require_http_methods(["GET", "OPTIONS"])
 def health_check(request):
     """
     Health check endpoint for monitoring
     GET /api/public-chatbot/health/
     """
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = JsonResponse({'status': 'ok'})
+        _add_cors_headers(response, request)
+        return response
+    
     try:
         # Check ChromaDB service
         knowledge_service = PublicKnowledgeService.get_instance()
@@ -565,14 +616,18 @@ def health_check(request):
         }
         
         status_code = 200 if health_data['status'] == 'healthy' else 503
-        return JsonResponse(health_data, status=status_code)
+        response = JsonResponse(health_data, status=status_code)
+        _add_cors_headers(response, request)
+        return response
         
     except Exception as e:
-        return JsonResponse({
+        response = JsonResponse({
             'status': 'unhealthy',
             'error': str(e),
             'timestamp': timezone.now().isoformat()
         }, status=503)
+        _add_cors_headers(response, request)
+        return response
 
 
 @csrf_exempt
@@ -590,7 +645,9 @@ def public_chat_stream_api(request):
     """
     # Handle CORS preflight
     if request.method == 'OPTIONS':
-        return JsonResponse({'status': 'ok'})
+        response = JsonResponse({'status': 'ok'})
+        _add_cors_headers(response, request)
+        return response
     
     # Generate unique request ID for tracking
     client_ip = _get_client_ip(request)
@@ -603,21 +660,25 @@ def public_chat_stream_api(request):
         # Check if chatbot is enabled
         config = ChatbotConfiguration.get_config()
         if not config.is_enabled or config.maintenance_mode:
-            return JsonResponse({
+            response = JsonResponse({
                 'status': 'error',
                 'error': 'Service temporarily unavailable' if config.maintenance_mode else 'Service disabled',
                 'request_id': request_id
             }, status=503)
+            _add_cors_headers(response, request)
+            return response
         
         # Parse request body
         try:
             data = json.loads(request.body) if request.body else {}
         except json.JSONDecodeError:
-            return JsonResponse({
+            response = JsonResponse({
                 'status': 'error',
                 'error': 'Invalid JSON format',
                 'request_id': request_id
             }, status=400)
+            _add_cors_headers(response, request)
+            return response
         
         # Extract and validate parameters
         message = data.get('message', '').strip()
@@ -625,39 +686,47 @@ def public_chat_stream_api(request):
         context_limit = min(data.get('context_limit', config.max_search_results), config.max_search_results)
         
         if not message:
-            return JsonResponse({
+            response = JsonResponse({
                 'status': 'error',
                 'error': 'Message is required',
                 'request_id': request_id
             }, status=400)
+            _add_cors_headers(response, request)
+            return response
         
         # Security validation
         security_result = ChatbotSecurityService.validate_input(message, client_ip)
         if not security_result['valid']:
             logger.warning(f"🚨 SECURITY: Invalid input from {client_ip}: {security_result['reason']}")
-            return JsonResponse({
+            response = JsonResponse({
                 'status': 'error',
                 'error': security_result['error'],
                 'request_id': request_id
             }, status=400)
+            _add_cors_headers(response, request)
+            return response
         
         # Check IP-based rate limiting
         if ChatbotSecurityService.check_rate_limit_exceeded(client_ip):
             logger.warning(f"🚨 RATE LIMIT: IP {client_ip} exceeded limits")
-            return JsonResponse({
+            response = JsonResponse({
                 'status': 'error',
                 'error': 'Rate limit exceeded. Please try again later.',
                 'retry_after': 3600,
                 'request_id': request_id
             }, status=429)
+            _add_cors_headers(response, request)
+            return response
         
         # Only allow streaming for OpenAI provider
         if config.default_llm_provider != 'openai':
-            return JsonResponse({
+            response = JsonResponse({
                 'status': 'error',
                 'error': 'Streaming is currently only supported with OpenAI provider',
                 'request_id': request_id
             }, status=400)
+            _add_cors_headers(response, request)
+            return response
         
         logger.info(f"📨 STREAM API: Processing request [{request_id}] from {client_ip}: '{message[:50]}...'")
         
@@ -685,6 +754,21 @@ def public_chat_stream_api(request):
         )
         
         if response_data.get('streaming'):
+            # Get origin for CORS
+            origin = request.META.get('HTTP_ORIGIN')
+            allowed_origins = [
+                'https://oxfordcompetencycenters.github.io',
+                'https://aicc.uksouth.cloudapp.azure.com',
+                'http://localhost:3000',
+                'http://localhost:5173',
+                'http://localhost:8080',
+                'http://127.0.0.1:3000',
+                'http://127.0.0.1:5173',
+                'http://127.0.0.1:8080',
+            ]
+            
+            cors_origin = origin if origin in allowed_origins else '*'
+            
             # Return streaming response with proper SSE headers
             return StreamingHttpResponse(
                 response_data['generator'],
@@ -692,18 +776,21 @@ def public_chat_stream_api(request):
                 headers={
                     'Cache-Control': 'no-cache',
                     'X-Accel-Buffering': 'no',  # Disable nginx buffering
-                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Origin': cors_origin,
                     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-                    'Access-Control-Allow-Headers': 'Content-Type',
+                    'Access-Control-Allow-Headers': 'Origin, Content-Type, Accept, Authorization, X-Requested-With, Cache-Control',
+                    'Access-Control-Allow-Credentials': 'true',
                 }
             )
         else:
             # Fallback to regular response if streaming failed
-            return JsonResponse({
+            response = JsonResponse({
                 'status': 'error',
                 'error': response_data.get('error', 'Streaming failed'),
                 'request_id': request_id
             }, status=500)
+            _add_cors_headers(response, request)
+            return response
             
     except Exception as e:
         logger.error(f"❌ STREAM ERROR: Request [{request_id}] failed: {str(e)}")
@@ -719,10 +806,7 @@ def public_chat_stream_api(request):
         }, status=500)
         
         # Add CORS headers to error response
-        response['Access-Control-Allow-Origin'] = '*'
-        response['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
-        response['Access-Control-Allow-Headers'] = 'Content-Type'
-        
+        _add_cors_headers(response, request)
         return response
 
 
