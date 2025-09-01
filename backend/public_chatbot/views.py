@@ -31,7 +31,6 @@ except ImportError:
 from .services import PublicKnowledgeService, ChatbotSecurityService
 from .models import PublicChatRequest, IPUsageLimit, ChatbotConfiguration
 from .llm_integration import PublicLLMService
-from .cors_hotfix import force_cors_headers
 
 # IMMEDIATE CORS HOTFIX - Direct CORS handling
 def add_cors_headers_immediate(response, request):
@@ -187,7 +186,6 @@ def _is_rate_limited(ip_address: str) -> bool:
 @require_http_methods(["POST", "OPTIONS"])
 @never_cache
 @_rate_limit_decorator()
-@force_cors_headers
 def public_chat_api(request):
     """
     Public Chatbot API Endpoint - Completely Isolated
@@ -596,7 +594,6 @@ def _update_ip_security_violation(ip_address: str):
 
 
 @require_http_methods(["GET", "OPTIONS"])
-@force_cors_headers
 def health_check(request):
     """
     Health check endpoint for monitoring
@@ -664,7 +661,6 @@ def health_check(request):
 @require_http_methods(["POST", "OPTIONS"])
 @never_cache
 @_rate_limit_decorator()
-@force_cors_headers
 def public_chat_stream_api(request):
     """
     Public Chatbot Streaming API Endpoint

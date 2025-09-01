@@ -38,20 +38,31 @@ class PublicChatbotCORSMiddleware(MiddlewareMixin):
     
     def process_request(self, request):
         """Process incoming requests to add CORS headers for chatbot endpoints"""
-        # Check if this is a chatbot endpoint
-        if not any(request.path.startswith(path) for path in self.CHATBOT_PATHS):
+        # Check if this is a chatbot endpoint - be more flexible with path matching
+        is_chatbot_path = (
+            request.path.startswith('/api/public-chatbot/') or
+            request.path.startswith('/api/public-chatbot')
+        )
+        
+        if not is_chatbot_path:
             return None
         
         origin = request.META.get('HTTP_ORIGIN')
         
-        # Handle preflight OPTIONS requests
+        # DEBUG: Log all preflight requests for chatbot endpoints
         if request.method == 'OPTIONS':
-            logger.info(f"🌍 CORS: Preflight request from {origin} for {request.path}")
+            logger.info(f"🌍 CORS DEBUG: Preflight request")
+            logger.info(f"   Origin: {origin}")
+            logger.info(f"   Path: {request.path}")
+            logger.info(f"   Method: {request.method}")
+            logger.info(f"   Allowed origins: {self.ALLOWED_ORIGINS}")
+            logger.info(f"   Origin in allowed: {origin in self.ALLOWED_ORIGINS}")
             
             # Check if origin is allowed
             if origin in self.ALLOWED_ORIGINS:
                 response = JsonResponse({'status': 'ok'})
                 self._add_cors_headers(response, origin)
+                logger.info(f"🌍 CORS: Allowed preflight for {origin}")
                 return response
             else:
                 logger.warning(f"🚫 CORS: Blocked preflight from unauthorized origin {origin}")
@@ -62,8 +73,13 @@ class PublicChatbotCORSMiddleware(MiddlewareMixin):
     
     def process_response(self, request, response):
         """Add CORS headers to responses for chatbot endpoints"""
-        # Check if this is a chatbot endpoint
-        if not any(request.path.startswith(path) for path in self.CHATBOT_PATHS):
+        # Check if this is a chatbot endpoint - be more flexible with path matching
+        is_chatbot_path = (
+            request.path.startswith('/api/public-chatbot/') or
+            request.path.startswith('/api/public-chatbot')
+        )
+        
+        if not is_chatbot_path:
             return response
         
         origin = request.META.get('HTTP_ORIGIN')
@@ -73,7 +89,7 @@ class PublicChatbotCORSMiddleware(MiddlewareMixin):
             self._add_cors_headers(response, origin)
             logger.debug(f"🌍 CORS: Added headers for {origin} on {request.path}")
         else:
-            logger.warning(f"🚫 CORS: Blocked response to unauthorized origin {origin}")
+            logger.warning(f"🚫 CORS: Blocked response to unauthorized origin {origin} on {request.path}")
         
         return response
     

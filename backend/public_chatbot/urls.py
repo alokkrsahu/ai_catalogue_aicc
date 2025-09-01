@@ -4,14 +4,10 @@ Completely isolated endpoints - no impact on existing AI Catalogue URLs
 """
 from django.urls import path
 from . import views
-from .cors_hotfix import cors_test_endpoint
 
 app_name = 'public_chatbot'
 
 urlpatterns = [
-    # CORS test endpoint (for debugging)
-    path('cors-test/', cors_test_endpoint, name='cors_test'),
-    
     # Main public chatbot API endpoint
     path('', views.public_chat_api, name='chat_api'),
     
