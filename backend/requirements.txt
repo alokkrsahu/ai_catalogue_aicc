@@ -29,11 +29,14 @@ django-ratelimit>=4.1.0
 # (pymilvus and numpy already included above)
 # django-redis>=5.0.0  # Optional, for caching
 
-# Text Extraction Dependencies
+# Text Extraction Dependencies (Enhanced for Bulk Upload)
 PyPDF2>=3.0.1
+pdfplumber>=0.9.0           # Advanced PDF text extraction
 python-docx>=0.8.11
 openpyxl>=3.1.2
 markdown>=3.5.1
+beautifulsoup4>=4.12.0      # HTML parsing and text extraction
+chardet>=5.2.0              # Character encoding detection
 
 # Gemini API for PDF and Image OCR
 google-genai>=0.2.0

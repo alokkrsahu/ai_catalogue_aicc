@@ -65,7 +65,7 @@ export const load: LayoutLoad = async ({ url }) => {
     const finalIsAdmin = currentUserData?.role === 'ADMIN'; // Check role from potentially updated user data
     const path = url.pathname || '/';
 
-    const publicRoutes = ['/login', '/register', '/reset-password'];
+    const publicRoutes = ['/login', '/reset-password'];
     const isPublicRoute = publicRoutes.some(r => path === r || path.startsWith('/reset-password/'));
     const isAdminRoute = path.startsWith('/admin');
 

@@ -5,7 +5,8 @@ import axios from 'axios';
 import { get } from 'svelte/store';
 import authStore, { logout } from '$lib/stores/auth';
 
-const API_URL = '/api';
+// Use environment variable for API base URL, fallback to relative URL for development
+const API_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 
 // Create axios instance
 const api = axios.create({
@@ -68,10 +69,6 @@ export const loginUser = async (email: string, password: string) => {
   return response.data;
 };
 
-export const registerUser = async (userData: any) => {
-  const response = await api.post('/register/', userData);
-  return response.data;
-};
 
 export const getCurrentUser = async () => {
   const response = await api.get('/users/me/');

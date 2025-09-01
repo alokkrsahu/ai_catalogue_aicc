@@ -6,7 +6,6 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { toasts } from '$lib/stores/toast';
-  import DarkModeToggle from './DarkModeToggle.svelte';
   import PasswordChangeModal from './PasswordChangeModal.svelte';
   
   let isMenuOpen = false;
@@ -128,16 +127,6 @@
               >
                 Login
               </a>
-              
-              <a 
-                href="/register" 
-                class={pathname === '/register' 
-                  ? 'bg-[#001122] text-white px-3 py-2 rounded-md text-sm font-medium' 
-                  : 'text-gray-300 hover:bg-[#003366] hover:text-white px-3 py-2 rounded-md text-sm font-medium'}
-                aria-current={pathname === '/register' ? 'page' : undefined}
-              >
-                Register
-              </a>
             {/if}
           </div>
         </div>
@@ -146,8 +135,6 @@
       {#if $isAuthenticated}
         <div class="hidden md:block">
           <div class="ml-4 flex items-center md:ml-6 space-x-2">
-            <!-- Dark Mode Toggle -->
-            <!-- <DarkModeToggle /> -->
             
             <!-- Profile dropdown -->
             <div class="ml-3 relative" data-dropdown-container>
@@ -312,17 +299,6 @@
         >
           Login
         </a>
-        
-        <a 
-          href="/register" 
-          class={pathname === '/register' 
-            ? 'bg-[#001122] text-white block px-3 py-2 rounded-md text-base font-medium' 
-            : 'text-gray-300 hover:bg-[#003366] hover:text-white block px-3 py-2 rounded-md text-base font-medium'}
-          aria-current={pathname === '/register' ? 'page' : undefined}
-          on:click={closeMenu}
-        >
-          Register
-        </a>
       {/if}
     </div>
     
@@ -343,11 +319,6 @@
           </div>
         </div>
         <div class="mt-3 px-2 space-y-1">
-          <!-- Dark Mode Toggle for Mobile -->
-          <!-- <div class="flex items-center justify-between px-3 py-2">
-            <span class="text-base font-medium text-gray-400">Dark Mode</span>
-            <DarkModeToggle />
-          </div> -->
           
           {#if $isAdmin}
             <a 

@@ -4,13 +4,6 @@
   import ToastContainer from '$lib/components/ToastContainer.svelte';
   import Navigation from '$lib/components/Navigation.svelte';
   import UniversalThemeProvider from '$lib/components/UniversalThemeProvider.svelte';
-  import { darkMode } from '$lib/stores/darkMode';
-  import { onMount } from 'svelte';
-  
-  onMount(() => {
-    // Initialize dark mode on app startup
-    darkMode.init();
-  });
 </script>
 
 <UniversalThemeProvider>

@@ -1,13 +1,6 @@
 <!-- src/lib/components/UniversalThemeProvider.svelte -->
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { initializeUniversalDarkMode } from '$lib/styles/universalDarkMode';
   import '../styles/universal.css';
-  
-  // Initialize universal dark mode on mount
-  onMount(() => {
-    initializeUniversalDarkMode();
-  });
 </script>
 
 <!-- This component provides universal theming to all child components -->

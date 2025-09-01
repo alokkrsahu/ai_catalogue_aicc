@@ -1,14 +1,22 @@
 """
 Django Admin for Public Chatbot - Isolated Management Interface
+Enhanced with Bulk Document Upload Functionality
 """
 from django.contrib import admin
 from django.utils.html import format_html
-from django.urls import reverse
+from django.urls import reverse, path
 from django.utils import timezone
+from django.shortcuts import render, redirect
+from django.contrib import messages
+from django.http import HttpResponseRedirect
+from django.core.exceptions import PermissionDenied
+from django.db import transaction
 from .models import (
     PublicChatRequest, IPUsageLimit, PublicKnowledgeDocument, 
     ChatbotConfiguration
 )
+from .forms import BulkDocumentUploadForm
+from .document_processor import DocumentProcessor
 
 
 def get_user_identifier(user):
@@ -202,6 +210,21 @@ class PublicKnowledgeDocumentAdmin(admin.ModelAdmin):
     
     actions = ['approve_documents', 'sync_to_chromadb_immediately', 'mark_for_sync']
     
+    def get_urls(self):
+        """Add custom URLs for bulk upload"""
+        urls = super().get_urls()
+        custom_urls = [
+            path('bulk-upload/', self.admin_site.admin_view(self.bulk_upload_view), 
+                 name='public_chatbot_bulk_upload'),
+        ]
+        return custom_urls + urls
+    
+    def changelist_view(self, request, extra_context=None):
+        """Add bulk upload button to changelist"""
+        extra_context = extra_context or {}
+        extra_context['bulk_upload_url'] = reverse('admin:public_chatbot_bulk_upload')
+        return super().changelist_view(request, extra_context)
+    
     def approve_documents(self, request, queryset):
         """Approve selected documents"""
         user_identifier = get_user_identifier(request.user)
@@ -366,6 +389,188 @@ class PublicKnowledgeDocumentAdmin(admin.ModelAdmin):
             doc.sync_error = str(e)[:500]
             doc.save()
             return False
+    
+    def bulk_upload_view(self, request):
+        """
+        Custom admin view for bulk document upload
+        """
+        if not self.has_add_permission(request):
+            raise PermissionDenied
+        
+        if request.method == 'POST':
+            form = BulkDocumentUploadForm(request.POST, request.FILES, user=request.user)
+            if form.is_valid():
+                return self._process_bulk_upload(request, form)
+        else:
+            form = BulkDocumentUploadForm(user=request.user)
+        
+        context = {
+            'form': form,
+            'title': 'Bulk Document Upload',
+            'opts': self.model._meta,
+            'has_change_permission': self.has_change_permission(request),
+            'supported_formats': DocumentProcessor.get_supported_formats(),
+            'dependencies': DocumentProcessor.check_dependencies(),
+        }
+        
+        return render(request, 'admin/public_chatbot/bulk_upload.html', context)
+    
+    @transaction.atomic
+    def _process_bulk_upload(self, request, form):
+        """
+        Process the bulk upload form submission with progress tracking
+        """
+        files = form.cleaned_data['files']
+        category = form.cleaned_data['category']
+        auto_approve = form.cleaned_data['auto_approve']
+        auto_security_review = form.cleaned_data['auto_security_review']
+        auto_sync = form.cleaned_data['auto_sync']
+        min_quality_score = form.cleaned_data['min_quality_score']
+        
+        user_identifier = get_user_identifier(request.user)
+        
+        # Initialize progress tracking
+        from .upload_progress import UploadProgressTracker
+        progress_tracker = UploadProgressTracker()
+        session_key = progress_tracker.start_upload(
+            total_files=len(files), 
+            user_id=str(request.user.id) if request.user else None
+        )
+        
+        # Store session key for potential AJAX requests
+        request.session['current_upload_session'] = session_key
+        
+        try:
+            # Update progress: Starting security validation
+            progress_tracker.update_progress(
+                stage="Security validation",
+                processed_count=0
+            )
+            
+            # Process documents
+            processor = DocumentProcessor()
+            result = processor.process_uploaded_files(
+                files=files,
+                default_category=category,
+                created_by=user_identifier
+            )
+            
+            # Update progress: Document processing completed
+            progress_tracker.update_progress(
+                stage="Creating database records",
+                processed_count=len(files)
+            )
+            
+            if not result['success'] and result['error_count'] > 0:
+                # Show errors but continue with successful ones
+                for error in result['errors']:
+                    messages.error(request, f"❌ {error['file']}: {error['error']}")
+            
+            # Show warnings
+            for warning in result['warnings']:
+                messages.warning(request, f"⚠️ {warning['file']}: {warning['warning']}")
+            
+            # Create database records for successful documents
+            created_docs = []
+            synced_docs = []
+            
+            for i, doc_data in enumerate(result['documents']):
+                # Update progress for current document
+                progress_tracker.update_progress(
+                    current_file=doc_data.get('file_name', f'Document {i+1}'),
+                    stage="Creating database record",
+                    successful_count=len(created_docs)
+                )
+                
+                # Filter by quality score
+                if doc_data['quality_score'] < min_quality_score:
+                    messages.warning(request, 
+                        f"⚠️ Skipped {doc_data['title']} (quality score {doc_data['quality_score']} < {min_quality_score})")
+                    progress_tracker.update_progress(
+                        warning_message=f"Skipped {doc_data['title']} due to low quality score"
+                    )
+                    continue
+                
+                # Create document record
+                doc = PublicKnowledgeDocument.objects.create(
+                    title=doc_data['title'],
+                    content=doc_data['content'],
+                    category=doc_data['category'],
+                    subcategory=doc_data['subcategory'],
+                    source_url=doc_data['source_url'],
+                    tags=doc_data['tags'],
+                    created_by=user_identifier,
+                    language=doc_data['language'],
+                    quality_score=doc_data['quality_score'],
+                    is_approved=auto_approve,
+                    security_reviewed=auto_security_review,
+                    approved_by=user_identifier if auto_approve else '',
+                )
+                created_docs.append(doc)
+                
+                # Auto-sync if requested and approved
+                if auto_sync and doc.is_approved and doc.security_reviewed:
+                    try:
+                        # Update progress for sync
+                        progress_tracker.update_progress(
+                            stage=f"Syncing to ChromaDB: {doc.title}"
+                        )
+                        
+                        from .services import PublicKnowledgeService
+                        knowledge_service = PublicKnowledgeService.get_instance()
+                        if knowledge_service.is_ready:
+                            success = self._sync_document_immediately(doc, knowledge_service)
+                            if success:
+                                synced_docs.append(doc)
+                            else:
+                                progress_tracker.update_progress(
+                                    warning_message=f"Failed to sync {doc.title} to ChromaDB"
+                                )
+                        else:
+                            messages.warning(request, f"⚠️ ChromaDB not ready - {doc.title} created but not synced")
+                            progress_tracker.update_progress(
+                                warning_message=f"ChromaDB not ready for {doc.title}"
+                            )
+                    except Exception as sync_error:
+                        error_msg = f"{doc.title}: Created but sync failed - {str(sync_error)[:100]}"
+                        messages.warning(request, f"⚠️ {error_msg}")
+                        progress_tracker.update_progress(
+                            warning_message=error_msg
+                        )
+            
+            # Show success summary
+            if created_docs:
+                messages.success(request, 
+                    f"✅ Successfully created {len(created_docs)} documents from {result['processed_count']} files")
+                
+                if synced_docs:
+                    messages.success(request, 
+                        f"🚀 Auto-synced {len(synced_docs)} documents to ChromaDB")
+                
+                # Show format breakdown
+                formats = result['summary']['formats_processed']
+                if formats:
+                    messages.info(request, 
+                        f"📁 Processed formats: {', '.join(formats)}")
+            
+            # Complete progress tracking
+            summary = {
+                'total_files': len(files),
+                'created_documents': len(created_docs),
+                'synced_documents': len(synced_docs),
+                'errors': result['error_count'],
+                'warnings': result['warning_count']
+            }
+            progress_tracker.complete_upload('completed', summary)
+            
+            # Redirect back to document list
+            return redirect('admin:public_chatbot_publicknowledgedocument_changelist')
+            
+        except Exception as e:
+            # Mark progress as failed
+            progress_tracker.complete_upload('failed', {'error': str(e)})
+            messages.error(request, f"❌ Upload processing failed: {str(e)}")
+            return redirect('admin:public_chatbot_bulk_upload')
 
 
 @admin.register(ChatbotConfiguration)

@@ -1,0 +1,404 @@
+{% extends "admin/base_site.html" %}
+{% load i18n admin_urls static admin_modify %}
+
+{% block title %}{% trans 'Bulk Document Upload' %} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">{% trans 'Home' %}</a>
+    &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+    &rsaquo; <a href="{% url 'admin:public_chatbot_publicknowledgedocument_changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+    &rsaquo; {% trans 'Bulk Upload' %}
+</div>
+{% endblock %}
+
+{% block extrahead %}
+{{ block.super }}
+<style>
+    .upload-section {
+        background: #f8f9fa;
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        padding: 20px;
+        margin: 20px 0;
+    }
+    
+    .upload-header {
+        display: flex;
+        align-items: center;
+        margin-bottom: 15px;
+    }
+    
+    .upload-header h3 {
+        margin: 0;
+        color: #2c3e50;
+    }
+    
+    .upload-icon {
+        font-size: 24px;
+        margin-right: 10px;
+        color: #3498db;
+    }
+    
+    .file-drop-zone {
+        border: 2px dashed #3498db;
+        border-radius: 8px;
+        padding: 40px 20px;
+        text-align: center;
+        background: #fff;
+        margin: 15px 0;
+        transition: all 0.3s ease;
+    }
+    
+    .file-drop-zone:hover {
+        border-color: #2980b9;
+        background: #f8f9fa;
+    }
+    
+    .file-drop-zone.drag-over {
+        border-color: #27ae60;
+        background: #d5f4e6;
+    }
+    
+    .supported-formats {
+        background: #e8f4f8;
+        border: 1px solid #3498db;
+        border-radius: 4px;
+        padding: 15px;
+        margin: 15px 0;
+    }
+    
+    .format-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 10px;
+    }
+    
+    .format-tag {
+        background: #3498db;
+        color: white;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 12px;
+        font-weight: bold;
+    }
+    
+    .format-tag.unavailable {
+        background: #bdc3c7;
+        text-decoration: line-through;
+    }
+    
+    .upload-options {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+        margin: 20px 0;
+    }
+    
+    .option-group {
+        background: white;
+        border: 1px solid #dee2e6;
+        border-radius: 6px;
+        padding: 15px;
+    }
+    
+    .option-group h4 {
+        margin: 0 0 10px 0;
+        color: #2c3e50;
+        border-bottom: 1px solid #ecf0f1;
+        padding-bottom: 8px;
+    }
+    
+    .form-row {
+        margin-bottom: 12px;
+    }
+    
+    .form-row label {
+        display: block;
+        font-weight: 500;
+        margin-bottom: 4px;
+        color: #2c3e50;
+    }
+    
+    .form-row input, .form-row select, .form-row textarea {
+        width: 100%;
+        padding: 8px;
+        border: 1px solid #ced4da;
+        border-radius: 4px;
+        font-size: 14px;
+    }
+    
+    .checkbox-row {
+        display: flex;
+        align-items: center;
+        margin-bottom: 8px;
+    }
+    
+    .checkbox-row input[type="checkbox"] {
+        width: auto;
+        margin-right: 8px;
+    }
+    
+    .help-text {
+        font-size: 12px;
+        color: #6c757d;
+        margin-top: 4px;
+    }
+    
+    .upload-progress {
+        display: none;
+        margin: 15px 0;
+    }
+    
+    .progress-bar {
+        width: 100%;
+        height: 20px;
+        background: #f8f9fa;
+        border-radius: 10px;
+        overflow: hidden;
+        border: 1px solid #dee2e6;
+    }
+    
+    .progress-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #3498db, #2980b9);
+        width: 0%;
+        transition: width 0.3s ease;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-size: 12px;
+        font-weight: bold;
+    }
+    
+    .dependency-warning {
+        background: #fff3cd;
+        border: 1px solid #ffeaa7;
+        color: #856404;
+        padding: 10px;
+        border-radius: 4px;
+        margin: 10px 0;
+    }
+    
+    .dependency-warning strong {
+        color: #d63384;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1>📁 Bulk Document Upload</h1>
+
+{% if dependencies %}
+<div class="upload-section">
+    <div class="upload-header">
+        <span class="upload-icon">🔧</span>
+        <h3>Format Support Status</h3>
+    </div>
+    
+    <div class="supported-formats">
+        <strong>📄 Supported Formats:</strong>
+        <div class="format-list">
+            {% for format in supported_formats %}
+            <span class="format-tag">{{ format }}</span>
+            {% endfor %}
+        </div>
+    </div>
+    
+    {% for dep_name, available in dependencies.items %}
+        {% if not available %}
+        <div class="dependency-warning">
+            <strong>⚠️ Limited Support:</strong> {{ dep_name|upper }} processing may be unavailable. 
+            Some file formats may not work properly.
+        </div>
+        {% endif %}
+    {% endfor %}
+</div>
+{% endif %}
+
+<form method="post" enctype="multipart/form-data" id="bulk-upload-form">
+    {% csrf_token %}
+    
+    <div class="upload-section">
+        <div class="upload-header">
+            <span class="upload-icon">📤</span>
+            <h3>Select Files</h3>
+        </div>
+        
+        <div class="file-drop-zone" id="drop-zone">
+            <div style="font-size: 48px; color: #3498db; margin-bottom: 10px;">📁</div>
+            <p><strong>Drag and drop files here</strong> or click to select</p>
+            <p style="color: #6c757d; font-size: 14px;">
+                Maximum: 50 files, 50MB per file, 200MB total
+            </p>
+            {{ form.files }}
+        </div>
+        
+        <div id="file-list" style="margin-top: 15px;"></div>
+    </div>
+    
+    <div class="upload-options">
+        <div class="option-group">
+            <h4>🏷️ Document Settings</h4>
+            
+            <div class="form-row">
+                <label for="{{ form.category.id_for_label }}">Category:</label>
+                {{ form.category }}
+                <div class="help-text">{{ form.category.help_text }}</div>
+            </div>
+            
+            <div class="form-row">
+                <label for="{{ form.min_quality_score.id_for_label }}">Min Quality Score:</label>
+                {{ form.min_quality_score }}
+                <div class="help-text">{{ form.min_quality_score.help_text }}</div>
+            </div>
+        </div>
+        
+        <div class="option-group">
+            <h4>⚡ Processing Options</h4>
+            
+            <div class="checkbox-row">
+                {{ form.auto_approve }}
+                <label for="{{ form.auto_approve.id_for_label }}">Auto-approve documents</label>
+            </div>
+            <div class="help-text">{{ form.auto_approve.help_text }}</div>
+            
+            <div class="checkbox-row">
+                {{ form.auto_security_review }}
+                <label for="{{ form.auto_security_review.id_for_label }}">Auto-security review</label>
+            </div>
+            <div class="help-text">{{ form.auto_security_review.help_text }}</div>
+            
+            <div class="checkbox-row">
+                {{ form.auto_sync }}
+                <label for="{{ form.auto_sync.id_for_label }}">Auto-sync to ChromaDB</label>
+            </div>
+            <div class="help-text">{{ form.auto_sync.help_text }}</div>
+        </div>
+    </div>
+    
+    <div class="upload-progress" id="upload-progress">
+        <div class="progress-bar">
+            <div class="progress-fill" id="progress-fill">0%</div>
+        </div>
+        <p id="progress-text">Processing files...</p>
+    </div>
+    
+    <div class="submit-row" style="margin-top: 30px;">
+        <input type="submit" value="🚀 Upload & Process Documents" class="default" id="submit-btn"/>
+        <a href="{% url 'admin:public_chatbot_publicknowledgedocument_changelist' %}" class="button cancel-link">Cancel</a>
+    </div>
+</form>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const dropZone = document.getElementById('drop-zone');
+    const fileInput = document.getElementById('{{ form.files.id_for_label }}');
+    const fileList = document.getElementById('file-list');
+    const submitBtn = document.getElementById('submit-btn');
+    const uploadProgress = document.getElementById('upload-progress');
+    const progressFill = document.getElementById('progress-fill');
+    const progressText = document.getElementById('progress-text');
+    
+    // Drag and drop functionality
+    dropZone.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        dropZone.classList.add('drag-over');
+    });
+    
+    dropZone.addEventListener('dragleave', function(e) {
+        e.preventDefault();
+        dropZone.classList.remove('drag-over');
+    });
+    
+    dropZone.addEventListener('drop', function(e) {
+        e.preventDefault();
+        dropZone.classList.remove('drag-over');
+        const files = e.dataTransfer.files;
+        fileInput.files = files;
+        displayFileList(files);
+    });
+    
+    // Click to select files
+    dropZone.addEventListener('click', function() {
+        fileInput.click();
+    });
+    
+    // File input change
+    fileInput.addEventListener('change', function() {
+        displayFileList(this.files);
+    });
+    
+    // Form submission with progress
+    document.getElementById('bulk-upload-form').addEventListener('submit', function(e) {
+        if (fileInput.files.length === 0) {
+            alert('Please select at least one file to upload.');
+            e.preventDefault();
+            return;
+        }
+        
+        submitBtn.style.display = 'none';
+        uploadProgress.style.display = 'block';
+        
+        // Simulate progress (real progress would need AJAX)
+        let progress = 0;
+        const progressInterval = setInterval(function() {
+            progress += Math.random() * 15;
+            if (progress > 90) progress = 90;
+            
+            progressFill.style.width = progress + '%';
+            progressFill.textContent = Math.round(progress) + '%';
+            
+            if (progress >= 90) {
+                clearInterval(progressInterval);
+                progressText.textContent = 'Finalizing upload...';
+            }
+        }, 200);
+    });
+    
+    function displayFileList(files) {
+        fileList.innerHTML = '';
+        
+        if (files.length === 0) return;
+        
+        const listContainer = document.createElement('div');
+        listContainer.style.cssText = 'background: white; border: 1px solid #dee2e6; border-radius: 4px; padding: 15px;';
+        
+        const header = document.createElement('h4');
+        header.textContent = `📋 Selected Files (${files.length})`;
+        header.style.cssText = 'margin: 0 0 10px 0; color: #2c3e50;';
+        listContainer.appendChild(header);
+        
+        let totalSize = 0;
+        
+        Array.from(files).forEach(function(file, index) {
+            totalSize += file.size;
+            
+            const fileItem = document.createElement('div');
+            fileItem.style.cssText = 'display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f8f9fa;';
+            
+            const fileName = document.createElement('span');
+            fileName.textContent = file.name;
+            fileName.style.cssText = 'font-weight: 500; color: #2c3e50;';
+            
+            const fileInfo = document.createElement('span');
+            fileInfo.textContent = `${(file.size / 1024).toFixed(1)} KB`;
+            fileInfo.style.cssText = 'color: #6c757d; font-size: 14px;';
+            
+            fileItem.appendChild(fileName);
+            fileItem.appendChild(fileInfo);
+            listContainer.appendChild(fileItem);
+        });
+        
+        const totalInfo = document.createElement('div');
+        totalInfo.style.cssText = 'margin-top: 10px; padding-top: 10px; border-top: 2px solid #3498db; font-weight: bold; color: #2c3e50;';
+        totalInfo.textContent = `Total: ${(totalSize / 1024 / 1024).toFixed(1)} MB`;
+        listContainer.appendChild(totalInfo);
+        
+        fileList.appendChild(listContainer);
+    }
+});
+</script>
+{% endblock %}
