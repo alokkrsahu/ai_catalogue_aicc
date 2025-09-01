@@ -5,8 +5,8 @@ import axios from 'axios';
 import { get } from 'svelte/store';
 import authStore, { logout } from '$lib/stores/auth';
 
-// Use environment variable for API base URL, fallback to relative URL for development
-const API_URL = import.meta.env.VITE_API_BASE_URL || '/api';
+// API Configuration - uses relative URL for proper proxy handling
+const API_URL = '/api';
 
 // Create axios instance
 const api = axios.create({

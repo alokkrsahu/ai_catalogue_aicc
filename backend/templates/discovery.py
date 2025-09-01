@@ -54,11 +54,7 @@ class TemplateDiscoverySystem:
         metadata_file = template_dir / 'metadata.json'
         definition_file = template_dir / 'definition.py'
         
-        # Check required files
-        if not metadata_file.exists():
-            logger.warning(f"Template {template_dir.name} missing metadata.json")
-            return None
-        
+        # Check if definition.py exists (required)
         if not definition_file.exists():
             logger.warning(f"Template {template_dir.name} missing definition.py")
             return None
@@ -76,12 +72,46 @@ class TemplateDiscoverySystem:
                 logger.warning(f"Security validation failed for {template_dir.name}: {str(sec_error)}")
                 # Continue anyway - don't block template loading
             
-            # Load metadata
-            with open(metadata_file, 'r') as f:
-                metadata = json.load(f)
+            # Try to load metadata.json if it exists
+            metadata = None
+            definition_class = None
             
-            # Load definition class
-            definition_config = cls._load_definition_class(definition_file, metadata.get('definition_class'))
+            if metadata_file.exists():
+                try:
+                    with open(metadata_file, 'r') as f:
+                        metadata = json.load(f)
+                    definition_class = metadata.get('definition_class')
+                    logger.info(f"Loaded metadata.json for template {template_dir.name}")
+                except Exception as e:
+                    logger.warning(f"Failed to load metadata.json for {template_dir.name}: {str(e)}")
+                    metadata = None
+            else:
+                logger.info(f"No metadata.json found for {template_dir.name}, using fallback")
+            
+            # Fallback: Generate metadata from template directory name and definition class
+            if not metadata:
+                template_id = template_dir.name
+                # Infer definition class name from common patterns
+                definition_class = cls._infer_definition_class_name(template_id)
+                
+                metadata = {
+                    'template_id': template_id,
+                    'template_type': template_id,
+                    'name': template_id.replace('-', ' ').title(),
+                    'description': f'Template for {template_id}',
+                    'definition_class': definition_class,
+                    'version': '1.0.0',
+                    'author': 'Unknown',
+                    'created_from_fallback': True
+                }
+                logger.info(f"Generated fallback metadata for {template_id} with class {definition_class}")
+            
+            # Load definition class configuration
+            definition_config = cls._load_definition_class(definition_file, definition_class)
+            
+            if not definition_config:
+                logger.error(f"Failed to load definition class for {template_dir.name}")
+                return None
             
             # Combine metadata and definition
             template_config = {
@@ -90,14 +120,40 @@ class TemplateDiscoverySystem:
                 'configuration': definition_config,
                 'source': 'folder',
                 'folder_path': str(template_dir),
-                'security_validated': True
+                'security_validated': True,
+                'loaded_from_fallback': metadata.get('created_from_fallback', False)
             }
             
             return template_config
             
         except Exception as e:
             logger.error(f"Error loading template {template_dir.name}: {str(e)}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             return None
+    
+    @classmethod
+    def _infer_definition_class_name(cls, template_id: str) -> str:
+        """Infer definition class name from template ID"""
+        # Known patterns for existing templates
+        class_name_mapping = {
+            'aicc-intellidoc': 'AICCIntelliDocTemplateDefinition',
+            'aicc-intellidoc-v2': 'AICCIntelliDocTemplateDefinition', 
+            'aicc-intellidoc-v4': 'AICCIntelliDocTemplateDefinition',
+            'legal': 'LegalTemplateDefinition',
+            'medical': 'MedicalTemplateDefinition',
+            'history': 'HistoryTemplateDefinition'
+        }
+        
+        # Return known mapping if available
+        if template_id in class_name_mapping:
+            return class_name_mapping[template_id]
+        
+        # Fallback: Generate class name from template ID
+        # Convert kebab-case to PascalCase and add TemplateDefinition suffix
+        words = template_id.replace('-', '_').split('_')
+        class_name = ''.join(word.capitalize() for word in words) + 'TemplateDefinition'
+        return class_name
     
     @classmethod
     def _load_definition_class(cls, definition_file: Path, class_name: str) -> Dict:
