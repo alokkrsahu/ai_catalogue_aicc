@@ -185,6 +185,29 @@
     .dependency-warning strong {
         color: #d63384;
     }
+    
+    /* Style the file input properly - hidden but accessible */
+    #id_files {
+        width: 0.1px;
+        height: 0.1px;
+        opacity: 0;
+        overflow: hidden;
+        position: absolute;
+        z-index: 1;
+    }
+    
+    /* Make the file input accessible but invisible */
+    .file-drop-zone {
+        position: relative;
+    }
+    
+    .file-drop-zone {
+        cursor: pointer;
+    }
+    
+    .file-drop-zone:hover {
+        cursor: pointer;
+    }
 </style>
 {% endblock %}
 
@@ -233,7 +256,19 @@
             <p style="color: #6c757d; font-size: 14px;">
                 Maximum: 50 files, 50MB per file, 200MB total
             </p>
+            {% if form.files.errors %}
+                <div class="alert alert-danger">
+                    {{ form.files.errors }}
+                </div>
+            {% endif %}
             {{ form.files }}
+            <!-- DEBUG: Check if form field is rendering -->
+            <script>
+                // Check immediately after this element
+                console.log('=== INLINE CHECK AFTER FORM FIELD ===');
+                console.log('innerHTML of drop-zone:', document.getElementById('drop-zone'));
+                console.log('Form field just rendered, checking for file input...');
+            </script>
         </div>
         
         <div id="file-list" style="margin-top: 15px;"></div>
@@ -293,14 +328,89 @@
 </form>
 
 <script>
+// Immediate check - before any delays
+console.log('=== IMMEDIATE DOM CHECK ===');
+console.log('Immediate fileInput check:', document.getElementById('id_files'));
+console.log('Immediate file inputs count:', document.querySelectorAll('input[type="file"]').length);
+
 document.addEventListener('DOMContentLoaded', function() {
-    const dropZone = document.getElementById('drop-zone');
-    const fileInput = document.getElementById('{{ form.files.id_for_label }}');
-    const fileList = document.getElementById('file-list');
-    const submitBtn = document.getElementById('submit-btn');
-    const uploadProgress = document.getElementById('upload-progress');
-    const progressFill = document.getElementById('progress-fill');
-    const progressText = document.getElementById('progress-text');
+    console.log('=== DOM CONTENT LOADED ===');
+    console.log('DOMContentLoaded fileInput check:', document.getElementById('id_files'));
+    console.log('DOMContentLoaded file inputs count:', document.querySelectorAll('input[type="file"]').length);
+    
+    // Add a small delay to ensure all elements are rendered
+    setTimeout(function() {
+        const dropZone = document.getElementById('drop-zone');
+        let fileInput = document.getElementById('id_files');
+        const fileList = document.getElementById('file-list');
+        const submitBtn = document.getElementById('submit-btn');
+        const uploadProgress = document.getElementById('upload-progress');
+        const progressFill = document.getElementById('progress-fill');
+        const progressText = document.getElementById('progress-text');
+        
+        // Check if required elements exist
+        console.log('=== DEBUGGING DOM ELEMENTS ===');
+        console.log('dropZone:', dropZone);
+        console.log('fileInput:', fileInput);
+        console.log('fileList:', fileList);
+        
+        // Deep debugging - check if element exists with different selectors
+        console.log('=== ALTERNATIVE SELECTORS ===');
+        console.log('querySelector input[name="files"]:', document.querySelector('input[name="files"]'));
+        console.log('querySelector input[id="id_files"]:', document.querySelector('input[id="id_files"]'));
+        console.log('querySelector input[type="file"]:', document.querySelector('input[type="file"]'));
+        console.log('querySelector input[multiple]:', document.querySelector('input[multiple]'));
+        
+        // Check all inputs on page
+        console.log('=== ALL FILE INPUTS ===');
+        const allFileInputs = document.querySelectorAll('input[type="file"]');
+        console.log('All file inputs found:', allFileInputs.length);
+        allFileInputs.forEach((input, index) => {
+            console.log(`File input ${index}:`, input, 'ID:', input.id, 'Name:', input.name);
+        });
+        
+        // Check for duplicate IDs
+        console.log('=== DUPLICATE ID CHECK ===');
+        const elementsWithId = document.querySelectorAll('[id="id_files"]');
+        console.log('Elements with id="id_files":', elementsWithId.length);
+        elementsWithId.forEach((el, index) => {
+            console.log(`Element ${index} with id_files:`, el);
+        });
+    
+    if (!dropZone || !fileInput || !fileList) {
+        console.error('Required elements not found:', {
+            dropZone: !!dropZone,
+            fileInput: !!fileInput,
+            fileList: !!fileList
+        });
+        
+        // Try alternative selectors in case the IDs are different
+        console.log('=== TRYING FALLBACK SELECTORS ===');
+        let altFileInput = document.querySelector('input[name="files"]');
+        if (!altFileInput) {
+            altFileInput = document.querySelector('input[type="file"][multiple]');
+        }
+        if (!altFileInput) {
+            altFileInput = document.querySelector('input[type="file"]');
+        }
+        
+        if (altFileInput) {
+            console.log('Found alternative file input:', altFileInput);
+            // Use the alternative input if found
+            if (!fileInput) {
+                console.log('Setting fileInput to alternative:', altFileInput);
+                fileInput = altFileInput;
+            }
+        } else {
+            console.error('No file input found with any selector!');
+        }
+        
+        // If still missing critical elements, return
+        if (!dropZone || !fileList || (!fileInput && !altFileInput)) {
+            console.error('Critical elements still missing, aborting initialization');
+            return;
+        }
+    }
     
     // Drag and drop functionality
     dropZone.addEventListener('dragover', function(e) {
@@ -323,11 +433,14 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Click to select files
     dropZone.addEventListener('click', function() {
-        fileInput.click();
+        if (fileInput) {
+            fileInput.click();
+        }
     });
     
     // File input change
-    fileInput.addEventListener('change', function() {
+    fileInput.addEventListener('change', function(e) {
+        console.log('File input changed:', this.files.length, 'files');
         displayFileList(this.files);
     });
     
@@ -344,8 +457,11 @@ document.addEventListener('DOMContentLoaded', function() {
         if (fileInput.files.length === 0) {
             alert('Please select at least one file to upload.');
             e.preventDefault();
+            formSubmitting = false; // Reset flag
             return false;
         }
+        
+        console.log('Form submitting with', fileInput.files.length, 'files');
         
         // Set submitting flag
         formSubmitting = true;
@@ -416,6 +532,7 @@ document.addEventListener('DOMContentLoaded', function() {
         
         fileList.appendChild(listContainer);
     }
+    }, 100); // 100ms delay to ensure DOM is fully ready
 });
 </script>
 {% endblock %}

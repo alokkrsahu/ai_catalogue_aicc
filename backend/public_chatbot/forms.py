@@ -4,27 +4,118 @@ Forms for Public Chatbot Admin - Bulk Document Upload
 from django import forms
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import UploadedFile
+from django.utils.safestring import mark_safe
 from .document_processor import DocumentProcessor
 
 
-class MultipleFileInput(forms.ClearableFileInput):
+class CustomMultipleFileWidget(forms.Widget):
     """Custom widget for multiple file uploads"""
-    allow_multiple_selected = True
+    
+    def render(self, name, value, attrs=None, renderer=None):
+        """Render as a standard HTML file input with multiple attribute"""
+        if attrs is None:
+            attrs = {}
+        
+        # Ensure the ID is always set correctly for JavaScript to find it
+        file_id = attrs.get('id', f'id_{name}')
+        
+        # Build the HTML manually to avoid Django's FileInput restrictions
+        attrs_dict = {
+            'type': 'file',
+            'name': name,
+            'multiple': True,
+            'id': file_id,
+        }
+        
+        # Add any additional attributes
+        if 'accept' in attrs:
+            attrs_dict['accept'] = attrs['accept']
+        if 'class' in attrs:
+            attrs_dict['class'] = attrs['class']
+        if 'required' in attrs:
+            attrs_dict['required'] = True
+        if 'aria-describedby' in attrs:
+            attrs_dict['aria-describedby'] = attrs['aria-describedby']
+            
+        # Build attribute string properly
+        attr_parts = []
+        for k, v in attrs_dict.items():
+            if v is True:
+                attr_parts.append(k)
+            else:
+                attr_parts.append(f'{k}="{v}"')
+        
+        attr_str = ' '.join(attr_parts)
+        html_output = f'<input {attr_str} />'
+        
+        # Debug: print what we're rendering
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"CustomMultipleFileWidget rendering: {html_output}")
+        
+        return mark_safe(html_output)
+    
+    def value_from_datadict(self, data, files, name):
+        """Extract multiple files from request"""
+        if hasattr(files, 'getlist'):
+            return files.getlist(name)
+        return files.get(name)
 
 
-class MultipleFileField(forms.FileField):
+class MultipleFileField(forms.Field):
     """Custom field for multiple file uploads"""
+    
     def __init__(self, *args, **kwargs):
-        kwargs.setdefault("widget", MultipleFileInput())
+        # Move the DocumentProcessor calls to initialization time
+        widget_attrs = kwargs.pop('widget_attrs', {})
+        
+        # Set default attributes
+        default_attrs = {
+            'accept': ','.join(DocumentProcessor.get_supported_formats()),
+            'class': 'form-control-file',
+            'id': 'id_files'
+        }
+        
+        # Merge with any provided widget_attrs
+        for key, value in default_attrs.items():
+            if key not in widget_attrs:
+                widget_attrs[key] = value
+        
+        # Create the widget
+        kwargs['widget'] = CustomMultipleFileWidget(attrs=widget_attrs)
+        
+        # Set the help text at initialization
+        if 'help_text' not in kwargs:
+            supported_formats = ', '.join(DocumentProcessor.get_supported_formats())
+            kwargs['help_text'] = f"""
+            Upload multiple documents at once. Supported formats: {supported_formats}<br>
+            Maximum file size: 50MB per file, 200MB total batch size.
+            """
+        
         super().__init__(*args, **kwargs)
 
-    def clean(self, data, initial=None):
-        single_file_clean = super().clean
-        if isinstance(data, (list, tuple)):
-            result = [single_file_clean(d, initial) for d in data]
-        else:
-            result = [single_file_clean(data, initial)]
-        return result
+    def to_python(self, data):
+        """Convert the uploaded files to a list"""
+        if not data:
+            return []
+        # If it's a single file, return it as a list
+        if not isinstance(data, (list, tuple)):
+            return [data]
+        return data
+    
+    def validate(self, value):
+        """Validate the uploaded files"""
+        if not value and self.required:
+            raise ValidationError(self.error_messages['required'])
+        
+        # Validate each file individually
+        if isinstance(value, (list, tuple)):
+            for file_item in value:
+                if file_item:
+                    # Basic file validation - check if it's a proper file object (updated)
+                    if not hasattr(file_item, 'read'):
+                        raise ValidationError('Invalid file object.')
+                    # You can add more specific file validations here if needed
 
 
 class BulkDocumentUploadForm(forms.Form):
@@ -32,17 +123,9 @@ class BulkDocumentUploadForm(forms.Form):
     Form for bulk document upload in Django admin
     """
     
-    # File upload field
+    # File upload field - using custom widget to support multiple files
     files = MultipleFileField(
-        widget=MultipleFileInput(attrs={
-            'multiple': True,
-            'accept': ','.join(DocumentProcessor.get_supported_formats()),
-            'class': 'form-control-file'
-        }),
-        help_text=f"""
-        Upload multiple documents at once. Supported formats: {', '.join(DocumentProcessor.get_supported_formats())}<br>
-        Maximum file size: 50MB per file, 200MB total batch size.
-        """
+        required=True
     )
     
     # Category selection
@@ -101,16 +184,30 @@ class BulkDocumentUploadForm(forms.Form):
             <strong>Note:</strong> Some formats may have limited support due to missing dependencies: {', '.join(missing_deps)}
             """
     
+    def full_clean(self):
+        """Override to handle multiple files from request.FILES"""
+        super().full_clean()
+        
+        # Extract multiple files manually if present
+        if hasattr(self, 'files') and 'files' in self.files:
+            file_list = self.files.getlist('files')
+            if file_list:
+                self.cleaned_data['files'] = file_list
+    
     def clean_files(self):
-        """Validate uploaded files"""
-        files = self.cleaned_data.get('files', [])
+        """Validate uploaded files - handle both single and multiple files"""
+        # For Django's built-in FileField with multiple=True, files come from request.FILES
+        if hasattr(self, 'files') and 'files' in self.files:
+            files = self.files.getlist('files')
+        else:
+            files = self.cleaned_data.get('files')
+            if files:
+                files = [files] if not isinstance(files, list) else files
+            else:
+                files = []
         
-        # Handle case where files is not a list (single file or None)
-        if not isinstance(files, list):
-            files = [files] if files else []
-        
-        # Filter out None values
-        files = [f for f in files if f is not None]
+        # Filter out None/empty values
+        files = [f for f in files if f is not None and f != '']
         
         if not files:
             raise ValidationError("Please select at least one file to upload.")
@@ -128,12 +225,13 @@ class BulkDocumentUploadForm(forms.Form):
         # Validate individual files
         supported_formats = DocumentProcessor.get_supported_formats()
         for file_obj in files:
-            # Check file extension
-            if hasattr(file_obj, 'name') and file_obj.name:
-                from pathlib import Path
-                ext = Path(file_obj.name).suffix.lower()
-                if ext not in supported_formats:
-                    raise ValidationError(f"Unsupported file format: {ext} in file {file_obj.name}")
+            if not hasattr(file_obj, 'name') or not file_obj.name:
+                continue
+                
+            from pathlib import Path
+            ext = Path(file_obj.name).suffix.lower()
+            if ext not in supported_formats:
+                raise ValidationError(f"Unsupported file format: {ext} in file {file_obj.name}")
             
             # Check individual file size
             if hasattr(file_obj, 'size') and file_obj.size > DocumentProcessor.MAX_FILE_SIZE:
