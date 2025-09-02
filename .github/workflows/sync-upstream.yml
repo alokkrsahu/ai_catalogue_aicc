@@ -1,0 +1,33 @@
+name: Push to Upstream
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  push-to-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config --global user.name 'alok.kr.sahu'
+          git config --global user.email 'alok.kr.sahu@outlook.com'
+
+      - name: Push to upstream
+        run: |
+          git remote add upstream https://github.com/OxfordCompetencyCenters/ai_catalogue_aicc.git
+          git fetch upstream
+          git push upstream main:main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
