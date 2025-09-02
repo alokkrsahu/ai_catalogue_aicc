@@ -1,4 +1,4 @@
-name: Push to Upstream (Force)
+name: Push to Upstream
 on:
   push:
     branches: [main]
@@ -19,9 +19,19 @@ jobs:
         run: |
           git config --global user.name 'alokkrsahu'
           git config --global user.email 'alok.kr.sahu@outlook.com'
-      - name: Force push to upstream
+      - name: Remove workflow files and push to upstream
         run: |
           git remote add upstream https://github.com/OxfordCompetencyCenters/ai_catalogue_aicc.git
-          git push upstream main:main --force
+          git fetch upstream
+          
+          # Remove .github directory from the current commit
+          git rm -rf .github/ || echo "No .github directory to remove"
+          git commit -m "Remove workflow files for upstream sync" || echo "Nothing to commit"
+          
+          # Merge any upstream changes
+          git merge upstream/main --no-edit || echo "Already up to date"
+          
+          # Push to upstream
+          git push upstream main:main
         env:
           GITHUB_TOKEN: ${{ secrets.OXFORD_PAT }}
