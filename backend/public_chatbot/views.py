@@ -41,6 +41,7 @@ def add_cors_headers_immediate(response, request):
     allowed_origins = [
         'https://oxfordcompetencycenters.github.io',
         'https://aicc.uksouth.cloudapp.azure.com', 
+        'https://eng.ox.ac.uk',
         'http://localhost:3000',
         'http://localhost:5173',
     ]
@@ -77,6 +78,7 @@ def _add_cors_headers(response, request):
     allowed_origins = [
         'https://oxfordcompetencycenters.github.io',
         'https://aicc.uksouth.cloudapp.azure.com',
+        'https://eng.ox.ac.uk',
         'http://localhost:3000',
         'http://localhost:5173',
         'http://localhost:8080',
@@ -797,6 +799,7 @@ def public_chat_stream_api(request):
             allowed_origins = [
                 'https://oxfordcompetencycenters.github.io',
                 'https://aicc.uksouth.cloudapp.azure.com',
+                'https://eng.ox.ac.uk',
                 'http://localhost:3000',
                 'http://localhost:5173',
                 'http://localhost:8080',
