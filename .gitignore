@@ -258,10 +258,14 @@ documentation/
 
 
 # =============================================================================
-# SHELL SCRIPTS
+# SHELL SCRIPTS & DEPLOYMENT CONFIG
 # =============================================================================
 # Scripts folder contains deployment and utility scripts - excluded from repo
 scripts/
+
+# Kubernetes and Nginx configuration - keep local but exclude from repo
+k8s/
+nginx/
 
 # All other shell scripts are now safe to include as they only reference environment variables
 # and don't contain hardcoded credentials
