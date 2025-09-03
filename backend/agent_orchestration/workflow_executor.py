@@ -189,9 +189,7 @@ class WorkflowExecutor:
                     # Handle agent nodes with real LLM calls
                     agent_config = {
                         'llm_provider': node_data.get('llm_provider', 'openai'),
-                        'llm_model': node_data.get('llm_model', 'gpt-3.5-turbo'),
-                        'max_tokens': min(node_data.get('max_tokens', 2048), 4096),  # Cap at 4096 for GPT-4
-                        'temperature': node_data.get('temperature', 0.7)
+                        'llm_model': node_data.get('llm_model', 'gpt-3.5-turbo')
                     }
                     
                     # Get LLM provider for this agent with project context for API keys
@@ -242,7 +240,6 @@ class WorkflowExecutor:
                                 'metadata': {
                                     'llm_provider': agent_config['llm_provider'],
                                     'llm_model': agent_config['llm_model'],
-                                    'temperature': agent_config['temperature'],
                                     'is_group_chat_manager': True,
                                     'total_iterations': total_iterations,
                                     'delegate_count': len(delegate_status),
@@ -276,14 +273,11 @@ class WorkflowExecutor:
                             logger.error(f"❌ ORCHESTRATOR: GroupChatManager {node_name} failed: {gcm_error}")
                             raise gcm_error
                     else:
-                        # Handle regular agents (AssistantAgent, UserProxyAgent) and DelegateAgent
-                        if node_type == 'DelegateAgent':
-                            # Delegate agents are handled by GroupChatManager, skip standalone execution
-                            logger.info(f"🤝 ORCHESTRATOR: Skipping standalone DelegateAgent {node_name} - handled by GroupChatManager")
-                            continue
+                        # Handle regular agents (AssistantAgent, UserProxyAgent, and standalone DelegateAgent)
+                        # Note: DelegateAgent can run standalone OR be coordinated by GroupChatManager
                         
-                        # Handle regular agents (AssistantAgent, UserProxyAgent)
-                        logger.info(f"🤖 ORCHESTRATOR: Executing regular agent {node_name} (type: {node_type})")
+                        # Handle regular agents (AssistantAgent, UserProxyAgent, DelegateAgent)
+                        logger.info(f"🤖 ORCHESTRATOR: Executing agent {node_name} (type: {node_type})")
                         
                         # Check for multiple inputs to this agent
                         input_sources = self.workflow_parser.find_multiple_inputs_to_node(node_id, graph_json)
@@ -305,8 +299,7 @@ class WorkflowExecutor:
                             
                             # Execute the agent
                             agent_response = await llm_provider.generate_response(
-                                prompt=prompt,
-                                temperature=agent_config.get('temperature', 0.7)
+                                prompt=prompt
                             )
                             
                             if agent_response.error:
@@ -330,7 +323,6 @@ class WorkflowExecutor:
                                 'metadata': {
                                     'llm_provider': agent_config['llm_provider'],
                                     'llm_model': agent_config['llm_model'],
-                                    'temperature': agent_config['temperature'],
                                     'cost_estimate': getattr(agent_response, 'cost_estimate', None) if hasattr(agent_response, 'cost_estimate') else None
                                 }
                             })
@@ -642,9 +634,7 @@ class WorkflowExecutor:
                     # Handle agent nodes with real LLM calls
                     agent_config = {
                         'llm_provider': node_data.get('llm_provider', 'openai'),
-                        'llm_model': node_data.get('llm_model', 'gpt-3.5-turbo'),
-                        'max_tokens': min(node_data.get('max_tokens', 2048), 4096),
-                        'temperature': node_data.get('temperature', 0.7)
+                        'llm_model': node_data.get('llm_model', 'gpt-3.5-turbo')
                     }
                     
                     # Get LLM provider for this agent
@@ -678,7 +668,7 @@ class WorkflowExecutor:
                     
                     # Make LLM call
                     start_time = timezone.now()
-                    llm_response = await llm_provider.generate_response(prompt=combined_prompt, temperature=agent_config['temperature'])
+                    llm_response = await llm_provider.generate_response(prompt=combined_prompt)
                     end_time = timezone.now()
                     
                     if llm_response.error:

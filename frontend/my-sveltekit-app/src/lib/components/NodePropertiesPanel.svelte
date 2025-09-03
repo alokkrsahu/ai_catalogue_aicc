@@ -51,18 +51,12 @@
         if (node.type === 'AssistantAgent') {
           nodeConfig.llm_provider = 'openai';
           nodeConfig.llm_model = 'gpt-4-turbo';
-          nodeConfig.temperature = 0.7;
-          nodeConfig.max_tokens = 2048;
         } else if (node.type === 'DelegateAgent') {
           nodeConfig.llm_provider = 'anthropic';
           nodeConfig.llm_model = 'claude-3-5-haiku-20241022';
-          nodeConfig.temperature = 0.4;
-          nodeConfig.max_tokens = 1024;
         } else if (node.type === 'GroupChatManager') {
           nodeConfig.llm_provider = 'anthropic';
           nodeConfig.llm_model = 'claude-3-5-sonnet-20241022';
-          nodeConfig.temperature = 0.5;
-          nodeConfig.max_tokens = 1024;
         }
         console.log('🤖 LLM CONFIG: Initialized default config for', node.type, nodeConfig.llm_provider, nodeConfig.llm_model);
       }
@@ -71,8 +65,6 @@
       if (nodeConfig.doc_aware && !nodeConfig.llm_provider) {
         nodeConfig.llm_provider = 'openai';
         nodeConfig.llm_model = 'gpt-3.5-turbo';
-        nodeConfig.temperature = 0.3;
-        nodeConfig.max_tokens = 1024;
         console.log('🤖 LLM CONFIG: Initialized DocAware LLM config for UserProxyAgent');
       }
       
@@ -868,48 +860,21 @@
       
       <!-- TEMPERATURE AND MAX TOKENS/MAX ROUNDS - Different layout for GroupChatManager -->
       {#if node.type === 'GroupChatManager'}
-        <!-- GROUP CHAT MANAGER: Temperature and Max Rounds side by side -->
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-2">Temperature</label>
-            <input
-              type="number"
-              bind:value={nodeConfig.temperature}
-              on:input={updateNodeData}
-              min="0"
-              max="2"
-              step="0.1"
-              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
-            />
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-2">Max Rounds</label>
-            <input
-              type="number"
-              bind:value={nodeConfig.max_rounds}
-              on:input={updateNodeData}
-              min="1"
-              max="100"
-              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
-              placeholder="10"
-            />
-          </div>
-        </div>
-        
-        <!-- Max Tokens full width -->
+        <!-- GROUP CHAT MANAGER: Max Rounds -->
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-2">Max Tokens</label>
+          <label class="block text-sm font-medium text-gray-700 mb-2">Max Rounds</label>
           <input
             type="number"
-            bind:value={nodeConfig.max_tokens}
+            bind:value={nodeConfig.max_rounds}
             on:input={updateNodeData}
-            min="100"
-            max="8000"
+            min="1"
+            max="100"
             class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
+            placeholder="10"
           />
         </div>
         
-        <!-- Termination Strategy full width -->
+        <!-- Termination Strategy -->
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-2">Termination Strategy</label>
           <select
@@ -922,33 +887,6 @@
             <option value="max_iterations_reached">Max Iterations Reached</option>
             <option value="custom_condition">Custom Condition</option>
           </select>
-        </div>
-      {:else}
-        <!-- OTHER AGENTS: Temperature and Max Tokens side by side -->
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-2">Temperature</label>
-            <input
-              type="number"
-              bind:value={nodeConfig.temperature}
-              on:input={updateNodeData}
-              min="0"
-              max="2"
-              step="0.1"
-              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
-            />
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-2">Max Tokens</label>
-            <input
-              type="number"
-              bind:value={nodeConfig.max_tokens}
-              on:input={updateNodeData}
-              min="100"
-              max="8000"
-              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
-            />
-          </div>
         </div>
       {/if}
     {/if}
@@ -991,8 +929,6 @@
                   if (!nodeConfig.llm_provider) {
                     nodeConfig.llm_provider = 'openai';
                     nodeConfig.llm_model = 'gpt-3.5-turbo';
-                    nodeConfig.temperature = 0.3;
-                    nodeConfig.max_tokens = 1024;
                   }
                 } else {
                   // When disabling DocAware, clear search configuration
@@ -1175,33 +1111,6 @@
             class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20 transition-all resize-none"
             placeholder="You are a helpful assistant that uses retrieved documents to answer user questions..."
           ></textarea>
-        </div>
-        
-        <!-- TEMPERATURE AND MAX TOKENS - Only visible when DocAware is enabled -->
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-2">Temperature</label>
-            <input
-              type="number"
-              bind:value={nodeConfig.temperature}
-              on:input={updateNodeData}
-              min="0"
-              max="2"
-              step="0.1"
-              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
-            />
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-2">Max Tokens</label>
-            <input
-              type="number"
-              bind:value={nodeConfig.max_tokens}
-              on:input={updateNodeData}
-              min="100"
-              max="8000"
-              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
-            />
-          </div>
         </div>
         
         <!-- DOCAWARE CONFIGURATION - Show when DocAware is enabled for UserProxy -->

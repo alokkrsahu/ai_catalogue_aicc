@@ -302,9 +302,7 @@ class ChatManager:
         # Create delegate-specific LLM provider if needed
         delegate_config = {
             'llm_provider': delegate_data.get('llm_provider', 'openai'),
-            'llm_model': delegate_data.get('llm_model', 'gpt-4'),
-            'temperature': delegate_data.get('temperature', 0.4),
-            'max_tokens': delegate_data.get('max_tokens', 1024)
+            'llm_model': delegate_data.get('llm_model', 'gpt-4')
         }
         
         logger.info(f"🔧 DELEGATE (MULTI-INPUT): Config for {delegate_name}: {delegate_config}")
@@ -417,8 +415,7 @@ class ChatManager:
             logger.info(f"🤝 DELEGATE (MULTI-INPUT): About to call generate_response for {delegate_name}")
             
             delegate_response = await delegate_llm.generate_response(
-                prompt=delegate_prompt,
-                temperature=delegate_config.get('temperature', 0.4)
+                prompt=delegate_prompt
             )
             logger.info(f"🤝 DELEGATE (MULTI-INPUT): LLM call completed for {delegate_name}")
             logger.info(f"🤝 DELEGATE (MULTI-INPUT): Response type: {type(delegate_response)}")
@@ -846,19 +843,18 @@ class ChatManager:
         # Create delegate-specific LLM provider if needed
         delegate_config = {
             'llm_provider': delegate_data.get('llm_provider', 'openai'),  # Changed default to openai
-            'llm_model': delegate_data.get('llm_model', 'gpt-4'),  # Use gpt-4 by default
-            'temperature': delegate_data.get('temperature', 0.4),
-            'max_tokens': delegate_data.get('max_tokens', 1024)
+            'llm_model': delegate_data.get('llm_model', 'gpt-4')  # Use gpt-4 by default
         }
         
         logger.info(f"🔧 DELEGATE: Config for {delegate_name}: {delegate_config}")
         
-        # Try to create delegate-specific LLM provider (legacy method - no project context)
+        # Try to create delegate-specific LLM provider with modern async method
         delegate_llm = None
         try:
             logger.info(f"🔧 DELEGATE: Attempting to create LLM provider for {delegate_name}")
-            # Use sync method for backward compatibility (will use fallback keys only)
-            delegate_llm = self.llm_provider_manager.get_llm_provider_sync(delegate_config)
+            # Use modern async method with project support (same as AssistantAgent)
+            # Note: This legacy method doesn't have project context, so passing None
+            delegate_llm = await self.llm_provider_manager.get_llm_provider(delegate_config, None)
             if delegate_llm:
                 logger.info(f"✅ DELEGATE: Successfully created LLM provider for {delegate_name}")
             else:
@@ -910,8 +906,7 @@ class ChatManager:
             logger.info(f"🤝 DELEGATE: API Key available: {bool(delegate_llm)}")
             
             delegate_response = await delegate_llm.generate_response(
-                prompt=delegate_prompt,
-                temperature=delegate_config.get('temperature', 0.4)
+                prompt=delegate_prompt
             )
             logger.info(f"🤝 DELEGATE: LLM call completed for {delegate_name}")
             logger.info(f"🤝 DELEGATE: Response type: {type(delegate_response)}")

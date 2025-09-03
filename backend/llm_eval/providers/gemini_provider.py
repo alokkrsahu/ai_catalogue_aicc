@@ -28,11 +28,7 @@ class GeminiProvider(LLMProvider):
         return {
             "contents": [{
                 "parts": [{"text": prompt}]
-            }],
-            "generationConfig": {
-                "maxOutputTokens": self.max_tokens,
-                "temperature": kwargs.get("temperature", 0.7)
-            }
+            }]
         }
     
     def parse_response(self, response_data: Dict[str, Any]) -> tuple[str, Optional[int]]:

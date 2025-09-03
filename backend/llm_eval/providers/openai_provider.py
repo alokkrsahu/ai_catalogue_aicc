@@ -17,9 +17,7 @@ class OpenAIProvider(LLMProvider):
     def format_request_body(self, prompt: str, **kwargs) -> Dict[str, Any]:
         return {
             "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": self.max_tokens,
-            "temperature": kwargs.get("temperature", 0.7)
+            "messages": [{"role": "user", "content": prompt}]
         }
     
     def parse_response(self, response_data: Dict[str, Any]) -> tuple[str, Optional[int]]:

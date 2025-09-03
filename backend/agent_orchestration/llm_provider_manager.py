@@ -63,17 +63,8 @@ class LLMProviderManager:
         """
         provider_type = agent_config.get('llm_provider', 'openai')
         model = agent_config.get('llm_model', 'gpt-4')
-        max_tokens = agent_config.get('max_tokens', 2048)
         
-        # Apply model-specific token limits
-        if 'gpt-4' in model.lower():
-            max_tokens = min(max_tokens, 4096)  # GPT-4 limit
-        elif 'gpt-3.5' in model.lower():
-            max_tokens = min(max_tokens, 4096)  # GPT-3.5-turbo limit
-        else:
-            max_tokens = min(max_tokens, 2048)  # Safe default
-        
-        logger.info(f"🔧 LLM PROVIDER: Creating {provider_type} provider with model {model}, max_tokens: {max_tokens}")
+        logger.info(f"🔧 LLM PROVIDER: Creating {provider_type} provider with model {model}")
         
         # Get API key with project-specific priority
         api_key = await self._get_api_key_for_provider(provider_type, project)
@@ -84,9 +75,9 @@ class LLMProviderManager:
         
         try:
             if provider_type == 'openai':
-                logger.info(f"✅ LLM PROVIDER: Creating OpenAI provider with project key, model {model}, max_tokens: {max_tokens}")
+                logger.info(f"✅ LLM PROVIDER: Creating OpenAI provider with project key, model {model}")
                 try:
-                    provider = OpenAIProvider(api_key=api_key, model=model, max_tokens=max_tokens)
+                    provider = OpenAIProvider(api_key=api_key, model=model)
                     logger.info(f"✅ LLM PROVIDER: Successfully created OpenAI provider with project API key")
                     return provider
                 except Exception as openai_error:
@@ -94,12 +85,14 @@ class LLMProviderManager:
                     return None
                 
             elif provider_type in ['anthropic', 'claude']:
+                # Claude requires max_tokens, use a reasonable default
+                max_tokens = 4096
                 logger.info(f"✅ LLM PROVIDER: Creating Anthropic provider with project key, model {model}, max_tokens: {max_tokens}")
                 return ClaudeProvider(api_key=api_key, model=model, max_tokens=max_tokens)
                 
             elif provider_type in ['google', 'gemini']:
-                logger.info(f"✅ LLM PROVIDER: Creating Google provider with project key, model {model}, max_tokens: {max_tokens}")
-                return GeminiProvider(api_key=api_key, model=model, max_tokens=max_tokens)
+                logger.info(f"✅ LLM PROVIDER: Creating Google provider with project key, model {model}")
+                return GeminiProvider(api_key=api_key, model=model)
                 
             else:
                 logger.error(f"❌ LLM PROVIDER: Unknown provider type: {provider_type}")
@@ -168,7 +161,6 @@ class LLMProviderManager:
         """
         provider_type = agent_config.get('llm_provider', 'openai')
         model = agent_config.get('llm_model', 'gpt-4')
-        max_tokens = agent_config.get('max_tokens', 2048)
         
         api_key = self.fallback_api_keys.get(provider_type)
         if not api_key or api_key == 'Dummy-Key':
@@ -177,11 +169,13 @@ class LLMProviderManager:
         
         try:
             if provider_type == 'openai':
-                return OpenAIProvider(api_key=api_key, model=model, max_tokens=max_tokens)
+                return OpenAIProvider(api_key=api_key, model=model)
             elif provider_type in ['anthropic', 'claude']:
+                # Claude requires max_tokens, use a reasonable default
+                max_tokens = 4096
                 return ClaudeProvider(api_key=api_key, model=model, max_tokens=max_tokens)
             elif provider_type in ['google', 'gemini']:
-                return GeminiProvider(api_key=api_key, model=model, max_tokens=max_tokens)
+                return GeminiProvider(api_key=api_key, model=model)
             else:
                 logger.error(f"❌ LLM PROVIDER (LEGACY): Unknown provider type: {provider_type}")
                 return None
