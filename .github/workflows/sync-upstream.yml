@@ -19,19 +19,25 @@ jobs:
         run: |
           git config --global user.name 'alokkrsahu'
           git config --global user.email 'alok.kr.sahu@outlook.com'
-      - name: Remove workflow files and push to upstream
+      - name: Sync to upstream (excluding workflows)
         run: |
           git remote add upstream https://github.com/OxfordCompetencyCenters/ai_catalogue_aicc.git
           git fetch upstream
           
-          # Remove .github directory from the current commit
+          # Create a clean sync branch
+          git checkout -b sync-branch-${{ github.run_number }}
+          
+          # Remove workflow files to avoid conflicts
           git rm -rf .github/ || echo "No .github directory to remove"
-          git commit -m "Remove workflow files for upstream sync" || echo "Nothing to commit"
+          git commit -m "Prepare for upstream sync - remove workflows" || echo "Nothing to commit"
           
           # Merge any upstream changes
           git merge upstream/main --no-edit || echo "Already up to date"
           
           # Push to upstream
-          git push upstream main:main
+          git push upstream HEAD:main
+          
+          # Switch back to main branch
+          git checkout main
         env:
           GITHUB_TOKEN: ${{ secrets.OXFORD_PAT }}
