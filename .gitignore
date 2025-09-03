@@ -258,6 +258,12 @@ documentation/
 
 
 # =============================================================================
+# SCRIPTS FOLDER
+# =============================================================================
+# Local development scripts
+scripts/
+
+# =============================================================================
 # SHELL SCRIPTS - ALLOWED
 # =============================================================================
 # All shell scripts are now safe to include as they only reference environment variables
