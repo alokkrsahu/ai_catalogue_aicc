@@ -258,9 +258,12 @@ documentation/
 
 
 # =============================================================================
-# SHELL SCRIPTS - ALLOWED
+# SHELL SCRIPTS
 # =============================================================================
-# All shell scripts are now safe to include as they only reference environment variables
+# Scripts folder contains deployment and utility scripts - excluded from repo
+scripts/
+
+# All other shell scripts are now safe to include as they only reference environment variables
 # and don't contain hardcoded credentials
 
 # SSL/TLS Certificates and Keys
