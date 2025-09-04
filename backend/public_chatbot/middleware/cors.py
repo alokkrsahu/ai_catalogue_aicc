@@ -21,6 +21,7 @@ class PublicChatbotCORSMiddleware(MiddlewareMixin):
         'https://oxfordcompetencycenters.github.io',
         'https://aicc.uksouth.cloudapp.azure.com',
         'https://eng.ox.ac.uk',
+        'https://oerc.ox.ac.uk',
         'http://localhost:3000',
         'http://localhost:5173',
         'http://localhost:8080',

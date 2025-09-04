@@ -110,7 +110,7 @@ MIDDLEWARE = [
 ]
 
 # CORS settings - Cloud-ready configuration with Public Chatbot support
-cors_origins = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:5173,http://localhost:3000,https://oxfordcompetencycenters.github.io,https://eng.ox.ac.uk')
+cors_origins = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:5173,http://localhost:3000,https://oxfordcompetencycenters.github.io,https://eng.ox.ac.uk,https://oerc.ox.ac.uk')
 CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins.split(',') if origin.strip()]
 
 # For development, allow all origins if specified (temporarily True for debugging)
@@ -139,7 +139,7 @@ CORS_ALLOW_HEADERS = [
 ]
 
 # CSRF settings for cloud deployment
-csrf_origins = os.getenv('CSRF_TRUSTED_ORIGINS', 'http://localhost:5173,http://localhost:3000,https://oxfordcompetencycenters.github.io,https://aicc.uksouth.cloudapp.azure.com,https://eng.ox.ac.uk')
+csrf_origins = os.getenv('CSRF_TRUSTED_ORIGINS', 'http://localhost:5173,http://localhost:3000,https://oxfordcompetencycenters.github.io,https://aicc.uksouth.cloudapp.azure.com,https://eng.ox.ac.uk,https://oerc.ox.ac.uk')
 CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in csrf_origins.split(',') if origin.strip()]
 
 ROOT_URLCONF = 'core.urls'

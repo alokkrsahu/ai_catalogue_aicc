@@ -42,6 +42,7 @@ def add_cors_headers_immediate(response, request):
         'https://oxfordcompetencycenters.github.io',
         'https://aicc.uksouth.cloudapp.azure.com', 
         'https://eng.ox.ac.uk',
+        'https://oerc.ox.ac.uk',
         'http://localhost:3000',
         'http://localhost:5173',
     ]
@@ -79,6 +80,7 @@ def _add_cors_headers(response, request):
         'https://oxfordcompetencycenters.github.io',
         'https://aicc.uksouth.cloudapp.azure.com',
         'https://eng.ox.ac.uk',
+        'https://oerc.ox.ac.uk',
         'http://localhost:3000',
         'http://localhost:5173',
         'http://localhost:8080',
@@ -800,6 +802,7 @@ def public_chat_stream_api(request):
                 'https://oxfordcompetencycenters.github.io',
                 'https://aicc.uksouth.cloudapp.azure.com',
                 'https://eng.ox.ac.uk',
+                'https://oerc.ox.ac.uk',
                 'http://localhost:3000',
                 'http://localhost:5173',
                 'http://localhost:8080',
