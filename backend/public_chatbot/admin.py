@@ -16,7 +16,6 @@ from .models import (
     ChatbotConfiguration
 )
 from .forms import BulkDocumentUploadForm
-from .document_processor import DocumentProcessor
 
 
 def get_user_identifier(user):
@@ -392,7 +391,7 @@ class PublicKnowledgeDocumentAdmin(admin.ModelAdmin):
     
     def bulk_upload_view(self, request):
         """
-        Custom admin view for bulk document upload
+        Simplified bulk document upload view
         """
         if not self.has_add_permission(request):
             raise PermissionDenied
@@ -400,7 +399,7 @@ class PublicKnowledgeDocumentAdmin(admin.ModelAdmin):
         if request.method == 'POST':
             form = BulkDocumentUploadForm(request.POST, request.FILES, user=request.user)
             if form.is_valid():
-                return self._process_bulk_upload(request, form)
+                return self._process_simple_bulk_upload(request, form)
         else:
             form = BulkDocumentUploadForm(user=request.user)
         
@@ -409,168 +408,89 @@ class PublicKnowledgeDocumentAdmin(admin.ModelAdmin):
             'title': 'Bulk Document Upload',
             'opts': self.model._meta,
             'has_change_permission': self.has_change_permission(request),
-            'supported_formats': DocumentProcessor.get_supported_formats(),
-            'dependencies': DocumentProcessor.check_dependencies(),
         }
         
         return render(request, 'admin/public_chatbot/bulk_upload.html', context)
     
     @transaction.atomic
-    def _process_bulk_upload(self, request, form):
+    def _process_simple_bulk_upload(self, request, form):
         """
-        Process the bulk upload form submission with progress tracking
+        Simplified bulk upload processing - just create documents from files
         """
-        files = form.cleaned_data['files']
-        category = form.cleaned_data['category']
-        auto_approve = form.cleaned_data['auto_approve']
-        auto_security_review = form.cleaned_data['auto_security_review']
-        auto_sync = form.cleaned_data['auto_sync']
-        min_quality_score = form.cleaned_data['min_quality_score']
-        
+        # Get files from request.FILES - Django handles multiple files automatically
+        uploaded_files = request.FILES.getlist('files')
+        category = form.cleaned_data.get('category', 'general')
         user_identifier = get_user_identifier(request.user)
         
-        # Initialize progress tracking
-        from .upload_progress import UploadProgressTracker
-        progress_tracker = UploadProgressTracker()
-        session_key = progress_tracker.start_upload(
-            total_files=len(files), 
-            user_id=str(request.user.id) if request.user else None
-        )
+        if not uploaded_files:
+            messages.error(request, "❌ No files were uploaded.")
+            return redirect('admin:public_chatbot_bulk_upload')
         
-        # Store session key for potential AJAX requests
-        request.session['current_upload_session'] = session_key
+        created_docs = []
+        errors = []
         
-        try:
-            # Update progress: Starting security validation
-            progress_tracker.update_progress(
-                stage="Security validation",
-                processed_count=0
-            )
-            
-            # Process documents
-            processor = DocumentProcessor()
-            result = processor.process_uploaded_files(
-                files=files,
-                default_category=category,
-                created_by=user_identifier
-            )
-            
-            # Update progress: Document processing completed
-            progress_tracker.update_progress(
-                stage="Creating database records",
-                processed_count=len(files)
-            )
-            
-            if not result['success'] and result['error_count'] > 0:
-                # Show errors but continue with successful ones
-                for error in result['errors']:
-                    messages.error(request, f"❌ {error['file']}: {error['error']}")
-            
-            # Show warnings
-            for warning in result['warnings']:
-                messages.warning(request, f"⚠️ {warning['file']}: {warning['warning']}")
-            
-            # Create database records for successful documents
-            created_docs = []
-            synced_docs = []
-            
-            for i, doc_data in enumerate(result['documents']):
-                # Update progress for current document
-                progress_tracker.update_progress(
-                    current_file=doc_data.get('file_name', f'Document {i+1}'),
-                    stage="Creating database record",
-                    successful_count=len(created_docs)
-                )
+        for uploaded_file in uploaded_files:
+            try:
+                # Simple text extraction - just read the file content
+                content = self._extract_simple_content(uploaded_file)
                 
-                # Filter by quality score
-                if doc_data['quality_score'] < min_quality_score:
-                    messages.warning(request, 
-                        f"⚠️ Skipped {doc_data['title']} (quality score {doc_data['quality_score']} < {min_quality_score})")
-                    progress_tracker.update_progress(
-                        warning_message=f"Skipped {doc_data['title']} due to low quality score"
-                    )
+                if not content or len(content.strip()) < 10:
+                    errors.append(f"File {uploaded_file.name} appears to be empty or too short")
                     continue
                 
-                # Create document record
+                # Create document with basic information
                 doc = PublicKnowledgeDocument.objects.create(
-                    title=doc_data['title'],
-                    content=doc_data['content'],
-                    category=doc_data['category'],
-                    subcategory=doc_data['subcategory'],
-                    source_url=doc_data['source_url'],
-                    tags=doc_data['tags'],
+                    title=uploaded_file.name.rsplit('.', 1)[0].replace('_', ' ').title(),
+                    content=content,
+                    category=category,
+                    subcategory='',
+                    source_url=f'upload://{uploaded_file.name}',
+                    tags='',
                     created_by=user_identifier,
-                    language=doc_data['language'],
-                    quality_score=doc_data['quality_score'],
-                    is_approved=auto_approve,
-                    security_reviewed=auto_security_review,
-                    approved_by=user_identifier if auto_approve else '',
+                    language='en',
+                    quality_score=50,  # Default quality score
+                    is_approved=False,  # Require manual approval
+                    security_reviewed=False,
+                    approved_by='',
                 )
                 created_docs.append(doc)
                 
-                # Auto-sync if requested and approved
-                if auto_sync and doc.is_approved and doc.security_reviewed:
+            except Exception as e:
+                errors.append(f"Error processing {uploaded_file.name}: {str(e)}")
+        
+        # Show results
+        if created_docs:
+            messages.success(request, f"✅ Successfully uploaded {len(created_docs)} documents.")
+        
+        if errors:
+            for error in errors[:5]:  # Show first 5 errors
+                messages.error(request, f"❌ {error}")
+            if len(errors) > 5:
+                messages.warning(request, f"⚠️ And {len(errors) - 5} more errors...")
+        
+        # Redirect back to document list
+        return redirect('admin:public_chatbot_publicknowledgedocument_changelist')
+    
+    def _extract_simple_content(self, uploaded_file):
+        """
+        Simple content extraction - just handle basic text files
+        """
+        try:
+            # Try to read as text
+            content = uploaded_file.read()
+            if isinstance(content, bytes):
+                # Try different encodings
+                for encoding in ['utf-8', 'latin-1', 'cp1252']:
                     try:
-                        # Update progress for sync
-                        progress_tracker.update_progress(
-                            stage=f"Syncing to ChromaDB: {doc.title}"
-                        )
-                        
-                        from .services import PublicKnowledgeService
-                        knowledge_service = PublicKnowledgeService.get_instance()
-                        if knowledge_service.is_ready:
-                            success = self._sync_document_immediately(doc, knowledge_service)
-                            if success:
-                                synced_docs.append(doc)
-                            else:
-                                progress_tracker.update_progress(
-                                    warning_message=f"Failed to sync {doc.title} to ChromaDB"
-                                )
-                        else:
-                            messages.warning(request, f"⚠️ ChromaDB not ready - {doc.title} created but not synced")
-                            progress_tracker.update_progress(
-                                warning_message=f"ChromaDB not ready for {doc.title}"
-                            )
-                    except Exception as sync_error:
-                        error_msg = f"{doc.title}: Created but sync failed - {str(sync_error)[:100]}"
-                        messages.warning(request, f"⚠️ {error_msg}")
-                        progress_tracker.update_progress(
-                            warning_message=error_msg
-                        )
-            
-            # Show success summary
-            if created_docs:
-                messages.success(request, 
-                    f"✅ Successfully created {len(created_docs)} documents from {result['processed_count']} files")
-                
-                if synced_docs:
-                    messages.success(request, 
-                        f"🚀 Auto-synced {len(synced_docs)} documents to ChromaDB")
-                
-                # Show format breakdown
-                formats = result['summary']['formats_processed']
-                if formats:
-                    messages.info(request, 
-                        f"📁 Processed formats: {', '.join(formats)}")
-            
-            # Complete progress tracking
-            summary = {
-                'total_files': len(files),
-                'created_documents': len(created_docs),
-                'synced_documents': len(synced_docs),
-                'errors': result['error_count'],
-                'warnings': result['warning_count']
-            }
-            progress_tracker.complete_upload('completed', summary)
-            
-            # Redirect back to document list
-            return redirect('admin:public_chatbot_publicknowledgedocument_changelist')
-            
-        except Exception as e:
-            # Mark progress as failed
-            progress_tracker.complete_upload('failed', {'error': str(e)})
-            messages.error(request, f"❌ Upload processing failed: {str(e)}")
-            return redirect('admin:public_chatbot_bulk_upload')
+                        return content.decode(encoding)
+                    except UnicodeDecodeError:
+                        continue
+                # If all fail, use utf-8 with errors ignored
+                return content.decode('utf-8', errors='ignore')
+            else:
+                return str(content)
+        except Exception:
+            return f"Content from {uploaded_file.name} (could not extract text)"
 
 
 @admin.register(ChatbotConfiguration)
@@ -586,7 +506,7 @@ class ChatbotConfigurationAdmin(admin.ModelAdmin):
     
     fieldsets = (
         ('Service Control', {
-            'fields': ('is_enabled', 'enable_vector_search', 'maintenance_mode', 'maintenance_message')
+            'fields': ('is_enabled', 'enable_vector_search', 'enable_query_rephrasing', 'maintenance_mode', 'maintenance_message')
         }),
         ('Rate Limiting', {
             'fields': (
@@ -616,7 +536,7 @@ class ChatbotConfigurationAdmin(admin.ModelAdmin):
     )
     
     readonly_fields = ['created_at', 'updated_at']
-    list_display = ['__str__', 'vector_search_status', 'is_enabled', 'maintenance_mode', 'updated_at']
+    list_display = ['__str__', 'vector_search_status', 'query_rephrasing_status', 'is_enabled', 'maintenance_mode', 'updated_at']
     
     def vector_search_status(self, obj):
         """Display vector search status with emoji"""
@@ -625,6 +545,14 @@ class ChatbotConfigurationAdmin(admin.ModelAdmin):
         else:
             return "❌ Disabled"
     vector_search_status.short_description = "Vector Search"
+    
+    def query_rephrasing_status(self, obj):
+        """Display query rephrasing status with emoji"""
+        if getattr(obj, 'enable_query_rephrasing', False):
+            return "🔄 Enabled"
+        else:
+            return "❌ Disabled"
+    query_rephrasing_status.short_description = "Query Rephrasing"
     
     def save_model(self, request, obj, form, change):
         obj.updated_by = get_user_identifier(request.user)

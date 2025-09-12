@@ -292,6 +292,7 @@ class ChatbotConfiguration(models.Model):
     # Feature flags
     is_enabled = models.BooleanField(default=True, help_text="Global on/off switch")
     enable_vector_search = models.BooleanField(default=True, help_text="Enable/disable ChromaDB vector search for context")
+    enable_query_rephrasing = models.BooleanField(default=True, help_text="Enable LLM-based query rephrasing for better retrieval on subsequent queries")
     maintenance_mode = models.BooleanField(default=False)
     maintenance_message = models.CharField(max_length=200, blank=True)
     

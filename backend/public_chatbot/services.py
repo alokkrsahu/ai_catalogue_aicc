@@ -224,6 +224,85 @@ class PublicKnowledgeService:
         else:
             return latest_query
     
+    def _rephrase_query_with_llm(self, latest_query: str, conversation_context: List[Dict[str, str]]) -> str:
+        """
+        Use LLM to rephrase user query based on conversation context for better retrieval
+        
+        Args:
+            latest_query: User's current query (potentially incomplete/lazy)
+            conversation_context: Full conversation history
+            
+        Returns:
+            Rephrased query that is more complete and specific
+        """
+        try:
+            # Import LLM service
+            from .llm_integration import PublicLLMService
+            from .models import ChatbotConfiguration
+            
+            # Get chatbot configuration
+            config = ChatbotConfiguration.get_config()
+            
+            # Build conversation history for context
+            conversation_history = ""
+            if conversation_context and len(conversation_context) > 0:
+                for msg in conversation_context[:-1]:  # Exclude the latest query (it's already in latest_query)
+                    role = msg.get('role', '').capitalize()
+                    content = msg.get('content', '').strip()
+                    if role and content:
+                        conversation_history += f"{role}: {content}\n"
+            
+            # Create rephrasing prompt
+            rephrasing_prompt = f"""Based on the following conversation context, please rephrase the user's latest query to be more complete, specific, and suitable for information retrieval. The rephrased query should:
+
+1. Be a complete, well-formed question or statement
+2. Include necessary context from the conversation 
+3. Be specific enough for effective search
+4. Maintain the user's original intent
+5. Be suitable for finding relevant information
+
+Conversation Context:
+{conversation_history}
+
+User's Latest Query: {latest_query}
+
+Please provide ONLY the rephrased query, nothing else:"""
+            
+            # Create system prompt for rephrasing
+            system_prompt = "You are an expert at rephrasing user queries to make them more effective for information retrieval. You rephrase incomplete or lazy queries into complete, specific, and searchable questions while preserving the user's intent."
+            
+            # Use LLM service for rephrasing
+            llm_service = PublicLLMService()
+            
+            # Generate rephrased query using same provider/model as chatbot
+            result = llm_service.generate_response(
+                prompt=rephrasing_prompt,
+                provider=config.default_llm_provider,
+                model=config.default_model,
+                max_tokens=150,  # Short response expected
+                temperature=0.3,  # Lower temperature for consistent rephrasing
+                system_prompt=system_prompt,
+                request_id=f"rephrase_{hash(latest_query) % 10000:04d}"
+            )
+            
+            if result.get('success') and result.get('response'):
+                rephrased_query = result['response'].strip()
+                
+                # Basic validation - ensure we got a meaningful response
+                if len(rephrased_query) > 10 and rephrased_query.lower() != latest_query.lower():
+                    logger.info(f"🔄 REPHRASE: '{latest_query}' → '{rephrased_query}'")
+                    return rephrased_query
+                else:
+                    logger.warning(f"🔄 REPHRASE: LLM returned insufficient rephrasing, using original query")
+                    return latest_query
+            else:
+                logger.error(f"🔄 REPHRASE: LLM call failed - {result.get('error', 'Unknown error')}")
+                return latest_query
+                
+        except Exception as e:
+            logger.error(f"🔄 REPHRASE: Exception during query rephrasing - {e}")
+            return latest_query
+    
     def search_knowledge(self, query: str, limit: int = 10, conversation_context: List[Dict[str, str]] = None) -> List[Dict[str, Any]]:
         """
         Search public knowledge base with conversation context support
@@ -246,8 +325,44 @@ class PublicKnowledgeService:
         similarity_threshold = config.similarity_threshold
         
         try:
-            # Build context-aware search query
-            search_query = self._build_context_aware_query(query, conversation_context)
+            # Determine if this is a subsequent query (not first query)
+            is_subsequent_query = conversation_context and len(conversation_context) > 1
+            
+            # Check if query rephrasing is enabled
+            use_query_rephrasing = (
+                hasattr(config, 'enable_query_rephrasing') and 
+                config.enable_query_rephrasing and 
+                is_subsequent_query
+            )
+            
+            # Step 1: Rephrase query if this is a subsequent query and rephrasing is enabled
+            final_query = query
+            if use_query_rephrasing:
+                logger.info(f"🔄 REPHRASE: Processing subsequent query for rephrasing: '{query}'")
+                final_query = self._rephrase_query_with_llm(query, conversation_context)
+                
+                # Log the rephrasing result
+                if final_query != query:
+                    logger.info(f"🔄 REPHRASE: Successfully rephrased query")
+                else:
+                    logger.info(f"🔄 REPHRASE: Using original query (no rephrasing needed or failed)")
+            else:
+                if is_subsequent_query:
+                    logger.info(f"🔄 REPHRASE: Skipped (disabled in config) for subsequent query: '{query}'")
+                else:
+                    logger.info(f"🔄 REPHRASE: Skipped (first query) for: '{query}'")
+            
+            # Step 2: Build context-aware search query (existing logic)
+            # For first query or when rephrasing is disabled, use the existing context-aware approach
+            if use_query_rephrasing:
+                # Use the rephrased query directly (don't append conversation context since it's already incorporated)
+                search_query = final_query
+                logger.info(f"🔍 SEARCH: Using rephrased query for ChromaDB: '{search_query[:100]}...'")
+            else:
+                # Use existing context-aware query building for first query or when rephrasing is disabled
+                search_query = self._build_context_aware_query(final_query, conversation_context)
+                logger.info(f"🔍 SEARCH: Using context-aware query for ChromaDB: '{search_query[:100]}...'")
+            
             
             # Perform vector search in ChromaDB (isolated from your Milvus)
             results = self.collection.query(
