@@ -75,6 +75,23 @@ class PublicChatRequest(models.Model):
     
     def __str__(self):
         return f"Request {self.request_id} from {self.ip_address} ({self.status})"
+
+    def clean(self):
+        """Validate model data"""
+        from django.core.exceptions import ValidationError
+
+        # Validate completion time is after creation time
+        if self.completed_at and self.created_at:
+            if self.completed_at < self.created_at:
+                raise ValidationError("Completion time cannot be before creation time")
+
+        # Validate message length is non-negative
+        if self.message_length < 0:
+            raise ValidationError("Message length cannot be negative")
+
+        # Validate response length is non-negative
+        if self.response_length < 0:
+            raise ValidationError("Response length cannot be negative")
     
     def save(self, *args, **kwargs):
         """Auto-generate request_id and calculate response time"""
@@ -82,12 +99,23 @@ class PublicChatRequest(models.Model):
             timestamp = timezone.now().strftime('%Y%m%d_%H%M%S')
             unique_suffix = str(uuid.uuid4().hex[:8])
             self.request_id = f"pub_{timestamp}_{unique_suffix}"
-        
-        # Calculate response time if completed
-        if self.completed_at and self.created_at and not self.response_time_ms:
-            delta = self.completed_at - self.created_at
-            self.response_time_ms = int(delta.total_seconds() * 1000)
-        
+
+        # Calculate response time if completed - with validation
+        if (self.completed_at and self.created_at and
+            not self.response_time_ms and
+            hasattr(self, 'created_at') and self.created_at):
+            try:
+                delta = self.completed_at - self.created_at
+                self.response_time_ms = int(delta.total_seconds() * 1000)
+            except (TypeError, AttributeError) as e:
+                # Log warning but don't fail the save
+                import logging
+                logger = logging.getLogger('public_chatbot')
+                logger.warning(f"Could not calculate response time for {self.request_id}: {e}")
+
+        # Run validation before saving
+        self.full_clean()
+
         super().save(*args, **kwargs)
 
 

@@ -164,7 +164,8 @@ def _get_client_ip(request) -> str:
             except ValueError:
                 continue
     
-    return 'unknown'
+    # Return a valid fallback IP for Docker/testing environments
+    return '127.0.0.1'
 
 
 def _is_private_ip(ip: str) -> bool:
@@ -254,11 +255,21 @@ def public_chat_api(request):
         session_id = data.get('session_id', '')  # Optional conversation tracking
         context_limit = min(data.get('context_limit', config.max_search_results), config.max_search_results)  # Use config setting
         conversation_context = data.get('conversation', [])  # Full conversation history
-        
+
+        # Validate message before creating tracking record
+        if not message:
+            response = JsonResponse({
+                'status': 'error',
+                'error': 'Message is required',
+                'request_id': request_id
+            }, status=400)
+            _add_cors_headers(response, request)
+            return response
+
         # Get client metadata
         user_agent = request.META.get('HTTP_USER_AGENT', '')[:300]
         origin_domain = request.META.get('HTTP_ORIGIN', '')
-        
+
         # Create request tracking record
         try:
             chat_request = PublicChatRequest(
@@ -272,9 +283,12 @@ def public_chat_api(request):
                 message_hash=hashlib.sha256(message.encode()).hexdigest(),
                 created_at=start_time
             )
+            # ROBUST FIX: Save immediately to ensure tracking
+            chat_request.save()
+            logger.info(f"📝 TRACKING: Created request record [{request_id}]")
         except Exception as e:
-            logger.error(f"Failed to create request record [{request_id}]: {e}")
-            # Continue without tracking if DB fails
+            logger.error(f"❌ TRACKING: Failed to create request record [{request_id}]: {e}")
+            chat_request = None  # Ensure it's None if creation failed
         
         # Security validation
         security_result = ChatbotSecurityService.validate_input(message, client_ip)
@@ -289,8 +303,8 @@ def public_chat_api(request):
                 chat_request.completed_at = timezone.now()
                 try:
                     chat_request.save()
-                except:
-                    pass
+                except Exception as e:
+                    logger.error(f"❌ TRACKING: Failed to save security violation for [{request_id}]: {e}")
             
             # Update IP tracking
             _update_ip_security_violation(client_ip)
@@ -313,8 +327,8 @@ def public_chat_api(request):
                 chat_request.completed_at = timezone.now()
                 try:
                     chat_request.save()
-                except:
-                    pass
+                except Exception as e:
+                    logger.error(f"❌ TRACKING: Failed to save rate limit violation for [{request_id}]: {e}")
             
             response = JsonResponse({
                 'status': 'error',
@@ -454,8 +468,8 @@ def public_chat_api(request):
             chat_request.response_time_ms = total_time_ms
             try:
                 chat_request.save()
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"❌ TRACKING: Failed to save unexpected error for [{request_id}]: {e}")
         
         response = JsonResponse({
             'status': 'error',
@@ -695,9 +709,12 @@ def public_chat_stream_api(request):
     client_ip = _get_client_ip(request)
     timestamp = timezone.now().strftime('%Y%m%d_%H%M%S')
     request_id = f"stream_{timestamp}_{client_ip.replace('.', '')[-4:]}_{hash(request.body) % 10000:04d}"
-    
+
     start_time = timezone.now()
-    
+
+    # Initialize request tracking
+    chat_request = None
+
     try:
         # Check if chatbot is enabled
         config = ChatbotConfiguration.get_config()
@@ -725,8 +742,9 @@ def public_chat_stream_api(request):
         # Extract and validate parameters
         message = data.get('message', '').strip()
         conversation_context = data.get('conversation', [])
+        session_id = data.get('session_id', '')  # Optional conversation tracking
         context_limit = min(data.get('context_limit', config.max_search_results), config.max_search_results)
-        
+
         if not message:
             response = JsonResponse({
                 'status': 'error',
@@ -735,11 +753,51 @@ def public_chat_stream_api(request):
             }, status=400)
             _add_cors_headers(response, request)
             return response
-        
+
+        # Get client metadata
+        user_agent = request.META.get('HTTP_USER_AGENT', '')[:300]
+        origin_domain = request.META.get('HTTP_ORIGIN', '')
+
+        # Create request tracking record - STREAMING VERSION
+        chat_request = None
+        try:
+            chat_request = PublicChatRequest(
+                request_id=request_id,
+                session_id=session_id[:100],  # Truncate for safety
+                ip_address=client_ip,
+                user_agent=user_agent,
+                origin_domain=origin_domain[:200],  # Truncate for safety
+                message_preview=message[:100],  # Privacy-safe truncation
+                message_length=len(message),
+                message_hash=hashlib.sha256(message.encode()).hexdigest(),
+                created_at=start_time
+            )
+            # ROBUST FIX: Save immediately to ensure tracking
+            chat_request.save()
+            logger.info(f"📝 TRACKING STREAM: Created request record [{request_id}]")
+        except Exception as e:
+            logger.error(f"❌ TRACKING STREAM: Failed to create request record [{request_id}]: {e}")
+            chat_request = None  # Ensure it's None if creation failed
+
         # Security validation
         security_result = ChatbotSecurityService.validate_input(message, client_ip)
         if not security_result['valid']:
             logger.warning(f"🚨 SECURITY: Invalid input from {client_ip}: {security_result['reason']}")
+
+            # Update request record
+            if chat_request:
+                chat_request.status = 'security_violation'
+                chat_request.error_type = security_result['reason']
+                chat_request.error_message = security_result['error']
+                chat_request.completed_at = timezone.now()
+                try:
+                    chat_request.save()
+                except Exception as e:
+                    logger.error(f"❌ TRACKING STREAM: Failed to save security violation for [{request_id}]: {e}")
+
+            # Update IP tracking
+            _update_ip_security_violation(client_ip)
+
             response = JsonResponse({
                 'status': 'error',
                 'error': security_result['error'],
@@ -751,6 +809,16 @@ def public_chat_stream_api(request):
         # Check IP-based rate limiting
         if ChatbotSecurityService.check_rate_limit_exceeded(client_ip):
             logger.warning(f"🚨 RATE LIMIT: IP {client_ip} exceeded limits")
+
+            if chat_request:
+                chat_request.status = 'rate_limited'
+                chat_request.error_message = 'IP rate limit exceeded'
+                chat_request.completed_at = timezone.now()
+                try:
+                    chat_request.save()
+                except Exception as e:
+                    logger.error(f"❌ TRACKING STREAM: Failed to save rate limit violation for [{request_id}]: {e}")
+
             response = JsonResponse({
                 'status': 'error',
                 'error': 'Rate limit exceeded. Please try again later.',
@@ -792,7 +860,10 @@ def public_chat_stream_api(request):
             context_results=context_results,
             conversation_context=conversation_context,
             config=config,
-            request_id=request_id
+            request_id=request_id,
+            chat_request=chat_request,
+            start_time=start_time,
+            client_ip=client_ip
         )
         
         if response_data.get('streaming'):
@@ -828,6 +899,17 @@ def public_chat_stream_api(request):
             )
         else:
             # Fallback to regular response if streaming failed
+            # Update chat_request with streaming failure
+            if chat_request:
+                chat_request.status = 'error'
+                chat_request.error_type = 'streaming_setup_error'
+                chat_request.error_message = response_data.get('error', 'Streaming failed')[:200]
+                chat_request.completed_at = timezone.now()
+                try:
+                    chat_request.save()
+                except Exception as e:
+                    logger.error(f"❌ TRACKING STREAM: Failed to save streaming failure for [{request_id}]: {e}")
+
             response = JsonResponse({
                 'status': 'error',
                 'error': response_data.get('error', 'Streaming failed'),
@@ -840,7 +922,21 @@ def public_chat_stream_api(request):
         logger.error(f"❌ STREAM ERROR: Request [{request_id}] failed: {str(e)}")
         import traceback
         logger.error(f"❌ STREAM ERROR: Traceback [{request_id}]: {traceback.format_exc()}")
-        
+
+        # Update request tracking if possible
+        if chat_request:
+            chat_request.status = 'error'
+            chat_request.error_type = 'unexpected_error'
+            chat_request.error_message = str(e)[:200]
+            chat_request.completed_at = timezone.now()
+            if start_time:
+                error_time = timezone.now()
+                chat_request.response_time_ms = int((error_time - start_time).total_seconds() * 1000)
+            try:
+                chat_request.save()
+            except Exception as save_e:
+                logger.error(f"❌ TRACKING STREAM: Failed to save unexpected error for [{request_id}]: {save_e}")
+
         # Return JSON error with CORS headers
         response = JsonResponse({
             'status': 'error',
@@ -848,13 +944,13 @@ def public_chat_stream_api(request):
             'request_id': request_id,
             'details': str(e)
         }, status=500)
-        
+
         # Add CORS headers to error response
         _add_cors_headers(response, request)
         return response
 
 
-def _generate_streaming_llm_response(message: str, context_results: list, conversation_context: list, config, request_id: str) -> Dict[str, Any]:
+def _generate_streaming_llm_response(message: str, context_results: list, conversation_context: list, config, request_id: str, chat_request=None, start_time=None, client_ip=None) -> Dict[str, Any]:
     """Generate streaming LLM response"""
     try:
         logger.info(f"🌊 STREAM: Starting streaming response generation [{request_id}]")
@@ -923,12 +1019,100 @@ Please provide a helpful response."""
         )
         
         logger.info(f"🌊 STREAM: LLM service returned: {result.get('success', False)} [{request_id}]")
+
+        # If streaming successful, wrap generator to add tracking
+        if result.get('streaming') and result.get('generator'):
+            original_generator = result['generator']
+
+            def tracking_generator():
+                """Wrapper generator that adds PublicChatRequest tracking"""
+                collected_content = ""
+                total_tokens = 0
+                response_time_ms = 0
+                chroma_search_time = 0  # TODO: Calculate from context search
+
+                try:
+                    for chunk in original_generator:
+                        yield chunk  # Pass through the original chunk
+
+                        # Try to extract completion data from the stream
+                        if 'data: {' in chunk:
+                            try:
+                                json_str = chunk.replace('data: ', '').strip()
+                                if json_str and json_str != '[DONE]':
+                                    chunk_data = json.loads(json_str)
+
+                                    if chunk_data.get('type') == 'completion':
+                                        # Extract final metrics
+                                        collected_content = chunk_data.get('total_content', '')
+                                        total_tokens = chunk_data.get('tokens_used', 0)
+                                        response_time_ms = chunk_data.get('response_time_ms', 0)
+
+                                        # Update chat_request with completion data
+                                        if chat_request and start_time:
+                                            end_time = timezone.now()
+                                            calculated_response_time = int((end_time - start_time).total_seconds() * 1000)
+
+                                            chat_request.response_generated = True
+                                            chat_request.response_length = len(collected_content)
+                                            chat_request.response_time_ms = response_time_ms or calculated_response_time
+                                            chat_request.chroma_search_time_ms = chroma_search_time
+                                            chat_request.chroma_results_found = len(context_results)
+                                            chat_request.chroma_context_used = len(context_results) > 0
+                                            chat_request.llm_provider_used = config.default_llm_provider
+                                            chat_request.llm_model_used = config.default_model
+                                            chat_request.llm_tokens_used = total_tokens
+                                            chat_request.status = 'success'
+                                            chat_request.completed_at = end_time
+
+                                            try:
+                                                chat_request.save()
+                                                logger.info(f"✅ TRACKING STREAM: Updated completion for [{request_id}]")
+                                            except Exception as e:
+                                                logger.error(f"❌ TRACKING STREAM: Failed to save completion for [{request_id}]: {e}")
+
+                                        # Update IP usage tracking
+                                        if client_ip:
+                                            _update_ip_usage(client_ip, total_tokens, True)
+
+                            except (json.JSONDecodeError, KeyError):
+                                pass  # Ignore JSON parsing errors, continue streaming
+
+                except Exception as e:
+                    logger.error(f"❌ TRACKING STREAM: Generator error [{request_id}]: {e}")
+
+                    # Update chat_request with error
+                    if chat_request:
+                        chat_request.status = 'error'
+                        chat_request.error_type = 'streaming_error'
+                        chat_request.error_message = str(e)[:200]
+                        chat_request.completed_at = timezone.now()
+                        try:
+                            chat_request.save()
+                        except Exception as save_e:
+                            logger.error(f"❌ TRACKING STREAM: Failed to save error for [{request_id}]: {save_e}")
+
+            # Return wrapped result
+            result['generator'] = tracking_generator()
+
         return result
         
     except Exception as e:
         logger.error(f"❌ STREAM LLM: Generation failed [{request_id}]: {e}")
         import traceback
         logger.error(f"❌ STREAM LLM: Traceback [{request_id}]: {traceback.format_exc()}")
+
+        # Update chat_request with LLM error
+        if chat_request:
+            chat_request.status = 'error'
+            chat_request.error_type = 'llm_generation_error'
+            chat_request.error_message = str(e)[:200]
+            chat_request.completed_at = timezone.now()
+            try:
+                chat_request.save()
+            except Exception as save_e:
+                logger.error(f"❌ TRACKING STREAM: Failed to save LLM error for [{request_id}]: {save_e}")
+
         return {
             'success': False,
             'streaming': False,

@@ -48,8 +48,9 @@ class PublicChatRequestAdmin(admin.ModelAdmin):
     ]
     search_fields = ['request_id', 'ip_address', 'message_preview']
     readonly_fields = [
-        'request_id', 'message_hash', 'created_at', 'completed_at', 
-        'response_time_ms'
+        'request_id', 'message_hash', 'created_at', 'completed_at',
+        'response_time_ms', 'chroma_search_time_ms', 'chroma_results_found',
+        'llm_cost_estimate', 'message_length', 'response_length'
     ]
     ordering = ['-created_at']
     
