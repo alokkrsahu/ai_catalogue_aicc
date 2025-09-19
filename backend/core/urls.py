@@ -207,6 +207,24 @@ urlpatterns = [
     
     # 🤖 PUBLIC CHATBOT API (Isolated from main system)
     path('api/public-chatbot/', include('public_chatbot.urls')),
+    
+    # Root route handler - redirect to frontend or return basic response
+    path('', lambda request: JsonResponse({
+        'message': 'AI Catalogue Backend API',
+        'version': '3.0.0',
+        'status': 'running',
+        'frontend_url': 'http://localhost:5173',
+        'admin_url': '/admin/',
+        'api_docs': '/api/'
+    }), name='api-root'),
+    
+    # Login route handler
+    path('login/', lambda request: JsonResponse({
+        'message': 'Please use the API endpoints for authentication',
+        'token_endpoint': '/api/token/',
+        'register_endpoint': '/api/register/',
+        'frontend_login': 'http://localhost:5173/login'
+    }), name='login-info'),
 ]
 
 # PHASE 2: Enhanced endpoints have been consolidated into the main system
