@@ -22,35 +22,35 @@ class ModernGeminiPDFExtractor:
         self.gemini_available = False
         self.client = None
         self.use_fallback = False
-        
+
         if self.api_key:
             try:
                 # Import new Gemini library
                 from google import genai
                 from google.genai import types
-                
+
                 # Configure the client with API key
                 os.environ['GOOGLE_API_KEY'] = self.api_key
                 self.client = genai.Client()
                 self.genai = genai
                 self.types = types
-                
+
                 # Test the connection
                 self._test_connection()
                 self.gemini_available = True
                 logger.info("✅ Modern Gemini 2.5 Flash API configured successfully")
-                
+
             except ImportError as e:
-                logger.error("❌ google-genai not installed. Run: pip install google-genai")
-                logger.error(f"Import error details: {e}")
+                logger.warning("⚠️ google-genai not installed - will use pdfplumber/PyPDF2 for PDF extraction")
+                logger.debug(f"Import error details: {e}")
                 # Fallback to old library if available
                 self._try_fallback_library()
             except Exception as e:
-                logger.error(f"❌ Failed to configure Modern Gemini API: {e}")
+                logger.warning(f"⚠️ Failed to configure Modern Gemini API - will use pdfplumber/PyPDF2 for PDF extraction: {e}")
                 # Fallback to old library if available
                 self._try_fallback_library()
         else:
-            logger.warning("⚠️ No Gemini API key provided")
+            logger.info("ℹ️ No Gemini API key provided - using pdfplumber/PyPDF2 for PDF extraction")
     
     def _test_connection(self):
         """Test the Gemini connection with a simple request"""
@@ -246,31 +246,65 @@ class ModernGeminiPDFExtractor:
         return []
     
     def _fallback_pdf_extraction(self, file_path: str) -> str:
-        """Fallback PDF extraction using PyPDF2"""
+        """Fallback PDF extraction using pdfplumber (primary) and PyPDF2 (secondary)"""
+
+        # Try pdfplumber first (better text extraction)
+        try:
+            import pdfplumber
+            logger.info(f"📄 Using pdfplumber fallback for: {file_path}")
+
+            text_content = []
+            with pdfplumber.open(file_path) as pdf:
+                for page_num, page in enumerate(pdf.pages):
+                    try:
+                        page_text = page.extract_text()
+                        if page_text and page_text.strip():
+                            text_content.append(page_text)
+                            logger.debug(f"  ✓ Extracted page {page_num + 1}: {len(page_text)} chars")
+                    except Exception as e:
+                        logger.warning(f"  ⚠️ Failed to extract page {page_num + 1}: {e}")
+
+            if text_content:
+                content = '\n\n'.join(text_content)
+                if len(content.strip()) > 10:
+                    logger.info(f"✅ pdfplumber extraction successful: {len(content)} chars from {len(text_content)} pages")
+                    return content
+
+        except ImportError:
+            logger.warning("⚠️ pdfplumber not installed, trying PyPDF2")
+        except Exception as e:
+            logger.warning(f"⚠️ pdfplumber extraction failed: {e}, trying PyPDF2")
+
+        # Fallback to PyPDF2 if pdfplumber fails
         try:
             import PyPDF2
-            logger.info(f"Using PyPDF2 fallback for: {file_path}")
-            
+            logger.info(f"📄 Using PyPDF2 fallback for: {file_path}")
+
             with open(file_path, 'rb') as file:
                 pdf_reader = PyPDF2.PdfReader(file)
                 text_content = []
-                
+
                 for page_num, page in enumerate(pdf_reader.pages):
                     try:
                         page_text = page.extract_text()
-                        if page_text.strip():
+                        if page_text and page_text.strip():
                             text_content.append(page_text)
+                            logger.debug(f"  ✓ Extracted page {page_num + 1}: {len(page_text)} chars")
                     except Exception as e:
-                        logger.warning(f"Failed to extract page {page_num}: {e}")
-                
-                content = '\n\n'.join(text_content)
-                if content and len(content.strip()) > 10:
-                    logger.info(f"✅ PyPDF2 fallback successful: {len(content)} chars")
-                    return content
-                    
+                        logger.warning(f"  ⚠️ Failed to extract page {page_num + 1}: {e}")
+
+                if text_content:
+                    content = '\n\n'.join(text_content)
+                    if len(content.strip()) > 10:
+                        logger.info(f"✅ PyPDF2 extraction successful: {len(content)} chars from {len(text_content)} pages")
+                        return content
+
+        except ImportError:
+            logger.error("❌ PyPDF2 not installed")
         except Exception as e:
-            logger.error(f"PyPDF2 fallback failed: {e}")
-        
+            logger.error(f"❌ PyPDF2 extraction failed: {e}")
+
+        logger.error(f"❌ All PDF extraction methods failed for: {file_path}")
         return ""
     
     def extract_image_text(self, image_path: str) -> str:
