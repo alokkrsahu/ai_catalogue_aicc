@@ -109,17 +109,18 @@ class EnhancedHierarchicalVectorDatabase:
         return cls.search_documents(project_id, query, limit)
     
     def insert_hierarchical_document(self, doc_info: HierarchicalDocumentInfo) -> bool:
-        """Insert document with all chunks preserving hierarchical structure"""
+        """Insert document with all chunks preserving hierarchical structure using BATCH insertion"""
         try:
             doc_metadata = doc_info.document_metadata
             file_name = doc_metadata['file_name']
-            
-            logger.info(f"   [DB] Starting insertion for document: {file_name} ({len(doc_info.chunks)} chunks)")
-            
-            # Insert all chunks using the real database
+
+            logger.info(f"   [DB] Starting BATCH insertion for document: {file_name} ({len(doc_info.chunks)} chunks)")
+
+            # Prepare all chunks as document info objects for batch insertion
+            chunks_data = []
+
             for i, chunk in enumerate(doc_info.chunks):
                 try:
-                    logger.info(f"      [DB.{i+1}] Preparing chunk {chunk.chunk_index} for insertion...")
                     # Prepare chunk info for the real database
                     chunk_doc_info = {
                         'document_id': chunk.parent_document_id,
@@ -132,22 +133,22 @@ class EnhancedHierarchicalVectorDatabase:
                         'section_title': chunk.section_title,
                         'hierarchical_path': chunk.hierarchical_path,
                         'embedding': chunk.embedding,
-                        
+
                         # Enhanced metadata
                         'metadata': chunk.metadata,
-                        
+
                         # Summary fields
                         'summary': chunk.metadata.get('summary', ''),
                         'summary_word_count': len(chunk.metadata.get('summary', '').split()),
                         'summary_generated_at': datetime.now().isoformat(),
                         'summarizer_used': 'default_summarizer',
-                        
+
                         # Topic fields
                         'topic': chunk.metadata.get('topic', ''),
                         'topic_word_count': len(chunk.metadata.get('topic', '').split()),
                         'topic_generated_at': datetime.now().isoformat(),
                         'topic_generator_used': 'default_topic_generator',
-                        
+
                         # Hierarchical fields
                         'hierarchy_level': doc_metadata['hierarchy_level'],
                         'category': doc_metadata['category'],
@@ -155,33 +156,28 @@ class EnhancedHierarchicalVectorDatabase:
                         'document_type': doc_metadata['document_type'],
                         'virtual_path': doc_metadata['virtual_path'],
                         'organization_level': doc_metadata['organization_level'],
-                        
+
                         # File info
                         'file_size': doc_metadata.get('file_size', 0),
                         'file_type': doc_metadata.get('file_type', ''),
                         'content_length': len(chunk.content),
                         'is_complete_document': chunk.total_chunks == 1,
-                        
+
                         # Additional chunk metadata
                         'chunk_folder': chunk.metadata.get('chunk_folder'),
                         'chunk_relative_path': chunk.metadata.get('chunk_relative_path'),
-                        
+
                         # Search optimization fields
                         'word_count': len(chunk.content.split()),
                         'paragraph_count': len(chunk.content.split('\n\n')),
                         'estimated_reading_time': len(chunk.content.split()) // 200,
-                        
+
                         # Processing info
                         'processing_time_ms': 0,  # Could be calculated
                         'error_message': '',
                         'uploaded_at': doc_metadata.get('uploaded_at', datetime.now().isoformat()),
                         'has_embedding': chunk.embedding is not None
                     }
-                    
-                    # Log the prepared data (without the large embedding vector)
-                    log_data = {k: v for k, v in chunk_doc_info.items() if k != 'embedding' and k != 'content'}
-                    log_data['content_snippet'] = chunk.content[:200] + '...' if chunk.content else ''
-                    logger.info(f"      [DB.{i+1}] Prepared data for insertion:\n{json.dumps(log_data, indent=2, default=str)}")
 
                     # Create a simple object wrapper for the real database
                     class DocumentInfo:
@@ -189,27 +185,26 @@ class EnhancedHierarchicalVectorDatabase:
                             self.content = data['content']
                             self.embedding = data['embedding']
                             self.metadata = data
-                    
-                    # Create document info object
+
+                    # Create document info object and add to batch
                     doc_info_obj = DocumentInfo(chunk_doc_info)
-                    
-                    # Insert using the real database's insert method
-                    logger.info(f"      [DB.{i+1}] Calling database insert method...")
-                    success = self.real_database.insert_document(doc_info_obj)
-                    
-                    if success:
-                        logger.info(f"      [DB.{i+1}] ✔️ Successfully inserted chunk {chunk.chunk_index} for {file_name}")
-                    else:
-                        logger.error(f"      [DB.{i+1}] ❌ Failed to insert chunk {chunk.chunk_index} for {file_name}")
-                        return False
-                        
+                    chunks_data.append(doc_info_obj)
+
                 except Exception as chunk_error:
-                    logger.exception(f"      [DB.{i+1}] 💥 Error inserting chunk {chunk.chunk_index} for {file_name}: {chunk_error}")
+                    logger.exception(f"      [DB.{i+1}] 💥 Error preparing chunk {chunk.chunk_index} for {file_name}: {chunk_error}")
                     return False
-            
-            logger.info(f"   [DB] ✅ Successfully inserted all {len(doc_info.chunks)} chunks for {file_name}")
-            return True
-            
+
+            # Perform BATCH insertion - all chunks inserted in a single operation
+            logger.info(f"   [DB] 🚀 Performing BATCH insertion for all {len(chunks_data)} chunks...")
+            success = self.real_database.batch_insert_document_chunks(chunks_data, file_name)
+
+            if success:
+                logger.info(f"   [DB] ✅ Successfully BATCH inserted all {len(doc_info.chunks)} chunks for {file_name}")
+                return True
+            else:
+                logger.error(f"   [DB] ❌ BATCH insertion failed for {file_name}")
+                return False
+
         except Exception as e:
             logger.exception(f"   [DB] 💥 Unhandled error inserting hierarchical document: {e}")
             return False
