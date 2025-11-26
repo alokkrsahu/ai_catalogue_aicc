@@ -56,16 +56,20 @@ class DocAwareHandler:
             
             # Extract conversation context for contextual search methods
             conversation_context = self.extract_conversation_context(conversation_history)
-            
+
+            # Extract content_filters from agent config
+            content_filters = agent_data.get('content_filters', [])
+
             # Perform document search with the conversation-based query using sync_to_async
             def perform_search():
                 return docaware_service.search_documents(
                     query=search_query,
                     search_method=SearchMethod(search_method),
                     method_parameters=search_parameters,
-                    conversation_context=conversation_context
+                    conversation_context=conversation_context,
+                    content_filters=content_filters
                 )
-            
+
             search_results = await sync_to_async(perform_search)()
             
             if not search_results:
@@ -131,13 +135,17 @@ class DocAwareHandler:
             
             # Get conversation context for contextual search
             conversation_context = self.extract_conversation_context(conversation_history)
-            
+
+            # Extract content_filters from agent config
+            content_filters = agent_data.get('content_filters', [])
+
             # Perform document search
             search_results = docaware_service.search_documents(
                 query=query,
                 search_method=SearchMethod(search_method),
                 method_parameters=search_parameters,
-                conversation_context=conversation_context
+                conversation_context=conversation_context,
+                content_filters=content_filters
             )
             
             if not search_results:
@@ -320,16 +328,20 @@ class DocAwareHandler:
             
             # Extract conversation context from aggregated input for contextual search methods
             conversation_context = self.extract_conversation_context_from_aggregated_input(aggregated_context)
-            
+
+            # Extract content_filters from agent config
+            content_filters = agent_data.get('content_filters', [])
+
             # Perform document search with the aggregated input query using sync_to_async
             def perform_search():
                 return docaware_service.search_documents(
                     query=search_query,
                     search_method=SearchMethod(search_method),
                     method_parameters=search_parameters,
-                    conversation_context=conversation_context
+                    conversation_context=conversation_context,
+                    content_filters=content_filters
                 )
-            
+
             search_results = await sync_to_async(perform_search)()
             
             if not search_results:

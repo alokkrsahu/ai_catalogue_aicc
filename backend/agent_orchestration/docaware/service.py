@@ -49,33 +49,35 @@ class EnhancedDocAwareAgentService:
         self.conversation_context = []
     
     def search_documents(
-        self, 
-        query: str, 
+        self,
+        query: str,
         search_method: SearchMethod = SearchMethod.SEMANTIC_SEARCH,
         method_parameters: Optional[Dict[str, Any]] = None,
         conversation_context: Optional[List[str]] = None,
-        content_filter: Optional[str] = None
+        content_filters: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
         """
         Search documents using the specified method
-        
+
         Args:
             query: Search query text
             search_method: Method to use for searching
             method_parameters: Parameters specific to the search method
             conversation_context: Recent conversation context for contextual search
-            
+            content_filters: List of content filter IDs (e.g., ["folder_Reports", "file_doc123"])
+
         Returns:
             List of search results with content and metadata
         """
         logger.info(f"📚 SEARCH: Starting {search_method.value} search for: '{query[:50]}...'")
-        
-        # Build content filter if specified
-        content_filter_expr = self._build_content_filter_expression(content_filter) if content_filter else None
+
+        # Build combined content filter expression from multiple filters
+        content_filter_expr = self._build_multi_content_filter_expression(content_filters) if content_filters else None
         if content_filter_expr:
-            logger.info(f"📚 SEARCH: Applying content filter: {content_filter_expr}")
-        elif content_filter:
-            logger.warning(f"📚 SEARCH: Content filter '{content_filter}' provided but could not build expression")
+            logger.info(f"📚 SEARCH: Applying multi-filter expression with {len(content_filters)} filters")
+            logger.debug(f"📚 SEARCH: Filter expression: {content_filter_expr}")
+        elif content_filters:
+            logger.warning(f"📚 SEARCH: Content filters provided but could not build expression: {content_filters}")
         
         # Get method configuration
         method_config = DocAwareSearchMethods.get_method_config(search_method)
@@ -225,19 +227,19 @@ class EnhancedDocAwareAgentService:
     def _build_content_filter_expression(self, content_filter: str) -> str:
         """
         Build Milvus filter expression from content filter ID
-        
+
         Args:
             content_filter: Content filter ID (e.g., "folder_Reports/Financial" or "file_doc123")
-            
+
         Returns:
             Milvus filter expression string
         """
         if not content_filter:
             return ""
-            
+
         try:
             logger.info(f"🔍 CONTENT FILTER: Building expression for filter: {content_filter}")
-            
+
             # Parse filter ID to determine type and path/document ID
             if content_filter.startswith('folder_'):
                 folder_path = content_filter[7:]  # Remove 'folder_' prefix
@@ -247,7 +249,7 @@ class EnhancedDocAwareAgentService:
                 # Using 'like' operator with wildcard for hierarchical matching
                 filter_expr = f"hierarchical_path like '{escaped_path}%'"
                 logger.info(f"🔍 CONTENT FILTER: Folder filter - path starts with: {folder_path}")
-                
+
             elif content_filter.startswith('file_'):
                 document_id = content_filter[5:]  # Remove 'file_' prefix
                 # Escape single quotes in document ID for safety
@@ -255,16 +257,77 @@ class EnhancedDocAwareAgentService:
                 # Filter by specific document_id (exact match)
                 filter_expr = f"document_id == '{escaped_doc_id}'"
                 logger.info(f"🔍 CONTENT FILTER: File filter - document_id: {document_id}")
-                
+
             else:
                 logger.warning(f"🔍 CONTENT FILTER: Unknown filter format: {content_filter}")
                 return ""
-            
+
             logger.info(f"🔍 CONTENT FILTER: Generated expression: {filter_expr}")
             return filter_expr
-            
+
         except Exception as e:
             logger.error(f"❌ CONTENT FILTER: Failed to build filter expression: {e}")
+            return ""
+
+    def _build_multi_content_filter_expression(self, content_filters: List[str]) -> str:
+        """
+        Build Milvus filter expression from multiple content filter IDs
+        Combines multiple filters with OR logic
+
+        Args:
+            content_filters: List of content filter IDs
+                Examples:
+                - ["folder_Reports/Financial", "folder_Legal"]
+                - ["file_doc123", "file_doc456"]
+                - ["folder_Reports", "file_doc789"]  # Mixed
+
+        Returns:
+            Combined Milvus filter expression string with OR logic
+
+        Examples:
+            Input: ["folder_Reports", "folder_Legal"]
+            Output: "(hierarchical_path like 'Reports%') || (hierarchical_path like 'Legal%')"
+
+            Input: ["folder_Reports", "file_doc123"]
+            Output: "(hierarchical_path like 'Reports%') || (document_id == 'doc123')"
+        """
+        if not content_filters or len(content_filters) == 0:
+            return ""
+
+        try:
+            filter_expressions = []
+
+            for content_filter in content_filters:
+                if not content_filter or not isinstance(content_filter, str):
+                    logger.warning(f"🔍 MULTI-FILTER: Skipping invalid filter: {content_filter}")
+                    continue
+
+                # Build individual filter expression
+                individual_expr = self._build_content_filter_expression(content_filter)
+
+                if individual_expr:
+                    filter_expressions.append(individual_expr)
+
+            if not filter_expressions:
+                logger.warning(f"🔍 MULTI-FILTER: No valid filter expressions generated from {len(content_filters)} filters")
+                return ""
+
+            # Combine with OR logic
+            if len(filter_expressions) == 1:
+                combined_expr = filter_expressions[0]
+            else:
+                # Wrap each expression in parentheses and join with ||
+                combined_expr = " || ".join([f"({expr})" for expr in filter_expressions])
+
+            logger.info(f"🔍 MULTI-FILTER: Generated combined expression with {len(filter_expressions)} filters")
+            logger.debug(f"🔍 MULTI-FILTER: Expression: {combined_expr}")
+
+            return combined_expr
+
+        except Exception as e:
+            logger.error(f"❌ MULTI-FILTER: Failed to build multi-filter expression: {e}")
+            import traceback
+            logger.error(f"❌ MULTI-FILTER: Traceback: {traceback.format_exc()}")
             return ""
     
     def _semantic_search(self, query: str, params: Dict[str, Any], content_filter_expr: str = None) -> List[Dict[str, Any]]:
@@ -846,73 +909,108 @@ class EnhancedDocAwareAgentService:
             logger.error(f"📚 COLLECTIONS: Failed to get collections: {e}")
             return ["project_documents"]
     
-    def get_hierarchical_paths(self) -> List[Dict[str, Any]]:
+    def get_hierarchical_paths(self, include_files: bool = False) -> List[Dict[str, Any]]:
         """
         Get unique hierarchical paths for content filtering from Milvus collection
-        Returns unique folder paths only (no individual files)
+
+        Args:
+            include_files: If True, include individual file entries alongside folders
+
+        Returns:
+            List of folder entries (and optionally file entries)
         """
         try:
-            logger.info(f"📚 HIERARCHICAL PATHS: Getting unique folder paths for collection {self.collection_name}")
-            
-            # Create a search request to get all documents with hierarchical_path
-            # We'll use a dummy query vector but search with a very high limit to get all documents
+            logger.info(f"📚 HIERARCHICAL PATHS: Getting paths (include_files={include_files}) for {self.collection_name}")
+
+            # Create search request to get all documents
             dummy_query = [0.0] * 384  # 384-dimensional zero vector for all-MiniLM-L6-v2
-            
+
             from django_milvus_search.models import SearchRequest, IndexType, MetricType
-            
+
             # Auto-detect collection metric type
             detected_metric = self.get_collection_metric_type(self.collection_name)
-            
+
             search_request = SearchRequest(
                 collection_name=self.collection_name,
                 query_vectors=[dummy_query],
                 index_type=IndexType.AUTOINDEX,
                 metric_type=MetricType(detected_metric),
                 limit=10000,  # High limit to get all documents
-                output_fields=["hierarchical_path"]  # Only get hierarchical_path field
+                output_fields=["hierarchical_path", "document_id", "file_name"]  # Get additional fields for files
             )
-            
+
             # Perform search
             search_result = self.milvus_service.search(search_request)
-            
-            # Extract unique hierarchical paths (folders only)
+
+            # Extract unique folder paths and files
             unique_folder_paths = set()
-            
+            unique_files = {}  # Map: document_id -> file info
+
             for hit in search_result.hits:
                 hierarchical_path = hit.get("hierarchical_path", "")
-                
+                document_id = hit.get("document_id", "")
+                file_name = hit.get("file_name", "Unknown")
+
                 if hierarchical_path and hierarchical_path.strip():
-                    # Clean the path
                     clean_path = hierarchical_path.strip().strip('/')
+
                     if clean_path:
-                        # Add the full path as a folder
-                        unique_folder_paths.add(clean_path)
-                        
-                        # Also add all parent folder paths
-                        path_parts = clean_path.split('/')
-                        for i in range(1, len(path_parts)):
-                            parent_path = '/'.join(path_parts[:i])
-                            if parent_path:
-                                unique_folder_paths.add(parent_path)
-            
-            # Convert to sorted list of folder entries
-            folder_list = []
+                        # Extract folder path (remove #chunk_XXX suffix)
+                        if '#chunk_' in clean_path:
+                            file_path = clean_path.split('#chunk_')[0]
+                            folder_path = '/'.join(file_path.split('/')[:-1])
+
+                            # Add all parent folder paths
+                            if folder_path:
+                                unique_folder_paths.add(folder_path)
+                                path_parts = folder_path.split('/')
+                                for i in range(1, len(path_parts)):
+                                    parent_path = '/'.join(path_parts[:i])
+                                    if parent_path:
+                                        unique_folder_paths.add(parent_path)
+
+                            # Track file for optional inclusion
+                            if include_files and document_id and document_id not in unique_files:
+                                unique_files[document_id] = {
+                                    'document_id': document_id,
+                                    'file_name': file_name,
+                                    'file_path': file_path,
+                                    'folder_path': folder_path
+                                }
+
+            # Build result list
+            result_list = []
+
+            # Add folders
             for folder_path in sorted(unique_folder_paths):
-                folder_list.append({
+                result_list.append({
                     "id": f"folder_{folder_path}",
-                    "name": folder_path.split('/')[-1],  # Last part of path as folder name
+                    "name": folder_path.split('/')[-1],
                     "path": folder_path,
                     "type": "folder",
                     "displayName": folder_path,
                     "isFolder": True
                 })
-            
-            logger.info(f"📚 HIERARCHICAL PATHS: Found {len(folder_list)} unique folder paths")
-            if folder_list:
-                logger.info(f"📚 HIERARCHICAL PATHS: Sample paths: {[f['displayName'] for f in folder_list[:5]]}")
-            
-            return folder_list
-            
+
+            # Add files if requested
+            if include_files:
+                for doc_id, file_info in sorted(unique_files.items(), key=lambda x: x[1]['file_name']):
+                    result_list.append({
+                        "id": f"file_{doc_id}",
+                        "name": file_info['file_name'],
+                        "path": file_info['file_path'],
+                        "type": "file",
+                        "displayName": f"{file_info['folder_path']}/{file_info['file_name']}" if file_info['folder_path'] else file_info['file_name'],
+                        "isFolder": False,
+                        "document_id": doc_id
+                    })
+
+            logger.info(f"📚 HIERARCHICAL PATHS: Found {len(result_list)} entries (folders: {len([r for r in result_list if r['isFolder']])}, files: {len([r for r in result_list if not r['isFolder']])})")
+            if result_list:
+                logger.info(f"📚 HIERARCHICAL PATHS: Sample paths: {[f['displayName'] for f in result_list[:5]]}")
+
+            return result_list
+
         except Exception as e:
             logger.error(f"📚 HIERARCHICAL PATHS: Failed to get paths: {e}")
             import traceback

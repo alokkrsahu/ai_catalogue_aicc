@@ -59,6 +59,24 @@ export interface CollectionsResponse {
   count: number;
 }
 
+export interface HierarchicalPathItem {
+  id: string;
+  name: string;
+  path: string;
+  type: 'folder' | 'file';
+  displayName: string;
+  isFolder: boolean;
+  document_id?: string;
+}
+
+export interface HierarchicalPathsResponse {
+  project_id: string;
+  hierarchical_paths: HierarchicalPathItem[];
+  folders_count: number;
+  files_count: number;
+  total_count: number;
+}
+
 class DocAwareService {
   /**
    * Get available search methods
@@ -119,34 +137,35 @@ class DocAwareService {
   }
   
   /**
-   * Test search functionality
+   * Test search functionality with multi-select content filters
    */
   async testSearch(
-    projectId: string, 
-    method: string, 
-    parameters: Record<string, any>, 
+    projectId: string,
+    method: string,
+    parameters: Record<string, any>,
     query?: string,
-    contentFilter?: string
+    contentFilters?: string[]
   ): Promise<TestSearchResponse> {
     try {
       console.log('📚 DOCAWARE SERVICE: Testing search for project:', projectId, 'method:', method);
-      
+
       // CRITICAL FIX: Use meaningful default query instead of hardcoded test query
       const searchQuery = query || 'quarterly business performance analysis and market trends';
-      
+
       console.log('📚 DOCAWARE SERVICE: Using search query:', searchQuery);
-      
+      console.log('📚 DOCAWARE SERVICE: Content filters (array):', contentFilters);
+
       const response = await api.post('/agent-orchestration/docaware/test_search/', {
         project_id: projectId,
         method,
         parameters,
         query: searchQuery,
-        content_filter: contentFilter
+        content_filters: contentFilters || []  // Send array instead of string
       });
-      
+
       console.log('✅ DOCAWARE SERVICE: Search test completed:', response.data.results_count, 'results');
       return response.data;
-      
+
     } catch (error) {
       console.error('❌ DOCAWARE SERVICE: Search test failed:', error);
       if (error.response?.data) {
@@ -170,16 +189,42 @@ class DocAwareService {
   async getCollections(projectId: string): Promise<CollectionsResponse> {
     try {
       console.log('📚 DOCAWARE SERVICE: Fetching collections for project:', projectId);
-      
+
       const response = await api.get('/agent-orchestration/docaware/collections/', {
         params: { project_id: projectId }
       });
-      
+
       console.log('✅ DOCAWARE SERVICE: Got collections:', response.data.count);
       return response.data;
-      
+
     } catch (error) {
       console.error('❌ DOCAWARE SERVICE: Failed to get collections:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get hierarchical paths (folders and files) for content filtering
+   */
+  async getHierarchicalPaths(projectId: string, includeFiles: boolean = true): Promise<HierarchicalPathsResponse> {
+    try {
+      console.log('📚 DOCAWARE SERVICE: Fetching hierarchical paths for project:', projectId);
+      console.log('📚 DOCAWARE SERVICE: Include files:', includeFiles);
+
+      const response = await api.get('/agent-orchestration/docaware/hierarchical_paths/', {
+        params: {
+          project_id: projectId,
+          include_files: includeFiles
+        }
+      });
+
+      console.log('✅ DOCAWARE SERVICE: Got hierarchical paths:',
+        response.data.folders_count, 'folders,',
+        response.data.files_count, 'files');
+      return response.data;
+
+    } catch (error) {
+      console.error('❌ DOCAWARE SERVICE: Failed to get hierarchical paths:', error);
       throw error;
     }
   }

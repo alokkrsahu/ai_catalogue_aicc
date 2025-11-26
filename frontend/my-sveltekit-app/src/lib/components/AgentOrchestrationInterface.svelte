@@ -244,24 +244,25 @@
     try {
       hierarchicalPathsLoading = true;
       hierarchicalPathsError = null;
-      
-      console.log('📚 AGENT ORCHESTRATION: Loading hierarchical paths for content filtering');
-      
-      const response = await api.get(`/agent-orchestration/docaware/hierarchical_paths/?project_id=${projectId}`);
-      
+
+      console.log('📚 AGENT ORCHESTRATION: Loading hierarchical paths for multi-select content filtering');
+
+      const response = await api.get(`/agent-orchestration/docaware/hierarchical_paths/?project_id=${projectId}&include_files=true`);
+
       // Extract hierarchical paths from response
       const pathsData = response.data || response;
       const rawPaths = pathsData.hierarchical_paths || [];
-      
-      // Filter to show only meaningful folders (not individual chunks)
+
+      // Keep both folders and files (no chunked entries)
       hierarchicalPaths = rawPaths.filter(path => {
-        if (!path?.id || !path?.displayName || path.type !== 'folder') return false;
-        // Keep: folders and documents, Remove: individual chunks
+        if (!path?.id || !path?.displayName) return false;
+        // Keep: folders and complete files, Remove: individual chunks
         return !path.path?.includes('#chunk_');
       });
-      
-      console.log(`✅ AGENT ORCHESTRATION: Loaded ${hierarchicalPaths.length} content filter options`);
-      
+
+      console.log(`✅ AGENT ORCHESTRATION: Loaded ${hierarchicalPaths.length} content filter options`,
+        `(${pathsData.folders_count || 0} folders, ${pathsData.files_count || 0} files)`);
+
     } catch (error) {
       console.error('❌ AGENT ORCHESTRATION: Failed to load hierarchical paths:', error);
       hierarchicalPathsError = error.message || 'Failed to load content filter data';
