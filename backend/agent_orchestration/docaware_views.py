@@ -131,11 +131,18 @@ class DocAwareConfigViewSet(viewsets.ViewSet):
             method_id = request.data.get('method')
             parameters = request.data.get('parameters', {})
             query = request.data.get('query')  # REMOVED HARDCODED FALLBACK
-            content_filter = request.data.get('content_filter')  # Extract content filter
-            
+            content_filters = request.data.get('content_filters', [])  # Extract content filters array
+
+            # Validate array
+            if content_filters and not isinstance(content_filters, list):
+                return Response(
+                    {'error': 'content_filters must be an array'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
             print(f"🔍 DEBUG: Extracted - project_id: {project_id}, method: {method_id}")
             print(f"🔍 DEBUG: Extracted - query: {query}, parameters: {parameters}")
-            print(f"🔍 DEBUG: Extracted - content_filter: {content_filter}")
+            print(f"🔍 DEBUG: Extracted - content_filters: {content_filters}")
             
             # CRITICAL: Require actual query input
             if not query or query.strip() == "":
@@ -223,7 +230,7 @@ class DocAwareConfigViewSet(viewsets.ViewSet):
                     query=query,
                     search_method=search_method,
                     method_parameters=parameters,
-                    content_filter=content_filter
+                    content_filters=content_filters
                 )
                 print(f"🔍 DEBUG: Search completed! Found {len(search_results)} results")
             except Exception as search_error:
@@ -255,6 +262,7 @@ class DocAwareConfigViewSet(viewsets.ViewSet):
                 'results_count': len(search_results),
                 'sample_results': formatted_results,
                 'parameters_used': parameters,
+                'content_filters_used': content_filters,
                 'note': 'Results from real query execution (hardcoded queries disabled)'
             }
             
@@ -319,20 +327,21 @@ class DocAwareConfigViewSet(viewsets.ViewSet):
         """
         try:
             project_id = request.query_params.get('project_id')
-            
-            print(f"🔍 DEBUG HIERARCHICAL PATHS: Called with project_id={project_id}")
+            include_files = request.query_params.get('include_files', 'true').lower() == 'true'
+
+            print(f"🔍 DEBUG HIERARCHICAL PATHS: Called with project_id={project_id}, include_files={include_files}")
             print(f"🔍 DEBUG HIERARCHICAL PATHS: Request method: {request.method}")
             print(f"🔍 DEBUG HIERARCHICAL PATHS: Query params: {dict(request.query_params)}")
-            
+
             if not project_id:
                 print("❌ DEBUG HIERARCHICAL PATHS: No project_id provided")
                 return Response(
                     {'error': 'Project ID is required'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            
-            logger.info(f"📚 DOCAWARE API: Getting hierarchical paths for project {project_id}")
-            
+
+            logger.info(f"📚 DOCAWARE API: Getting hierarchical paths for project {project_id} (include_files={include_files})")
+
             # Verify project access
             try:
                 project = get_object_or_404(IntelliDocProject, project_id=project_id)
@@ -340,14 +349,14 @@ class DocAwareConfigViewSet(viewsets.ViewSet):
             except Exception as proj_error:
                 print(f"❌ DEBUG HIERARCHICAL PATHS: Project lookup failed: {proj_error}")
                 raise proj_error
-            
+
             if project.created_by != request.user:
                 print(f"❌ DEBUG HIERARCHICAL PATHS: Access denied - project owner: {project.created_by}, request user: {request.user}")
                 return Response(
                     {'error': 'You do not have access to this project'},
                     status=status.HTTP_403_FORBIDDEN
                 )
-            
+
             # Initialize DocAware service to get collection data
             try:
                 print(f"🔧 DEBUG HIERARCHICAL PATHS: Initializing DocAware service for project {project_id}")
@@ -356,11 +365,11 @@ class DocAwareConfigViewSet(viewsets.ViewSet):
             except Exception as init_error:
                 print(f"❌ DEBUG HIERARCHICAL PATHS: DocAware service initialization failed: {init_error}")
                 raise init_error
-            
+
             # Get hierarchical paths from the vector database
             try:
-                print(f"📊 DEBUG HIERARCHICAL PATHS: Calling get_hierarchical_paths()")
-                hierarchical_data = docaware_service.get_hierarchical_paths()
+                print(f"📊 DEBUG HIERARCHICAL PATHS: Calling get_hierarchical_paths(include_files={include_files})")
+                hierarchical_data = docaware_service.get_hierarchical_paths(include_files=include_files)
                 print(f"📊 DEBUG HIERARCHICAL PATHS: Raw data from service: {len(hierarchical_data)} items")
                 print(f"📊 DEBUG HIERARCHICAL PATHS: First few items: {hierarchical_data[:2] if hierarchical_data else 'None'}")
             except Exception as data_error:
@@ -368,20 +377,26 @@ class DocAwareConfigViewSet(viewsets.ViewSet):
                 import traceback
                 print(f"❌ DEBUG HIERARCHICAL PATHS: Traceback: {traceback.format_exc()}")
                 raise data_error
-            
-            logger.info(f"📚 DOCAWARE API: Found {len(hierarchical_data)} hierarchical entries")
-            
+
+            # Count folders and files
+            folders_count = len([p for p in hierarchical_data if p.get('isFolder')])
+            files_count = len([p for p in hierarchical_data if not p.get('isFolder')])
+
+            logger.info(f"📚 DOCAWARE API: Found {folders_count} folders and {files_count} files")
+
             response_data = {
                 'project_id': project_id,
                 'hierarchical_paths': hierarchical_data,
-                'count': len(hierarchical_data)
+                'folders_count': folders_count,
+                'files_count': files_count,
+                'total_count': len(hierarchical_data)
             }
-            
+
             print(f"✅ DEBUG HIERARCHICAL PATHS: Returning response with {len(hierarchical_data)} items")
             print(f"✅ DEBUG HIERARCHICAL PATHS: Response keys: {list(response_data.keys())}")
-            
+
             return Response(response_data)
-            
+
         except Exception as e:
             print(f"❌ DEBUG HIERARCHICAL PATHS: Outer exception: {e}")
             import traceback

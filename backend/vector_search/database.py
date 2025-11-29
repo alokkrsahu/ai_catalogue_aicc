@@ -240,18 +240,19 @@ class MilvusProjectVectorDatabase:
             self.collection.create_index(field_name="document_id")
             self.collection.create_index(field_name="file_type")
             self.collection.create_index(field_name="file_name")
-            
+
             # Create indices for hierarchical fields
             self.collection.create_index(field_name="category")
             self.collection.create_index(field_name="subcategory")
             self.collection.create_index(field_name="document_type")
+            self.collection.create_index(field_name="hierarchical_path")  # ⭐ NEW: Critical for multi-filter performance
             self.collection.create_index(field_name="hierarchy_level")
             self.collection.create_index(field_name="organization_level")
-            
+
             # Create indices for chunk fields
             self.collection.create_index(field_name="chunk_type")
             self.collection.create_index(field_name="chunk_index")
-            
+
             logger.info(f"Created enhanced indices for collection {self.collection_name}")
             
         except Exception as e:

@@ -81,7 +81,7 @@
           console.log('💬 SYSTEM MESSAGE: Initialized default system message for', node.type);
         }
       }
-      
+
       // Initialize default RAG configuration if not present
       if (['AssistantAgent', 'UserProxyAgent', 'DelegateAgent'].includes(node.type) && !nodeConfig.hasOwnProperty('doc_aware')) {
         nodeConfig.doc_aware = false;
@@ -89,6 +89,14 @@
         nodeConfig.rag_search_limit = 5;
         nodeConfig.rag_relevance_threshold = 0.7;
         console.log('📚 RAG CONFIG: Initialized default RAG config for', node.type);
+      }
+
+      // Initialize content_filters as array if not present
+      if (['AssistantAgent', 'UserProxyAgent', 'DelegateAgent'].includes(node.type)) {
+        if (!nodeConfig.content_filters || !Array.isArray(nodeConfig.content_filters)) {
+          nodeConfig.content_filters = [];
+          console.log('📚 CONTENT FILTER: Initialized content_filters as empty array');
+        }
       }
     }
   }
@@ -249,13 +257,14 @@
       
       console.log('📚 DOCAWARE: Final test query:', actualQuery);
       console.log('📚 DOCAWARE: Input source:', inputSource);
-      
+      console.log('📚 DOCAWARE: Content filters (array):', nodeConfig.content_filters);
+
       const result = await docAwareService.testSearch(
         projectId,
         selectedSearchMethod.id,
         searchParameters,
         actualQuery,
-        nodeConfig.content_filter
+        nodeConfig.content_filters || []  // Pass array instead of string
       );
       
       testSearchResults = result;
@@ -1178,9 +1187,13 @@
             {/if}
           </div>
           
-          <!-- Content Filter Selection -->
+          <!-- Multi-Select Content Filter -->
           <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-700 mb-2">Content Filter</label>
+            <label class="block text-sm font-medium text-gray-700 mb-2">
+              Content Filters (Multi-Select)
+              <i class="fas fa-info-circle text-gray-400 ml-1" title="Select multiple folders and/or files to filter DocAware searches"></i>
+            </label>
+
             {#if !hierarchicalPathsLoaded}
               <div class="w-full px-3 py-2 border border-blue-300 rounded-lg bg-blue-50 flex items-center justify-center">
                 <i class="fas fa-spinner fa-spin mr-2 text-blue-600"></i>
@@ -1190,40 +1203,88 @@
               <div class="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-yellow-50">
                 <div class="text-yellow-700 text-sm flex items-center">
                   <i class="fas fa-info-circle mr-2"></i>
-                  No folders available for filtering. Upload and process documents first.
+                  No folders/files available for filtering. Upload and process documents first.
                 </div>
               </div>
             {:else}
-              <select
-                bind:value={nodeConfig.content_filter}
-                on:change={updateNodeData}
-                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-blue-600 focus:ring-2 focus:ring-blue-600 focus:ring-opacity-20 bg-white"
-              >
-                <option value="">All project files (no filter)</option>
-                {#each hierarchicalPaths as folder}
-                  <option value={folder.id}>📁 {folder.displayName}</option>
-                {/each}
-              </select>
-            {/if}
-            
-            <!-- Content Filter Description -->
-            {#if nodeConfig.content_filter && hierarchicalPaths.length > 0}
-              {@const selectedFilter = hierarchicalPaths.find(p => p.id === nodeConfig.content_filter)}
-              {#if selectedFilter}
-                <div class="mt-2 p-2 bg-green-100 rounded text-xs text-green-700">
-                  <div class="flex items-center">
-                    <i class="fas fa-folder mr-1"></i>
-                    <strong>Filter Active:</strong>
-                  </div>
-                  <div class="mt-1">
-                    DocAware will only search documents in folder: <strong>{selectedFilter.name || selectedFilter.displayName}</strong>
-                  </div>
-                  <div class="text-xs text-green-600 mt-1">
-                    Path: {selectedFilter.path || selectedFilter.displayName}
-                  </div>
+              <!-- Selected filters display (chips/tags) -->
+              {#if nodeConfig.content_filters && nodeConfig.content_filters.length > 0}
+                <div class="flex flex-wrap gap-2 mb-2 p-2 bg-gray-50 border border-gray-200 rounded-lg">
+                  {#each nodeConfig.content_filters as filterId}
+                    {@const item = hierarchicalPaths.find(p => p.id === filterId)}
+                    {#if item}
+                      <div class="flex items-center gap-1 px-2 py-1 bg-blue-100 text-blue-800 rounded-md text-xs">
+                        <i class="fas fa-{item.type === 'folder' ? 'folder' : 'file'} text-blue-600"></i>
+                        <span>{item.displayName}</span>
+                        <button
+                          type="button"
+                          on:click={() => {
+                            if (nodeConfig.content_filters && Array.isArray(nodeConfig.content_filters)) {
+                              nodeConfig.content_filters = nodeConfig.content_filters.filter(id => id !== filterId);
+                              updateNodeData();
+                            }
+                          }}
+                          class="ml-1 text-blue-600 hover:text-blue-800 focus:outline-none"
+                          title="Remove filter"
+                        >
+                          <i class="fas fa-times"></i>
+                        </button>
+                      </div>
+                    {/if}
+                  {/each}
                 </div>
               {/if}
-            {:else if nodeConfig.content_filter === '' || !nodeConfig.content_filter}
+
+              <!-- Dropdown to add more filters -->
+              <select
+                on:change={(e) => {
+                  const selectedValue = e.target.value;
+                  // Initialize content_filters if undefined
+                  if (!nodeConfig.content_filters) {
+                    nodeConfig.content_filters = [];
+                  }
+                  if (selectedValue && !nodeConfig.content_filters.includes(selectedValue)) {
+                    nodeConfig.content_filters = [...nodeConfig.content_filters, selectedValue];
+                    updateNodeData();
+                  }
+                  // Reset dropdown
+                  e.target.value = '';
+                }}
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-blue-600 focus:ring-2 focus:ring-blue-600 focus:ring-opacity-20 bg-white"
+              >
+                <option value="">Add folder or file filter...</option>
+                <optgroup label="Folders">
+                  {#each hierarchicalPaths.filter(p => p.type === 'folder') as folder}
+                    <option value={folder.id} disabled={nodeConfig.content_filters && nodeConfig.content_filters.includes(folder.id)}>
+                      📁 {folder.displayName}
+                    </option>
+                  {/each}
+                </optgroup>
+                <optgroup label="Files">
+                  {#each hierarchicalPaths.filter(p => p.type === 'file') as file}
+                    <option value={file.id} disabled={nodeConfig.content_filters && nodeConfig.content_filters.includes(file.id)}>
+                      📄 {file.displayName}
+                    </option>
+                  {/each}
+                </optgroup>
+              </select>
+            {/if}
+
+            <!-- Content Filter Description -->
+            {#if nodeConfig.content_filters && nodeConfig.content_filters.length > 0}
+              <div class="mt-2 p-2 bg-green-100 rounded text-xs text-green-700">
+                <div class="flex items-center mb-1">
+                  <i class="fas fa-filter mr-1"></i>
+                  <strong>Active Filters ({nodeConfig.content_filters.length}):</strong>
+                </div>
+                <div class="mt-1">
+                  DocAware will only search documents in the selected {nodeConfig.content_filters.length === 1 ? 'location' : 'locations'}.
+                </div>
+                <div class="text-xs text-green-600 mt-1">
+                  Multiple filters use OR logic - results from ANY selected location will be returned.
+                </div>
+              </div>
+            {:else}
               <div class="mt-2 p-2 bg-gray-100 rounded text-xs text-gray-600">
                 <i class="fas fa-globe mr-1"></i>
                 <strong>No Filter:</strong> DocAware will search all project documents
@@ -1416,9 +1477,13 @@
             {/if}
           </div>
           
-          <!-- Content Filter Selection -->
+          <!-- Multi-Select Content Filter -->
           <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-700 mb-2">Content Filter</label>
+            <label class="block text-sm font-medium text-gray-700 mb-2">
+              Content Filters (Multi-Select)
+              <i class="fas fa-info-circle text-gray-400 ml-1" title="Select multiple folders and/or files to filter DocAware searches"></i>
+            </label>
+
             {#if !hierarchicalPathsLoaded}
               <div class="w-full px-3 py-2 border border-blue-300 rounded-lg bg-blue-50 flex items-center justify-center">
                 <i class="fas fa-spinner fa-spin mr-2 text-blue-600"></i>
@@ -1428,40 +1493,88 @@
               <div class="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-yellow-50">
                 <div class="text-yellow-700 text-sm flex items-center">
                   <i class="fas fa-info-circle mr-2"></i>
-                  No folders available for filtering. Upload and process documents first.
+                  No folders/files available for filtering. Upload and process documents first.
                 </div>
               </div>
             {:else}
-              <select
-                bind:value={nodeConfig.content_filter}
-                on:change={updateNodeData}
-                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-blue-600 focus:ring-2 focus:ring-blue-600 focus:ring-opacity-20 bg-white"
-              >
-                <option value="">All project files (no filter)</option>
-                {#each hierarchicalPaths as folder}
-                  <option value={folder.id}>📁 {folder.displayName}</option>
-                {/each}
-              </select>
-            {/if}
-            
-            <!-- Content Filter Description -->
-            {#if nodeConfig.content_filter && hierarchicalPaths.length > 0}
-              {@const selectedFilter = hierarchicalPaths.find(p => p.id === nodeConfig.content_filter)}
-              {#if selectedFilter}
-                <div class="mt-2 p-2 bg-green-100 rounded text-xs text-green-700">
-                  <div class="flex items-center">
-                    <i class="fas fa-folder mr-1"></i>
-                    <strong>Filter Active:</strong>
-                  </div>
-                  <div class="mt-1">
-                    DocAware will only search documents in folder: <strong>{selectedFilter.name || selectedFilter.displayName}</strong>
-                  </div>
-                  <div class="text-xs text-green-600 mt-1">
-                    Path: {selectedFilter.path || selectedFilter.displayName}
-                  </div>
+              <!-- Selected filters display (chips/tags) -->
+              {#if nodeConfig.content_filters && nodeConfig.content_filters.length > 0}
+                <div class="flex flex-wrap gap-2 mb-2 p-2 bg-gray-50 border border-gray-200 rounded-lg">
+                  {#each nodeConfig.content_filters as filterId}
+                    {@const item = hierarchicalPaths.find(p => p.id === filterId)}
+                    {#if item}
+                      <div class="flex items-center gap-1 px-2 py-1 bg-blue-100 text-blue-800 rounded-md text-xs">
+                        <i class="fas fa-{item.type === 'folder' ? 'folder' : 'file'} text-blue-600"></i>
+                        <span>{item.displayName}</span>
+                        <button
+                          type="button"
+                          on:click={() => {
+                            if (nodeConfig.content_filters && Array.isArray(nodeConfig.content_filters)) {
+                              nodeConfig.content_filters = nodeConfig.content_filters.filter(id => id !== filterId);
+                              updateNodeData();
+                            }
+                          }}
+                          class="ml-1 text-blue-600 hover:text-blue-800 focus:outline-none"
+                          title="Remove filter"
+                        >
+                          <i class="fas fa-times"></i>
+                        </button>
+                      </div>
+                    {/if}
+                  {/each}
                 </div>
               {/if}
-            {:else if nodeConfig.content_filter === '' || !nodeConfig.content_filter}
+
+              <!-- Dropdown to add more filters -->
+              <select
+                on:change={(e) => {
+                  const selectedValue = e.target.value;
+                  // Initialize content_filters if undefined
+                  if (!nodeConfig.content_filters) {
+                    nodeConfig.content_filters = [];
+                  }
+                  if (selectedValue && !nodeConfig.content_filters.includes(selectedValue)) {
+                    nodeConfig.content_filters = [...nodeConfig.content_filters, selectedValue];
+                    updateNodeData();
+                  }
+                  // Reset dropdown
+                  e.target.value = '';
+                }}
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-blue-600 focus:ring-2 focus:ring-blue-600 focus:ring-opacity-20 bg-white"
+              >
+                <option value="">Add folder or file filter...</option>
+                <optgroup label="Folders">
+                  {#each hierarchicalPaths.filter(p => p.type === 'folder') as folder}
+                    <option value={folder.id} disabled={nodeConfig.content_filters && nodeConfig.content_filters.includes(folder.id)}>
+                      📁 {folder.displayName}
+                    </option>
+                  {/each}
+                </optgroup>
+                <optgroup label="Files">
+                  {#each hierarchicalPaths.filter(p => p.type === 'file') as file}
+                    <option value={file.id} disabled={nodeConfig.content_filters && nodeConfig.content_filters.includes(file.id)}>
+                      📄 {file.displayName}
+                    </option>
+                  {/each}
+                </optgroup>
+              </select>
+            {/if}
+
+            <!-- Content Filter Description -->
+            {#if nodeConfig.content_filters && nodeConfig.content_filters.length > 0}
+              <div class="mt-2 p-2 bg-green-100 rounded text-xs text-green-700">
+                <div class="flex items-center mb-1">
+                  <i class="fas fa-filter mr-1"></i>
+                  <strong>Active Filters ({nodeConfig.content_filters.length}):</strong>
+                </div>
+                <div class="mt-1">
+                  DocAware will only search documents in the selected {nodeConfig.content_filters.length === 1 ? 'location' : 'locations'}.
+                </div>
+                <div class="text-xs text-green-600 mt-1">
+                  Multiple filters use OR logic - results from ANY selected location will be returned.
+                </div>
+              </div>
+            {:else}
               <div class="mt-2 p-2 bg-gray-100 rounded text-xs text-gray-600">
                 <i class="fas fa-globe mr-1"></i>
                 <strong>No Filter:</strong> DocAware will search all project documents

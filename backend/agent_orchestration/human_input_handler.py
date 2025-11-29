@@ -330,7 +330,9 @@ class HumanInputHandler:
         # Get DocAware configuration from the node
         search_method = node_data.get('search_method', 'semantic_search')
         search_parameters = node_data.get('search_parameters', {})
-        content_filter = node_data.get('content_filter', '')
+
+        # Get multi-select content filters
+        content_filters = node_data.get('content_filters', [])
         
         # Get LLM configuration for summarization
         llm_provider = node_data.get('llm_provider', 'openai')
@@ -354,7 +356,7 @@ class HumanInputHandler:
                 search_method=search_method,
                 search_parameters=search_parameters,
                 query=human_input,
-                content_filter=content_filter
+                content_filters=content_filters
             )
             
             if not search_results or not search_results.get('success'):
