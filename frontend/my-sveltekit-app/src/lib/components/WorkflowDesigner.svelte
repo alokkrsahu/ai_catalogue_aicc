@@ -7,6 +7,7 @@
   import type { BulkModelData } from '$lib/stores/llmModelsStore';
   import { workflowStatus } from '$lib/stores/workflowStatus';
   import type { PendingHumanInput } from '$lib/services/humanInputService';
+  import NodePropertiesPanel from './NodePropertiesPanel.svelte';
   
   export let project: any;
   export let projectId: string;
@@ -2228,64 +2229,53 @@
   <!-- Node Properties Panel (Right Sidebar) -->
   {#if showProperties && selectedNode}
     <div class="w-80 border-l border-gray-200 bg-white">
-      {#await import('./NodePropertiesPanel.svelte')}
-        <div class="p-4 flex items-center justify-center">
-          <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-oxford-blue"></div>
-        </div>
-      {:then NodePropertiesPanelModule}
-        <svelte:component 
-          this={NodePropertiesPanelModule.default}
-          node={selectedNode}
-          {capabilities}
-          {projectId}
-          workflowData={{ nodes, edges, workflow }}
-          {bulkModelData}
-          {modelsLoaded}
-          {hierarchicalPaths}
-          {hierarchicalPathsLoaded}
-          on:nodeUpdate={(e) => {
-            const updatedNode = e.detail;
-            const nodeIndex = nodes.findIndex(n => n.id === updatedNode.id);
-            
-            console.log('🔄 WORKFLOW: Node update received for', updatedNode.id.slice(-4));
-            
-            if (nodeIndex >= 0) {
-              // 🔥 CRITICAL FIX: Prevent shared references in nodes array
-              const newNode = {
-                id: updatedNode.id,
-                type: updatedNode.type,
-                position: { ...updatedNode.position },
-                data: {
-                  // Deep clone to prevent shared references between nodes
-                  ...JSON.parse(JSON.stringify(updatedNode.data))
-                }
-              };
-              
-              // Update the nodes array with completely new node object
-              nodes[nodeIndex] = newNode;
-              
-              // 🔥 FORCE REACTIVITY: Create new array reference to trigger Svelte reactivity
-              nodes = [...nodes];
-              
-              // Update selectedNode reference to new object
-              selectedNode = newNode;
-              
-              console.log('✅ WORKFLOW: Node updated successfully');
-              saveWorkflowToDatabase(false); // Silent auto-save - no toast for property updates
-            } else {
-              console.error('❌ WORKFLOW: Node not found in array!', updatedNode.id);
-            }
-          }}
-          on:close={() => {
-            showProperties = false;
-            selectedNode = null;
-          }}
-        />
-      {:catch error}
-        <div class="p-4">
-          <div class="text-red-600">Failed to load properties panel</div>
-        </div>
-      {/await}
+      <NodePropertiesPanel
+        node={selectedNode}
+        {capabilities}
+        {projectId}
+        workflowData={{ nodes, edges, workflow }}
+        {bulkModelData}
+        {modelsLoaded}
+        {hierarchicalPaths}
+        {hierarchicalPathsLoaded}
+        on:nodeUpdate={(e) => {
+          const updatedNode = e.detail;
+          const nodeIndex = nodes.findIndex(n => n.id === updatedNode.id);
+
+          console.log('🔄 WORKFLOW: Node update received for', updatedNode.id.slice(-4));
+
+          if (nodeIndex >= 0) {
+            // 🔥 CRITICAL FIX: Prevent shared references in nodes array
+            const newNode = {
+              id: updatedNode.id,
+              type: updatedNode.type,
+              position: { ...updatedNode.position },
+              data: {
+                // Deep clone to prevent shared references between nodes
+                ...JSON.parse(JSON.stringify(updatedNode.data))
+              }
+            };
+
+            // Update the nodes array with completely new node object
+            nodes[nodeIndex] = newNode;
+
+            // 🔥 FORCE REACTIVITY: Create new array reference to trigger Svelte reactivity
+            nodes = [...nodes];
+
+            // Update selectedNode reference to new object
+            selectedNode = newNode;
+
+            console.log('✅ WORKFLOW: Node updated successfully');
+            saveWorkflowToDatabase(false); // Silent auto-save - no toast for property updates
+          } else {
+            console.error('❌ WORKFLOW: Node not found in array!', updatedNode.id);
+          }
+        }}
+        on:close={() => {
+          showProperties = false;
+          selectedNode = null;
+        }}
+      />
     </div>
   {/if}
   
