@@ -16,6 +16,10 @@ from .models import (
     ChatbotConfiguration
 )
 from .forms import BulkDocumentUploadForm
+import csv
+import json
+from django.http import HttpResponse
+from datetime import datetime
 
 
 def get_user_identifier(user):
@@ -32,6 +36,104 @@ def get_user_identifier(user):
                 return user.name
             except AttributeError:
                 return str(user)
+
+
+
+
+# Export functionality for PublicChatRequest
+def export_as_csv(modeladmin, request, queryset):
+    """Export selected chat requests as CSV"""
+    field_names = [
+        'id', 'request_id', 'session_id', 'ip_address', 'user_agent',
+        'origin_domain', 'message_preview', 'message_length', 'message_hash',
+        'response_generated', 'response_length', 'response_time_ms',
+        'chroma_search_time_ms', 'chroma_results_found', 'chroma_context_used',
+        'llm_provider_used', 'llm_model_used', 'llm_tokens_used', 'llm_cost_estimate',
+        'status', 'error_type', 'error_message', 'created_at', 'completed_at'
+    ]
+    
+    response = HttpResponse(content_type='text/csv')
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    response['Content-Disposition'] = f'attachment; filename=public_chatbot_export_{timestamp}.csv'
+    
+    # Add UTF-8 BOM for Excel compatibility
+    response.write('\ufeff')
+    
+    writer = csv.writer(response)
+    writer.writerow(field_names)
+    
+    for obj in queryset:
+        row = []
+        for field in field_names:
+            value = getattr(obj, field)
+            if value is None:
+                row.append('')
+            else:
+                row.append(str(value))
+        writer.writerow(row)
+    
+    return response
+
+export_as_csv.short_description = "📥 Export selected as CSV"
+
+
+def export_all_as_csv(modeladmin, request, queryset):
+    """Export ALL chat requests as CSV (not just selected)"""
+    from public_chatbot.models import PublicChatRequest
+    all_requests = PublicChatRequest.objects.all()
+    return export_as_csv(modeladmin, request, all_requests)
+
+export_all_as_csv.short_description = "📥 Export ALL requests as CSV"
+
+
+def export_as_json(modeladmin, request, queryset):
+    """Export selected chat requests as JSON"""
+    data = []
+    
+    for obj in queryset:
+        data.append({
+            'id': obj.id,
+            'request_id': obj.request_id,
+            'session_id': obj.session_id,
+            'ip_address': obj.ip_address,
+            'user_agent': obj.user_agent,
+            'origin_domain': obj.origin_domain,
+            'message_preview': obj.message_preview,
+            'message_length': obj.message_length,
+            'message_hash': obj.message_hash,
+            'response_generated': obj.response_generated,
+            'response_length': obj.response_length,
+            'response_time_ms': obj.response_time_ms,
+            'chroma_search_time_ms': obj.chroma_search_time_ms,
+            'chroma_results_found': obj.chroma_results_found,
+            'chroma_context_used': obj.chroma_context_used,
+            'llm_provider_used': obj.llm_provider_used,
+            'llm_model_used': obj.llm_model_used,
+            'llm_tokens_used': obj.llm_tokens_used,
+            'llm_cost_estimate': float(obj.llm_cost_estimate) if obj.llm_cost_estimate else None,
+            'status': obj.status,
+            'error_type': obj.error_type,
+            'error_message': obj.error_message,
+            'created_at': obj.created_at.isoformat() if obj.created_at else None,
+            'completed_at': obj.completed_at.isoformat() if obj.completed_at else None,
+        })
+    
+    response = HttpResponse(json.dumps(data, indent=2), content_type='application/json')
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    response['Content-Disposition'] = f'attachment; filename=public_chatbot_export_{timestamp}.json'
+    
+    return response
+
+export_as_json.short_description = "📥 Export selected as JSON"
+
+
+def export_all_as_json(modeladmin, request, queryset):
+    """Export ALL chat requests as JSON (not just selected)"""
+    from public_chatbot.models import PublicChatRequest
+    all_requests = PublicChatRequest.objects.all()
+    return export_as_json(modeladmin, request, all_requests)
+
+export_all_as_json.short_description = "📥 Export ALL requests as JSON"
 
 
 @admin.register(PublicChatRequest)
@@ -54,6 +156,8 @@ class PublicChatRequestAdmin(admin.ModelAdmin):
     ]
     ordering = ['-created_at']
     
+
+    actions = [export_as_csv, export_all_as_csv, export_as_json, export_all_as_json]
     fieldsets = (
         ('Request Info', {
             'fields': ('request_id', 'session_id', 'created_at', 'completed_at')
