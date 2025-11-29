@@ -14,6 +14,7 @@ import re
 from .embeddings import DocumentEmbedder
 from .summarization import get_summarizer
 from .gemini_extractor import get_gemini_extractor, initialize_gemini_extractor
+from project_api_keys.integration_examples import ProjectAwareOpenAISummarizer
 
 logger = logging.getLogger(__name__)
 
@@ -81,46 +82,65 @@ class HierarchicalDocumentInfo:
     embedding: Optional[np.ndarray] = None
 
 class EnhancedHierarchicalProcessor:
-    """Enhanced processor with MANDATORY AI content generation - no fallbacks"""
-    
-    def __init__(self, embedder: DocumentEmbedder = None, max_chunk_size: int = 35000):
+    """Enhanced processor with MANDATORY AI content generation using project-specific API keys"""
+
+    def __init__(self, project, embedder: DocumentEmbedder = None, max_chunk_size: int = 35000):
+        """
+        Initialize processor with project-specific OpenAI API key
+
+        Args:
+            project: IntelliDocProject instance (REQUIRED)
+            embedder: DocumentEmbedder instance
+            max_chunk_size: Maximum chunk size in characters
+
+        Raises:
+            ValueError: If project has no OpenAI API key configured
+        """
+        self.project = project
         self.embedder = embedder or DocumentEmbedder()
-        self.summarizer = get_summarizer()
         self.max_chunk_size = max_chunk_size
         self.supported_extensions = {'.txt', '.pdf', '.docx', '.doc', '.md', '.rtf', '.odt'}
-        
-        # Check if AI capabilities are available
-        if not self.summarizer:
-            logger.warning("⚠️ AI Summarizer not available - will use fallback content generation")
-        else:
-            logger.info("✅ AI Summarizer available for enhanced content generation")
-        
+
+        # Use project-specific OpenAI summarizer - NO FALLBACK
+        self.summarizer = ProjectAwareOpenAISummarizer(project)
+
+        # Check if project has OpenAI API key configured
+        if not self.summarizer.is_available():
+            error_msg = (
+                f"❌ PROJECT API KEY REQUIRED: Project '{project.name}' does not have an OpenAI API key configured. "
+                f"Please add your OpenAI API key in the project's API Management settings before processing documents."
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        logger.info(f"✅ AI Summarizer initialized with project-specific OpenAI API key for project '{project.name}'")
+
         # Initialize Gemini extractor for PDF text extraction
         self._initialize_extractors()
-        
-        logger.info("🚀 Enhanced Hierarchical Processor initialized with MANDATORY AI content generation")
+
+        logger.info(f"🚀 Enhanced Hierarchical Processor initialized for project '{project.name}' with project-specific OpenAI API key")
     
     def _initialize_extractors(self):
-        """Initialize text extraction services"""
+        """Initialize text extraction services using project-specific Google API key"""
         try:
-            # Get Google API key from environment or Django settings
-            gemini_api_key = os.getenv('GOOGLE_API_KEY', '')
-            
-            if not gemini_api_key:
-                try:
-                    from django.conf import settings
-                    gemini_api_key = getattr(settings, 'GOOGLE_API_KEY', '')
-                except:
-                    pass
-            
+            # Get project-specific Google/Gemini API key
+            from project_api_keys.services import ProjectAPIKeyService
+
+            service = ProjectAPIKeyService()
+            gemini_api_key = service.get_project_api_key(self.project, 'google')
+
             if gemini_api_key:
                 initialize_gemini_extractor(gemini_api_key)
-                logger.info("✅ Gemini PDF extractor initialized")
+                logger.info(f"✅ Gemini PDF extractor initialized with project-specific API key for project '{self.project.name}'")
             else:
-                logger.warning("⚠️ Gemini API key not found - PDF extraction will use fallback methods")
-                
+                logger.warning(f"⚠️ No Google API key configured for project '{self.project.name}' - PDF extraction will use fallback methods (PyPDF2/pdfplumber)")
+                # Initialize with None to ensure fallback methods are used
+                initialize_gemini_extractor(None)
+
         except Exception as e:
             logger.error(f"❌ Error initializing extractors: {e}")
+            # Initialize with None to ensure fallback methods are used
+            initialize_gemini_extractor(None)
     
     def process_project_documents_enhanced(self, project_documents: List[Any]) -> Generator[HierarchicalDocumentInfo, None, None]:
         """Process project documents with enhanced hierarchical chunking"""
@@ -608,24 +628,20 @@ class EnhancedHierarchicalProcessor:
         folder_path = '/'.join(path_parts[:-1])
         chunk_hierarchical_path = f"{folder_path}/{file_part}#chunk_{chunk_index:03d}"
         
-        # Generate summary and topic
-        logger.info(f"         -> Generating AI content (summary/topic)...")
+        # Generate summary and topic using project-specific OpenAI API key
+        logger.info(f"         -> Generating AI content (summary/topic) using project-specific OpenAI key...")
         summary_metadata = {'file_name': document_metadata['file_name'], 'section_title': section_title}
-        
-        if self.summarizer:
-            summary = self.summarizer.generate_summary(content, summary_metadata) or ""
-            topic = self.summarizer.generate_topic(content, summary_metadata) or ""
-        else:
-            # Use basic fallback methods if summarizer is not available
-            summary = ""
-            topic = ""
-        
+
+        # Summarizer is guaranteed to be available (checked in __init__)
+        summary = self.summarizer.generate_summary(content, summary_metadata) or ""
+        topic = self.summarizer.generate_topic(content, summary_metadata) or ""
+
         if not summary:
             logger.warning(f"         -> ⚠️ Failed to generate summary for chunk {chunk_index}, using fallback.")
             summary = f"Content from {section_title}: {content[:250]}..."
         else:
             logger.info(f"         -> ✔️ Summary generated ({len(summary)} chars).")
-            
+
         if not topic:
             logger.warning(f"         -> ⚠️ Failed to generate topic for chunk {chunk_index}, using fallback.")
             topic = section_title.title() if len(section_title.split()) <= 8 else f"{document_metadata['category'].title()} Content"

@@ -87,12 +87,28 @@ class UnifiedVectorSearchManager:
             }
     
     def _process_enhanced_with_full_ai(self, project: IntelliDocProject, embedder) -> Dict[str, Any]:
-        """Enhanced processing with full AI capabilities - summaries, topics, hierarchical analysis"""
+        """Enhanced processing with full AI capabilities using project-specific OpenAI API key"""
         from .enhanced_hierarchical_processor import EnhancedHierarchicalProcessor
         from .enhanced_hierarchical_database import EnhancedHierarchicalVectorDatabase
 
         start_time = time.time()
-        processor = EnhancedHierarchicalProcessor(embedder=embedder)
+
+        # Initialize processor with project (requires project-specific OpenAI API key)
+        try:
+            processor = EnhancedHierarchicalProcessor(project=project, embedder=embedder)
+        except ValueError as e:
+            # Project doesn't have OpenAI API key configured
+            logger.error(f"❌ Cannot process documents: {e}")
+            return {
+                'status': 'error',
+                'message': str(e),
+                'processed_documents': 0,
+                'failed_documents': 0,
+                'total_chunks_created': 0,
+                'processing_mode': 'enhanced',
+                'error_type': 'missing_api_key'
+            }
+
         database = EnhancedHierarchicalVectorDatabase(str(project.project_id))
         
         # Get documents - check all possible statuses and log what we find

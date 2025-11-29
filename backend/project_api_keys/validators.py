@@ -103,11 +103,11 @@ class APIKeyValidator:
             if len(api_key) < 35:
                 return False, "Google API key appears too short"
             
-            # Test API call to Gemini
+            # Test API call to Gemini (using gemini-2.5-flash to match PDF extractor)
             timeout = aiohttp.ClientTimeout(total=self.timeout)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
-                    f'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}',
+                    f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}',
                     headers={'Content-Type': 'application/json'},
                     json={
                         'contents': [{

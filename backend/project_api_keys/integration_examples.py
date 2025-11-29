@@ -125,14 +125,14 @@ class ProjectAwareOpenAISummarizer:
         """Clean and validate topic"""
         if not topic:
             return "Document Content"
-        
+
         # Remove quotes and prefixes
-        topic = topic.strip('"\\'')
+        topic = topic.strip('"\'')  # Strip double and single quotes
         prefixes = ['Topic:', 'Title:', 'Subject:']
         for prefix in prefixes:
             if topic.startswith(prefix):
                 topic = topic[len(prefix):].strip()
-        
+
         # Limit to 8 words
         words = topic.split()[:8]
         return ' '.join(words).title()
