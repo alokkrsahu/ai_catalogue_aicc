@@ -38,6 +38,17 @@
   // API Management modal state
   let showApiManagement = false;
   
+  // API Key status state
+  let apiKeyStatus: {
+    hasValidKeys: boolean;
+    missingProviders: string[];
+    checking: boolean;
+  } = {
+    hasValidKeys: false,
+    missingProviders: [],
+    checking: true
+  };
+  
   console.log(`🎯 UNIVERSAL: Initializing universal project interface for project ${projectId}`);
   
   // Toggle sidebar function
@@ -75,10 +86,11 @@
         capabilities: Object.keys(projectCapabilities)
       });
       
-      // Load documents and status
+      // Load documents, status, and check API keys
       await Promise.all([
         loadDocuments(),
-        loadProcessingStatus()
+        loadProcessingStatus(),
+        checkApiKeyStatus()
       ]);
       
     } catch (error) {
@@ -87,6 +99,50 @@
       goto('/features/intellidoc');
     } finally {
       loading = false;
+    }
+  }
+  
+  /**
+   * Check API key status for the project
+   * This proactively warns users if API keys are missing
+   */
+  async function checkApiKeyStatus() {
+    try {
+      apiKeyStatus.checking = true;
+      console.log(`🔑 UNIVERSAL: Checking API key status for project ${projectId}`);
+      
+      // Get all API keys for this project
+      const apiKeys = await cleanUniversalApi.getProjectApiKeys(projectId);
+      
+      // Check which providers have valid, active keys
+      const requiredProviders = ['openai', 'anthropic', 'google'];
+      const activeKeys = apiKeys.filter(key => key.is_active && key.is_validated);
+      const activeProviders = activeKeys.map(key => key.provider_type);
+      
+      // Find missing providers
+      const missingProviders = requiredProviders.filter(
+        provider => !activeProviders.includes(provider)
+      );
+      
+      apiKeyStatus = {
+        hasValidKeys: activeProviders.length > 0,
+        missingProviders: missingProviders,
+        checking: false
+      };
+      
+      if (missingProviders.length > 0) {
+        console.warn(`⚠️ UNIVERSAL: Missing API keys for providers: ${missingProviders.join(', ')}`);
+      } else {
+        console.log('✅ UNIVERSAL: All required API keys are configured');
+      }
+      
+    } catch (error) {
+      console.error('❌ UNIVERSAL: Failed to check API key status:', error);
+      // Don't show error toast - just mark as checking failed
+      apiKeyStatus.checking = false;
+      // Assume keys might be missing if we can't check
+      apiKeyStatus.hasValidKeys = false;
+      apiKeyStatus.missingProviders = ['openai', 'anthropic', 'google'];
     }
   }
   
@@ -397,6 +453,45 @@
     
     <!-- Main Content Area -->
     <div class="flex-1 flex flex-col">
+      <!-- API Key Warning Banner -->
+      {#if !apiKeyStatus.checking && !apiKeyStatus.hasValidKeys && apiKeyStatus.missingProviders.length > 0}
+        <div class="bg-yellow-50 border-l-4 border-yellow-400 p-4 sticky top-0 z-20 shadow-md">
+          <div class="flex items-start">
+            <div class="flex-shrink-0">
+              <i class="fas fa-exclamation-triangle text-yellow-600 text-xl"></i>
+            </div>
+            <div class="ml-3 flex-1">
+              <h3 class="text-sm font-medium text-yellow-800">
+                API Keys Required for Agent Workflows
+              </h3>
+              <div class="mt-2 text-sm text-yellow-700">
+                <p>
+                  This project is missing API keys for: <strong>{apiKeyStatus.missingProviders.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(', ')}</strong>.
+                  Agent workflows will fail without valid API keys configured.
+                </p>
+                <p class="mt-2">
+                  <button
+                    class="font-medium text-yellow-800 underline hover:text-yellow-900"
+                    on:click={() => showApiManagement = true}
+                  >
+                    Configure API keys now →
+                  </button>
+                </p>
+              </div>
+            </div>
+            <div class="ml-4 flex-shrink-0">
+              <button
+                class="text-yellow-600 hover:text-yellow-800"
+                on:click={() => apiKeyStatus.hasValidKeys = true}
+                title="Dismiss warning"
+              >
+                <i class="fas fa-times"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+      {/if}
+      
       <!-- Project Header -->
       <div class="bg-white border-b border-gray-200 sticky top-0 z-10">
         <div class="w-full px-6">
@@ -898,5 +993,9 @@
   {projectId}
   projectName={project?.name || ''}
   bind:showModal={showApiManagement}
-  on:close={() => showApiManagement = false}
+  on:close={() => {
+    showApiManagement = false;
+    // Re-check API key status after closing the modal
+    checkApiKeyStatus();
+  }}
 />

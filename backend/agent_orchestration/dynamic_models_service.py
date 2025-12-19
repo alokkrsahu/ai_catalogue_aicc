@@ -167,7 +167,15 @@ class DynamicModelsService:
                     # Enhanced model information based on model ID patterns
                     model_id = model_info.id.lower()
                     
-                    if 'gpt-4' in model_id:
+                    # GPT-5 and future models (forward-compatible)
+                    if 'gpt-5' in model_id:
+                        model_info.context_length = 128000  # Default, will be updated when specs are known
+                        model_info.cost_per_1k_tokens = 0.01  # Default, will be updated when pricing is known
+                        model_info.capabilities = ['text_generation', 'analysis', 'reasoning', 'latest_model']
+                        model_info.recommended_for = ['AssistantAgent', 'GroupChatManager']
+                        logger.info(f"🚀 NEW MODEL: Detected GPT-5 model: {model_info.id}")
+                    
+                    elif 'gpt-4' in model_id:
                         if 'turbo' in model_id or '1106' in model_id or '0125' in model_id:
                             model_info.context_length = 128000
                             model_info.cost_per_1k_tokens = 0.01
@@ -193,6 +201,14 @@ class DynamicModelsService:
                         model_info.cost_per_1k_tokens = 0.005
                         model_info.capabilities = ['text_generation', 'analysis', 'reasoning', 'multimodal', 'vision']
                         model_info.recommended_for = ['AssistantAgent', 'GroupChatManager']
+                    
+                    # Default for any other GPT models not explicitly handled (future-proof)
+                    elif model_id.startswith('gpt-'):
+                        model_info.context_length = 128000  # Conservative default
+                        model_info.cost_per_1k_tokens = 0.01  # Conservative default
+                        model_info.capabilities = ['text_generation', 'analysis', 'reasoning']
+                        model_info.recommended_for = ['AssistantAgent', 'GroupChatManager']
+                        logger.info(f"🆕 UNKNOWN GPT MODEL: Detected new GPT model pattern: {model_info.id} - using defaults")
                         
                     elif 'davinci' in model_id or 'curie' in model_id or 'babbage' in model_id:
                         model_info.context_length = 4096
@@ -220,7 +236,15 @@ class DynamicModelsService:
                     # Enhanced model information based on model ID patterns
                     model_id = model_info.id.lower()
                     
-                    if 'gemini-1.5-pro' in model_id:
+                    # Gemini 2.0 and future models (forward-compatible)
+                    if 'gemini-2' in model_id or 'gemini-2.0' in model_id:
+                        model_info.context_length = 2000000  # Default, will be updated when specs are known
+                        model_info.cost_per_1k_tokens = 0.00125  # Default, will be updated when pricing is known
+                        model_info.capabilities = ['text_generation', 'analysis', 'reasoning', 'multimodal', 'vision', 'latest_model']
+                        model_info.recommended_for = ['AssistantAgent', 'GroupChatManager']
+                        logger.info(f"🚀 NEW MODEL: Detected Gemini 2.0 model: {model_info.id}")
+                    
+                    elif 'gemini-1.5-pro' in model_id:
                         model_info.context_length = 2000000  # Gemini 1.5 Pro has 2M context
                         model_info.cost_per_1k_tokens = 0.00125
                         model_info.capabilities = ['text_generation', 'analysis', 'reasoning', 'multimodal', 'vision', 'ultra_long_context']
@@ -232,7 +256,7 @@ class DynamicModelsService:
                         model_info.capabilities = ['text_generation', 'analysis', 'fast_response', 'multimodal', 'vision']
                         model_info.recommended_for = ['DelegateAgent', 'UserProxyAgent']
                         
-                    elif 'gemini-pro' in model_id and '1.5' not in model_id:
+                    elif 'gemini-pro' in model_id and '1.5' not in model_id and '2' not in model_id:
                         model_info.context_length = 32768
                         model_info.cost_per_1k_tokens = 0.0005
                         model_info.capabilities = ['text_generation', 'analysis']
@@ -243,6 +267,14 @@ class DynamicModelsService:
                         model_info.cost_per_1k_tokens = 0.01
                         model_info.capabilities = ['text_generation', 'analysis', 'reasoning', 'complex_tasks']
                         model_info.recommended_for = ['AssistantAgent', 'GroupChatManager']
+                    
+                    # Default for any other Gemini models not explicitly handled (future-proof)
+                    elif model_id.startswith('gemini-'):
+                        model_info.context_length = 1000000  # Conservative default
+                        model_info.cost_per_1k_tokens = 0.001  # Conservative default
+                        model_info.capabilities = ['text_generation', 'analysis', 'reasoning', 'multimodal']
+                        model_info.recommended_for = ['AssistantAgent', 'GroupChatManager']
+                        logger.info(f"🆕 UNKNOWN GEMINI MODEL: Detected new Gemini model pattern: {model_info.id} - using defaults")
                     
                     models.append(model_info)
                 

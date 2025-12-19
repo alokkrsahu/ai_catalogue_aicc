@@ -113,7 +113,9 @@ services:
     volumes:
       - chromadb_data:/chroma/chroma
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      # CRITICAL FIX: Use correct ChromaDB v2 API endpoint
+      # v1/heartbeat is deprecated, use v2 health endpoint instead
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
       interval: 30s
       timeout: 10s
       retries: 5

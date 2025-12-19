@@ -634,7 +634,8 @@ class WorkflowExecutor:
                     # Handle agent nodes with real LLM calls
                     agent_config = {
                         'llm_provider': node_data.get('llm_provider', 'openai'),
-                        'llm_model': node_data.get('llm_model', 'gpt-3.5-turbo')
+                        'llm_model': node_data.get('llm_model', 'gpt-3.5-turbo'),
+                        'temperature': node_data.get('temperature', 0.7)  # CRITICAL FIX: Include temperature to avoid KeyError
                     }
                     
                     # Get LLM provider for this agent
@@ -696,7 +697,7 @@ class WorkflowExecutor:
                         metadata={
                             'llm_provider': agent_config['llm_provider'],
                             'llm_model': agent_config['llm_model'],
-                            'temperature': agent_config['temperature']
+                            'temperature': agent_config.get('temperature', 0.7)  # CRITICAL FIX: Use .get() with default for safety
                         }
                     )
                     

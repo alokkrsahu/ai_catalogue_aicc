@@ -11,6 +11,12 @@ class VectorSearchConfig(AppConfig):
     
     def ready(self):
         """Initialize vector search components when Django starts"""
+        # CRITICAL FIX: Prevent multiple initializations during Django reload
+        # Django's StatReloader can call ready() multiple times
+        if hasattr(VectorSearchConfig, '_initialized'):
+            return
+        VectorSearchConfig._initialized = True
+        
         try:
             # Import here to avoid circular imports
             from .startup import initialize_vector_search

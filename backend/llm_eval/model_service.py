@@ -8,7 +8,7 @@ class ModelService:
     
     @staticmethod
     def get_openai_models(api_key: str) -> List[Dict[str, Any]]:
-        """Fetch available OpenAI models."""
+        """Fetch available OpenAI models - includes ALL GPT models (GPT-3.5, GPT-4, GPT-4o, GPT-5, future models)."""
         try:
             headers = {
                 'Authorization': f'Bearer {api_key}',
@@ -18,17 +18,31 @@ class ModelService:
             response.raise_for_status()
             models = response.json()['data']
             
-            # Filter to commonly used chat models and format consistently
-            chat_models = [
-                {
-                    'id': model['id'],
-                    'name': model['id'],
-                    'displayName': model['id'].replace('-', ' ').title(),
-                    'object': model.get('object', 'model')
-                }
-                for model in models 
-                if any(name in model['id'] for name in ['gpt-3.5', 'gpt-4', 'gpt-4o']) and 'turbo' in model['id']
-            ]
+            # Filter to GPT chat/completion models - INCLUSIVE filter for all GPT models
+            # Includes: gpt-3.5-*, gpt-4-*, gpt-4o-*, gpt-5-*, and any future GPT models
+            chat_models = []
+            for model in models:
+                model_id = model['id'].lower()
+                
+                # Include all GPT models (gpt-3, gpt-3.5, gpt-4, gpt-4o, gpt-5, etc.)
+                # Exclude: embeddings, audio, image, fine-tune base models, and deprecated models
+                is_gpt_model = model_id.startswith('gpt-')
+                
+                # Exclude non-chat models (embeddings, audio, image generation, etc.)
+                excluded_patterns = [
+                    'embedding', 'audio', 'whisper', 'tts', 'dall-e', 'davinci', 
+                    'curie', 'babbage', 'ada', 'instruct', 'deprecated'
+                ]
+                is_excluded = any(excluded in model_id for excluded in excluded_patterns)
+                
+                # Include all GPT models except excluded ones
+                if is_gpt_model and not is_excluded:
+                    chat_models.append({
+                        'id': model['id'],
+                        'name': model['id'],
+                        'displayName': model['id'].replace('-', ' ').title(),
+                        'object': model.get('object', 'model')
+                    })
             
             return sorted(chat_models, key=lambda x: x['id'])
         except Exception as e:
@@ -43,14 +57,26 @@ class ModelService:
     
     @staticmethod
     def get_claude_models() -> List[Dict[str, str]]:
-        """List known Claude models (Anthropic doesn't provide a public models endpoint)."""
+        """List known Claude models (Anthropic doesn't provide a public models endpoint).
+        
+        Note: This list is manually maintained. When new Claude models are released,
+        they should be added here. The models are ordered by release date (newest first).
+        """
         return [
-            {'id': 'claude-3-5-sonnet-20241022', 'name': 'claude-3-5-sonnet-20241022', 'displayName': 'Claude 3.5 Sonnet (Latest)'},
-            {'id': 'claude-3-5-haiku-20241022', 'name': 'claude-3-5-haiku-20241022', 'displayName': 'Claude 3.5 Haiku (Latest)'},
+            # Claude 4 and future models (add new models at the top)
+            {'id': 'claude-sonnet-4-20250514', 'name': 'claude-sonnet-4-20250514', 'displayName': 'Claude Sonnet 4 (Latest)'},
+            # Claude 3.5 models
+            {'id': 'claude-3-5-sonnet-20241022', 'name': 'claude-3-5-sonnet-20241022', 'displayName': 'Claude 3.5 Sonnet'},
+            {'id': 'claude-3-5-haiku-20241022', 'name': 'claude-3-5-haiku-20241022', 'displayName': 'Claude 3.5 Haiku'},
+            # Claude 3 models
             {'id': 'claude-3-opus-20240229', 'name': 'claude-3-opus-20240229', 'displayName': 'Claude 3 Opus'},
             {'id': 'claude-3-sonnet-20240229', 'name': 'claude-3-sonnet-20240229', 'displayName': 'Claude 3 Sonnet'},
             {'id': 'claude-3-haiku-20240307', 'name': 'claude-3-haiku-20240307', 'displayName': 'Claude 3 Haiku'},
-            {'id': 'claude-sonnet-4-20250514', 'name': 'claude-sonnet-4-20250514', 'displayName': 'Claude Sonnet 4'},
+            # Claude 2 models (legacy)
+            {'id': 'claude-2.1', 'name': 'claude-2.1', 'displayName': 'Claude 2.1'},
+            {'id': 'claude-2.0', 'name': 'claude-2.0', 'displayName': 'Claude 2.0'},
+            # Claude Instant models (legacy)
+            {'id': 'claude-instant-1.2', 'name': 'claude-instant-1.2', 'displayName': 'Claude Instant 1.2'},
         ]
     
     @staticmethod

@@ -16,6 +16,12 @@ class TemplatesConfig(AppConfig):
         """Initialize the app when Django starts"""
         # Import any signal handlers here if needed
         
+        # CRITICAL FIX: Prevent multiple initializations during Django reload
+        # Django's StatReloader can call ready() multiple times
+        if hasattr(TemplatesConfig, '_initialized'):
+            return
+        TemplatesConfig._initialized = True
+        
         # Initialize cache warmup on startup (in production)
         try:
             from django.conf import settings
@@ -24,6 +30,7 @@ class TemplatesConfig(AppConfig):
             if not getattr(settings, 'TESTING', False):
                 from .cache import CacheWarmup
                 logger.info("Starting template cache warmup on application startup")
+                # Run warmup in background thread to avoid blocking startup
                 CacheWarmup.warmup_on_startup()
         except Exception as e:
             logger.warning(f"Failed to initialize cache warmup on startup: {str(e)}")

@@ -243,41 +243,104 @@ class HumanInputHandler:
                         'final_response': final_response
                     }
             else:
-                # This is a regular human input workflow - continue with normal workflow execution
-                # For now, mark as completed since we don't have the continue_workflow_from_node method
-                logger.info(f"🔄 WORKFLOW RESUME: Regular human input workflow - marking as completed")
+                # This is a regular human input workflow - continue with remaining nodes after UserProxyAgent
+                logger.info(f"🔄 WORKFLOW RESUME: Regular human input workflow - continuing execution with remaining nodes")
                 
-                execution_record.status = 'completed'
-                execution_record.end_time = timezone.now()
+                # CRITICAL FIX: Continue workflow execution from the node after UserProxyAgent
+                workflow = await sync_to_async(lambda: execution_record.workflow)()
+                graph_json = await sync_to_async(lambda: workflow.graph_json)()
+                execution_sequence = self.workflow_parser.parse_workflow_graph(graph_json)
                 
-                # CRITICAL: Calculate duration_seconds for proper execution time display
-                if execution_record.start_time and execution_record.end_time:
-                    duration = (execution_record.end_time - execution_record.start_time).total_seconds()
-                    execution_record.duration_seconds = duration
-                    logger.info(f"📊 WORKFLOW COMPLETE: Calculated duration: {duration:.2f} seconds")
+                # Find the position of the UserProxyAgent that just received input
+                user_proxy_agent_id = execution_record.human_input_agent_id
+                user_proxy_agent_name = execution_record.awaiting_human_input_agent
+                current_position = 0
                 
-                execution_record.total_messages = len(execution_record.messages_data or [])
+                # Find the position of UserProxyAgent in execution sequence
+                for i, node in enumerate(execution_sequence):
+                    node_id = node.get('id')
+                    node_name = node.get('data', {}).get('name', f'Node_{node_id}')
+                    if node_id == user_proxy_agent_id or node_name == user_proxy_agent_name:
+                        current_position = i + 1  # Move to next node after UserProxyAgent
+                        logger.info(f"📍 WORKFLOW RESUME: Found UserProxyAgent at position {i}, continuing from position {current_position}")
+                        break
                 
-                # CRITICAL FIX: Calculate total_agents_involved from messages_data
-                agent_names = set()
-                for msg in (execution_record.messages_data or []):
-                    agent_type = msg.get('agent_type', '')
-                    # Count only actual agents, not system nodes
-                    if agent_type not in ['StartNode', 'EndNode']:
-                        agent_names.add(msg.get('agent_name'))
-                execution_record.total_agents_involved = len(agent_names)
-                logger.info(f"📊 WORKFLOW COMPLETE: Calculated {len(agent_names)} agents involved: {list(agent_names)}")
+                # Get executed nodes from execution record
+                executed_nodes = execution_record.executed_nodes or {}
                 
-                execution_record.result_summary = f"Human input workflow completed"
-                await sync_to_async(execution_record.save)()
+                # Add the human input to executed_nodes so it's tracked
+                if user_proxy_agent_id:
+                    executed_nodes[user_proxy_agent_id] = human_input
                 
-                return {
-                    'status': 'success',
-                    'message': 'Human input workflow completed successfully',
-                    'execution_id': execution_record.execution_id,
-                    'updated_conversation': updated_conversation,
-                    'workflow_completed': True
-                }
+                remaining_agents = execution_sequence[current_position:]
+                logger.info(f"🔍 WORKFLOW RESUME: Found {len(remaining_agents)} remaining nodes after UserProxyAgent: {[agent.get('data', {}).get('name') for agent in remaining_agents]}")
+                
+                if remaining_agents:
+                    # Continue workflow execution with remaining agents
+                    logger.info(f"▶️ WORKFLOW RESUME: Continuing workflow execution from position {current_position}")
+                    
+                    # Import workflow executor to continue execution
+                    from .workflow_executor import WorkflowExecutor
+                    from .chat_manager import ChatManager
+                    
+                    # Create chat manager instance (needed for workflow executor)
+                    chat_manager = ChatManager(
+                        self.llm_provider_manager,
+                        self.workflow_parser,
+                        self.docaware_handler
+                    )
+                    
+                    # Create workflow executor instance
+                    workflow_executor = WorkflowExecutor(
+                        self.workflow_parser,
+                        self.llm_provider_manager,
+                        chat_manager,
+                        self.docaware_handler,
+                        self,  # human_input_handler
+                        self.reflection_handler
+                    )
+                    
+                    # Continue execution from current position
+                    continuation_result = await workflow_executor.continue_workflow_execution(
+                        workflow, execution_record, execution_sequence, current_position, executed_nodes
+                    )
+                    
+                    return continuation_result
+                else:
+                    # No remaining agents - mark workflow as completed
+                    logger.info(f"🏁 WORKFLOW RESUME: No remaining agents, marking workflow as completed")
+                    
+                    execution_record.status = 'completed'
+                    execution_record.end_time = timezone.now()
+                    
+                    # CRITICAL: Calculate duration_seconds for proper execution time display
+                    if execution_record.start_time and execution_record.end_time:
+                        duration = (execution_record.end_time - execution_record.start_time).total_seconds()
+                        execution_record.duration_seconds = duration
+                        logger.info(f"📊 WORKFLOW COMPLETE: Calculated duration: {duration:.2f} seconds")
+                    
+                    execution_record.total_messages = len(execution_record.messages_data or [])
+                    
+                    # CRITICAL FIX: Calculate total_agents_involved from messages_data
+                    agent_names = set()
+                    for msg in (execution_record.messages_data or []):
+                        agent_type = msg.get('agent_type', '')
+                        # Count only actual agents, not system nodes
+                        if agent_type not in ['StartNode', 'EndNode']:
+                            agent_names.add(msg.get('agent_name'))
+                    execution_record.total_agents_involved = len(agent_names)
+                    logger.info(f"📊 WORKFLOW COMPLETE: Calculated {len(agent_names)} agents involved: {list(agent_names)}")
+                    
+                    execution_record.result_summary = f"Human input workflow completed"
+                    await sync_to_async(execution_record.save)()
+                    
+                    return {
+                        'status': 'success',
+                        'message': 'Human input workflow completed successfully',
+                        'execution_id': execution_record.execution_id,
+                        'updated_conversation': updated_conversation,
+                        'workflow_completed': True
+                    }
             
         except Exception as e:
             logger.error(f"❌ WORKFLOW RESUME: Failed to continue workflow: {e}")

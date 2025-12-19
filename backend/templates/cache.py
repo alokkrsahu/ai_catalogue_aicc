@@ -44,10 +44,19 @@ class TemplateDiscoveryCache:
         start_time = time.time()
         
         try:
+            # CRITICAL FIX: Return memory cache immediately if available and not forcing refresh
+            # This prevents unnecessary filesystem checks during startup
+            if cls._memory_cache and not force_refresh:
+                cls._cache_statistics['hits'] += 1
+                response_time = (time.time() - start_time) * 1000
+                cls._update_average_response_time(response_time)
+                return cls._memory_cache.copy()
+            
             current_time = time.time()
             
-            # Check if refresh needed
+            # Check if refresh needed (only if cache is empty or forced)
             if (force_refresh or 
+                not cls._memory_cache or
                 current_time - cls._last_filesystem_check > cls.FILESYSTEM_CHECK_INTERVAL):
                 
                 return cls._refresh_cache_if_needed()
@@ -123,18 +132,16 @@ class TemplateDiscoveryCache:
     
     @classmethod
     def _calculate_directory_hash(cls, directory: Path) -> str:
-        """Fast directory hash calculation with optimization"""
+        """Fast directory hash calculation with optimization - stable for Docker volumes"""
         import hashlib
         import os
         
         hash_md5 = hashlib.md5()
         
         try:
-            # Get directory modification time for quick check
-            dir_stat = directory.stat()
-            hash_md5.update(str(dir_stat.st_mtime).encode())
-            
-            # Include subdirectory structure
+            # CRITICAL FIX: Use file content hash instead of modification time
+            # Docker volumes can have inconsistent mtime, causing false cache refreshes
+            # Only hash file names and sizes (not mtime) for stability
             for root, dirs, files in os.walk(directory):
                 dirs.sort()
                 files.sort()
@@ -143,16 +150,22 @@ class TemplateDiscoveryCache:
                 for filename in files:
                     if filename.endswith(('.json', '.py')):
                         filepath = Path(root) / filename
-                        file_stat = filepath.stat()
-                        hash_md5.update(filename.encode())
-                        hash_md5.update(str(file_stat.st_mtime).encode())
-                        hash_md5.update(str(file_stat.st_size).encode())
+                        try:
+                            file_stat = filepath.stat()
+                            # Hash: relative path + file size (NOT mtime for Docker stability)
+                            relative_path = str(filepath.relative_to(directory))
+                            hash_md5.update(relative_path.encode())
+                            hash_md5.update(str(file_stat.st_size).encode())
+                        except (OSError, FileNotFoundError):
+                            # File might have been deleted, skip it
+                            continue
             
             return hash_md5.hexdigest()
             
         except Exception as e:
             logger.error(f"Error calculating directory hash: {str(e)}")
-            return str(hash(str(directory)))
+            # Return stable hash based on directory path only
+            return hashlib.md5(str(directory).encode()).hexdigest()
     
     @classmethod
     def _update_average_response_time(cls, response_time: float):
@@ -320,6 +333,7 @@ class CacheWarmup:
     def warmup_on_startup(cls):
         """Warmup cache on application startup"""
         import threading
+        from django.conf import settings
         
         # Run warmup in background to avoid blocking startup
         warmup_thread = threading.Thread(
@@ -329,5 +343,8 @@ class CacheWarmup:
         )
         warmup_thread.start()
         
-        # Start background updater
-        TemplateDiscoveryCache.start_background_updater()
+        # CRITICAL FIX: Only start background updater in production
+        # In development, Django's StatReloader already watches for changes
+        # Starting background updater causes unnecessary overhead
+        if not getattr(settings, 'DEBUG', True):
+            TemplateDiscoveryCache.start_background_updater()
