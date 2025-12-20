@@ -6,6 +6,7 @@ Handles human input pause/resume functionality for conversation orchestration.
 """
 
 import logging
+import asyncio
 from typing import Dict, List, Any, Optional
 from django.utils import timezone
 from asgiref.sync import sync_to_async
@@ -38,11 +39,30 @@ class HumanInputHandler:
         
         logger.info(f"⏸️ HUMAN INPUT: Pausing workflow at {node_name} ({node_id})")
         
+        # CRITICAL FIX: Refresh executed_nodes from database to get latest state
+        # This ensures we have outputs from any parallel executions that just completed
+        await sync_to_async(execution_record.refresh_from_db)()
+        latest_executed_nodes = execution_record.executed_nodes or {}
+        
+        # Merge with local executed_nodes (local might have newer updates)
+        merged_executed_nodes = {**latest_executed_nodes, **executed_nodes}
+        logger.info(f"💾 HUMAN INPUT: Refreshed executed_nodes - {len(merged_executed_nodes)} entries (DB: {len(latest_executed_nodes)}, Local: {len(executed_nodes)})")
+        
         # Find input sources (connected agents that feed into this UserProxyAgent)
         input_sources = self.workflow_parser.find_multiple_inputs_to_node(node_id, workflow.graph_json)
-        aggregated_context = self.workflow_parser.aggregate_multiple_inputs(input_sources, executed_nodes)
+        aggregated_context = self.workflow_parser.aggregate_multiple_inputs(input_sources, merged_executed_nodes)
         
         logger.info(f"📥 HUMAN INPUT: Found {len(input_sources)} input sources for {node_name}")
+        
+        # Log which inputs are available/missing
+        for input_source in input_sources:
+            source_id = input_source.get('source_id')
+            source_name = input_source.get('name', source_id)
+            if source_id in merged_executed_nodes:
+                logger.info(f"✅ HUMAN INPUT: Input from {source_name} available ({len(str(merged_executed_nodes[source_id]))} chars)")
+            else:
+                logger.warning(f"⚠️ HUMAN INPUT: Input from {source_name} (node_id: {source_id}) NOT available in executed_nodes")
+                logger.warning(f"⚠️ HUMAN INPUT: Available node_ids in executed_nodes: {list(merged_executed_nodes.keys())}")
         
         # Update execution record to paused state
         await sync_to_async(self.update_execution_for_human_input)(
@@ -131,6 +151,14 @@ class HumanInputHandler:
         # Get the next sequence number
         next_sequence = len(messages)
         
+        # ROOT CAUSE FIX: Check if UserProxyAgent has outgoing edges to determine if input is routed
+        workflow = await sync_to_async(lambda: execution_record.workflow)()
+        graph_json = await sync_to_async(lambda: workflow.graph_json)()
+        user_proxy_agent_id = execution_record.human_input_agent_id
+        outgoing_edges = []
+        if user_proxy_agent_id:
+            outgoing_edges = self.workflow_parser.find_outgoing_edges_from_node(user_proxy_agent_id, graph_json)
+        
         # Add human input message
         messages.append({
             'sequence': next_sequence,
@@ -143,7 +171,10 @@ class HumanInputHandler:
             'metadata': {
                 'input_method': 'reflection_feedback' if execution_record.human_input_context.get('reflection_source') else 'human_input',
                 'reflection_source': execution_record.human_input_context.get('reflection_source'),
-                'iteration': execution_record.human_input_context.get('iteration')
+                'iteration': execution_record.human_input_context.get('iteration'),
+                'has_outgoing_edges': len(outgoing_edges) > 0,
+                'outgoing_edge_count': len(outgoing_edges),
+                'target_agents': [edge['name'] for edge in outgoing_edges] if outgoing_edges else []
             }
         })
         
@@ -166,21 +197,127 @@ class HumanInputHandler:
                 
                 logger.info(f"✅ REFLECTION RESUME: Reflection completed with final response length: {len(final_response)} chars")
                 
+                # CRITICAL FIX: Get reflection_source_id and reflection_source from human_input_context BEFORE clearing it
+                # This is needed for accurate position calculation and message preservation
+                human_input_context = execution_record.human_input_context or {}
+                reflection_source_id = human_input_context.get('reflection_source_id')
+                reflection_source = human_input_context.get('reflection_source')  # Store for message preservation check
+                user_proxy_agent_id = human_input_context.get('agent_id') or execution_record.human_input_agent_id
+                
+                # CRITICAL FIX: Refresh execution record from database to get updated executed_nodes
+                # But preserve messages_data that was just saved by reflection handler
+                messages_data_before_refresh = execution_record.messages_data
+                logger.info(f"💾 REFLECTION RESUME: messages_data before refresh has {len(messages_data_before_refresh) if messages_data_before_refresh else 0} messages")
+                await sync_to_async(execution_record.refresh_from_db)()
+                
+                # CRITICAL FIX: Restore messages_data after refresh to preserve reflection response message
+                # The refresh might have loaded an older version, so we need to ensure the latest is preserved
+                current_messages = execution_record.messages_data or []
+                logger.info(f"💾 REFLECTION RESUME: messages_data after refresh has {len(current_messages)} messages")
+                
+                if messages_data_before_refresh:
+                    # Check if reflection response is already in current_messages
+                    reflection_message_exists = any(
+                        msg.get('message_type') == 'reflection_final' and 
+                        msg.get('agent_name') == reflection_source
+                        for msg in current_messages
+                    )
+                    logger.info(f"💾 REFLECTION RESUME: Reflection message exists in current_messages: {reflection_message_exists}")
+                    
+                    if not reflection_message_exists:
+                        # Reflection message is missing, restore from before refresh
+                        execution_record.messages_data = messages_data_before_refresh
+                        logger.info(f"💾 REFLECTION RESUME: Restored messages_data after refresh to preserve reflection response (restored {len(messages_data_before_refresh)} messages)")
+                    elif len(messages_data_before_refresh) > len(current_messages):
+                        # Use the longer list (should have reflection message)
+                        execution_record.messages_data = messages_data_before_refresh
+                        logger.info(f"💾 REFLECTION RESUME: Using messages_data from before refresh (has {len(messages_data_before_refresh)} messages vs {len(current_messages)})")
+                    else:
+                        logger.info(f"💾 REFLECTION RESUME: messages_data is up to date, no restoration needed")
+                
+                # CRITICAL FIX: Mark UserProxyAgent as executed after reflection completes
+                # This prevents it from being executed again in the main workflow sequence
+                executed_nodes = execution_record.executed_nodes or {}
+                if user_proxy_agent_id:
+                    # Mark UserProxyAgent as executed so it's skipped in main sequence
+                    executed_nodes[user_proxy_agent_id] = f"UserProxyAgent processed reflection input: {human_input}"
+                    execution_record.executed_nodes = executed_nodes
+                    logger.info(f"✅ REFLECTION RESUME: Marked UserProxyAgent {user_proxy_agent_id} as executed after reflection completion")
+                
+                # CRITICAL FIX: Ensure human input context is cleared after reflection
+                # This prevents UserProxyAgent nodes from being incorrectly skipped in the main workflow
+                execution_record.awaiting_human_input_agent = ""
+                execution_record.human_input_context = {}
+                # CRITICAL FIX: Include messages_data in save to ensure reflection response is preserved
+                await sync_to_async(execution_record.save)(update_fields=['executed_nodes', 'awaiting_human_input_agent', 'human_input_context', 'messages_data'])
+                logger.info(f"🧹 REFLECTION RESUME: Cleared human input context and marked UserProxyAgent as executed, preserved messages_data")
+                
                 # CRITICAL FIX: Check if there are remaining agents in the execution sequence
                 workflow = await sync_to_async(lambda: execution_record.workflow)()
                 graph_json = await sync_to_async(lambda: workflow.graph_json)()
                 execution_sequence = self.workflow_parser.parse_workflow_graph(graph_json)
                 
                 # Find current position in execution sequence based on executed nodes
+                # CRITICAL FIX: Read executed_nodes AFTER refresh to get the updated reflection response
                 executed_nodes = execution_record.executed_nodes or {}
+                logger.info(f"📊 REFLECTION RESUME: Loaded executed_nodes with {len(executed_nodes)} entries after reflection")
+                
+                # CRITICAL FIX: Verify reflection response is in executed_nodes before continuing
+                if reflection_source_id:
+                    if reflection_source_id not in executed_nodes:
+                        logger.error(f"❌ REFLECTION RESUME: Reflection source {reflection_source_id} not in executed_nodes after reflection!")
+                        logger.error(f"❌ REFLECTION RESUME: Available nodes: {list(executed_nodes.keys())}")
+                        # Wait a bit and refresh
+                        await asyncio.sleep(0.5)
+                        await sync_to_async(execution_record.refresh_from_db)()
+                        executed_nodes = execution_record.executed_nodes or {}
+                        if reflection_source_id not in executed_nodes:
+                            raise Exception(f"Reflection response for {reflection_source_id} not saved properly")
+                    else:
+                        logger.info(f"✅ REFLECTION RESUME: Verified reflection source {reflection_source_id} in executed_nodes")
+                
+                # CRITICAL FIX: Use node_id instead of node_name for accurate position calculation
+                # This prevents matching the wrong node when multiple nodes have the same name
                 current_position = 0
                 
-                # Find the position after reflection source agent
+                # CRITICAL FIX: Find position by checking which nodes have all dependencies satisfied
+                # This ensures we don't skip nodes that are waiting for reflection responses
+                edges = graph_json.get('edges', [])
+                dependency_map = {}
+                for edge in edges:
+                    edge_type = edge.get('type', 'sequential')
+                    source_id = edge.get('source')
+                    target_id = edge.get('target')
+                    target_node = next((n for n in graph_json.get('nodes', []) if n.get('id') == target_id), None)
+                    is_user_proxy = (target_node and 
+                                    target_node.get('type') == 'UserProxyAgent' and
+                                    target_node.get('data', {}).get('require_human_input', True))
+                    if edge_type == 'sequential' or (edge_type == 'reflection' and is_user_proxy):
+                        if target_id not in dependency_map:
+                            dependency_map[target_id] = set()
+                        dependency_map[target_id].add(source_id)
+                
+                # Find first node that has all dependencies satisfied
                 for i, node in enumerate(execution_sequence):
-                    node_name = node.get('data', {}).get('name', f'Node_{node.get("id", "unknown")}')
-                    if node_name == reflection_source:
-                        current_position = i + 1  # Move to next agent after reflection source
+                    node_id = node.get('id')
+                    node_type = node.get('type')
+                    
+                    # Skip if already executed
+                    if node_type not in ['StartNode', 'EndNode'] and node_id in executed_nodes:
+                        continue
+                    
+                    # Check if all dependencies are satisfied
+                    dependencies = dependency_map.get(node_id, set())
+                    all_dependencies_satisfied = all(dep_id in executed_nodes for dep_id in dependencies)
+                    
+                    if all_dependencies_satisfied:
+                        current_position = i
+                        logger.info(f"📍 REFLECTION RESUME: Found first node with satisfied dependencies: {node.get('data', {}).get('name', node_id)} at position {current_position}")
                         break
+                else:
+                    # All nodes executed, start from end
+                    current_position = len(execution_sequence)
+                    logger.info(f"📍 REFLECTION RESUME: All nodes executed, starting from end at position {current_position}")
                 
                 remaining_agents = execution_sequence[current_position:]
                 logger.info(f"🔍 REFLECTION RESUME: Found {len(remaining_agents)} remaining agents after reflection: {[agent.get('data', {}).get('name') for agent in remaining_agents]}")
@@ -251,26 +388,85 @@ class HumanInputHandler:
                 graph_json = await sync_to_async(lambda: workflow.graph_json)()
                 execution_sequence = self.workflow_parser.parse_workflow_graph(graph_json)
                 
+                # Get executed nodes from execution record first
+                executed_nodes = execution_record.executed_nodes or {}
+                
                 # Find the position of the UserProxyAgent that just received input
                 user_proxy_agent_id = execution_record.human_input_agent_id
                 user_proxy_agent_name = execution_record.awaiting_human_input_agent
                 current_position = 0
                 
-                # Find the position of UserProxyAgent in execution sequence
-                for i, node in enumerate(execution_sequence):
-                    node_id = node.get('id')
-                    node_name = node.get('data', {}).get('name', f'Node_{node_id}')
-                    if node_id == user_proxy_agent_id or node_name == user_proxy_agent_name:
-                        current_position = i + 1  # Move to next node after UserProxyAgent
-                        logger.info(f"📍 WORKFLOW RESUME: Found UserProxyAgent at position {i}, continuing from position {current_position}")
-                        break
-                
-                # Get executed nodes from execution record
-                executed_nodes = execution_record.executed_nodes or {}
-                
-                # Add the human input to executed_nodes so it's tracked
+                # ROOT CAUSE FIX: Check if UserProxyAgent has outgoing edges in the workflow graph
+                # If it has no outgoing edges, the human input should NOT be routed to any agent
+                # It should just be logged in conversation history, and workflow should continue normally
+                outgoing_edges = []
                 if user_proxy_agent_id:
-                    executed_nodes[user_proxy_agent_id] = human_input
+                    outgoing_edges = self.workflow_parser.find_outgoing_edges_from_node(user_proxy_agent_id, graph_json)
+                    logger.info(f"🔍 WORKFLOW RESUME: UserProxyAgent {user_proxy_agent_name} has {len(outgoing_edges)} outgoing edges")
+                    
+                    if len(outgoing_edges) == 0:
+                        logger.info(f"⚠️ WORKFLOW RESUME: UserProxyAgent {user_proxy_agent_name} has NO outgoing edges - human input will NOT be routed to any agent")
+                        logger.info(f"📝 WORKFLOW RESUME: Human input will be logged in conversation history only")
+                    else:
+                        target_names = [edge['name'] for edge in outgoing_edges]
+                        logger.info(f"✅ WORKFLOW RESUME: UserProxyAgent {user_proxy_agent_name} has outgoing edges to: {target_names}")
+                        logger.info(f"📤 WORKFLOW RESUME: Human input will be routed to these target agents")
+                
+                # CRITICAL FIX: Find position by checking which nodes are already in executed_nodes
+                # This ensures we continue from the correct position, even if nodes have the same name
+                if user_proxy_agent_id:
+                    # Find the UserProxyAgent by node_id
+                    for i, node in enumerate(execution_sequence):
+                        if node.get('id') == user_proxy_agent_id:
+                            current_position = i + 1  # Move to next node after UserProxyAgent
+                            logger.info(f"📍 WORKFLOW RESUME: Found UserProxyAgent by node_id at position {i}, continuing from position {current_position}")
+                            break
+                    else:
+                        # UserProxyAgent not found by id, use executed_nodes to find position
+                        logger.warning(f"⚠️ WORKFLOW RESUME: UserProxyAgent node_id {user_proxy_agent_id} not found in execution sequence, using executed_nodes to find position")
+                        # Find first node that hasn't been executed
+                        for i, node in enumerate(execution_sequence):
+                            node_id = node.get('id')
+                            node_type = node.get('type')
+                            if node_type not in ['StartNode', 'EndNode'] and node_id not in executed_nodes:
+                                current_position = i
+                                logger.info(f"📍 WORKFLOW RESUME: Found first unexecuted node at position {current_position}")
+                                break
+                        else:
+                            # All nodes executed, start from end
+                            current_position = len(execution_sequence)
+                            logger.info(f"📍 WORKFLOW RESUME: All nodes executed, starting from end at position {current_position}")
+                else:
+                    # Fallback: Find first node that hasn't been executed
+                    logger.info(f"📍 WORKFLOW RESUME: No user_proxy_agent_id found, using executed_nodes to find position")
+                    for i, node in enumerate(execution_sequence):
+                        node_id = node.get('id')
+                        node_type = node.get('type')
+                        if node_type not in ['StartNode', 'EndNode'] and node_id not in executed_nodes:
+                            current_position = i
+                            logger.info(f"📍 WORKFLOW RESUME: Found first unexecuted node {node.get('data', {}).get('name', node_id)} at position {current_position}")
+                            break
+                    else:
+                        # All nodes executed, start from end
+                        current_position = len(execution_sequence)
+                        logger.info(f"📍 WORKFLOW RESUME: All nodes executed, starting from end at position {current_position}")
+                
+                # ROOT CAUSE FIX: Add the human input to executed_nodes only if UserProxyAgent has outgoing edges
+                # If it has no outgoing edges, the human input should just be logged in conversation history
+                # and NOT be added to executed_nodes (since no agent will use it as input)
+                if user_proxy_agent_id:
+                    if len(outgoing_edges) > 0:
+                        # UserProxyAgent has outgoing edges - route input to target agents
+                        executed_nodes[user_proxy_agent_id] = human_input
+                        # CRITICAL FIX: Save executed_nodes to database before continuing workflow
+                        # This ensures continue_workflow_execution sees the human input when it refreshes
+                        execution_record.executed_nodes = executed_nodes
+                        await sync_to_async(execution_record.save)(update_fields=['executed_nodes'])
+                        logger.info(f"💾 WORKFLOW RESUME: Saved human input to executed_nodes for UserProxyAgent {user_proxy_agent_name} (node_id: {user_proxy_agent_id}) - will be routed to target agents")
+                    else:
+                        # UserProxyAgent has NO outgoing edges - human input is standalone, not routed to any agent
+                        logger.info(f"📝 WORKFLOW RESUME: UserProxyAgent {user_proxy_agent_name} has no outgoing edges - human input logged in conversation history only, NOT added to executed_nodes")
+                        logger.info(f"📝 WORKFLOW RESUME: Workflow will continue with next agent using its normal input sources (not from UserProxyAgent)")
                 
                 remaining_agents = execution_sequence[current_position:]
                 logger.info(f"🔍 WORKFLOW RESUME: Found {len(remaining_agents)} remaining nodes after UserProxyAgent: {[agent.get('data', {}).get('name') for agent in remaining_agents]}")

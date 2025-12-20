@@ -16,7 +16,7 @@
   let connectionRetryCount = connection?.retryCount || 0;
   let connectionTimeout = connection?.timeout || 30;
   
-  // 🤖 AUTOGEN CONNECTION TYPES: Enhanced with AutoGen Studio patterns
+  // 🤖 CONNECTION TYPES: Only Sequential and Reflection options
   const connectionTypes = [
     { 
       id: 'sequential', 
@@ -27,36 +27,6 @@
       autogen_pattern: 'agent_to_agent',
       configurable: ['label', 'description', 'timeout', 'request_reply'],
       help_text: 'Creates a direct conversation between two agents with optional reply request'
-    },
-    { 
-      id: 'broadcast', 
-      name: 'Broadcast', 
-      description: 'Send message to multiple agents simultaneously (one-to-many)',
-      color: '#10b981',
-      icon: 'fa-broadcast-tower',
-      autogen_pattern: 'one_to_many',
-      configurable: ['label', 'description', 'recipients', 'timeout'],
-      help_text: 'Broadcasts a message from one agent to multiple recipient agents'
-    },
-    { 
-      id: 'group_chat', 
-      name: 'Group Chat', 
-      description: 'Multi-agent group conversation with GroupChatManager',
-      color: '#8b5cf6',
-      icon: 'fa-users',
-      autogen_pattern: 'group_chat',
-      configurable: ['label', 'description', 'max_rounds', 'speaker_selection', 'timeout'],
-      help_text: 'Managed group conversation with automatic speaker selection'
-    },
-    { 
-      id: 'conditional', 
-      name: 'Conditional', 
-      description: 'Conditional message routing based on content analysis',
-      color: '#f59e0b',
-      icon: 'fa-code-branch',
-      autogen_pattern: 'conditional_routing',
-      configurable: ['label', 'description', 'condition', 'fallback_agent', 'timeout'],
-      help_text: 'Routes messages based on content analysis or custom conditions'
     },
     { 
       id: 'reflection', 

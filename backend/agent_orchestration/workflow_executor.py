@@ -7,7 +7,8 @@ Main workflow execution engine for conversation orchestration.
 
 import logging
 import time
-from typing import Dict, List, Any, Optional
+import asyncio
+from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 from django.utils import timezone
 from asgiref.sync import sync_to_async
@@ -104,6 +105,38 @@ class WorkflowExecutor:
             if not execution_sequence:
                 raise Exception("No execution sequence could be built from workflow graph")
             
+            # CRITICAL FIX: Validate execution sequence before starting
+            # Check that all nodes from graph are in sequence (except reflection-only targets)
+            graph_node_ids = {node['id'] for node in graph_json.get('nodes', [])}
+            sequence_node_ids = {node['id'] for node in execution_sequence}
+            
+            # Find nodes missing from sequence (excluding reflection-only targets which are intentionally excluded)
+            missing_nodes = graph_node_ids - sequence_node_ids
+            if missing_nodes:
+                missing_node_names = [next((n.get('data', {}).get('name', nid) for n in graph_json.get('nodes', []) if n['id'] == nid), nid) for nid in missing_nodes]
+                logger.warning(f"⚠️ ORCHESTRATOR: {len(missing_nodes)} nodes not in execution sequence: {missing_node_names}")
+                # Don't fail here - reflection-only targets are intentionally excluded
+                # But log for debugging
+            
+            # Validate sequence order: check that dependencies are satisfied
+            sequence_node_map = {node['id']: node for node in execution_sequence}
+            for i, node in enumerate(execution_sequence):
+                node_id = node['id']
+                # Check all incoming sequential edges
+                for edge in graph_json.get('edges', []):
+                    if edge.get('target') == node_id and edge.get('type') == 'sequential':
+                        source_id = edge.get('source')
+                        if source_id in sequence_node_map:
+                            # Source should appear before target in sequence
+                            source_index = next((idx for idx, n in enumerate(execution_sequence) if n['id'] == source_id), -1)
+                            if source_index >= i:
+                                source_name = sequence_node_map[source_id].get('data', {}).get('name', source_id)
+                                target_name = node.get('data', {}).get('name', node_id)
+                                logger.error(f"❌ ORCHESTRATOR: Dependency violation: {target_name} (position {i}) depends on {source_name} (position {source_index})")
+                                raise Exception(f"Execution sequence violation: {target_name} appears before dependency {source_name}")
+            
+            logger.info(f"✅ ORCHESTRATOR: Execution sequence validated - {len(execution_sequence)} nodes in correct dependency order")
+            
             # Initialize conversation tracking
             conversation_history = ""
             messages = execution_record.messages_data or [] # Load existing messages
@@ -116,8 +149,42 @@ class WorkflowExecutor:
             # This ensures messages are logged in actual execution order, not graph parsing order
             message_sequence = len(messages)  # Continue from existing messages
             
-            # Execute each node in sequence
-            for node_index, node in enumerate(execution_sequence):
+            # Execute nodes with parallel execution support
+            node_index = 0
+            
+            # CRITICAL FIX: Handle StartNode first (it's skipped by _find_ready_nodes)
+            if node_index < len(execution_sequence):
+                start_node = execution_sequence[node_index]
+                if start_node.get('type') == 'StartNode':
+                    start_node_data = start_node.get('data', {})
+                    start_node_id = start_node.get('id')
+                    start_prompt = start_node_data.get('prompt', 'Please begin the conversation.')
+                    conversation_history = f"Start Node: {start_prompt}"
+                    
+                    # Store node output for multi-input support
+                    executed_nodes[start_node_id] = f"Start Node: {start_prompt}"
+                    
+                    # Track start message
+                    messages.append({
+                        'sequence': message_sequence,
+                        'agent_name': 'Start',
+                        'agent_type': 'StartNode',
+                        'content': start_prompt,
+                        'message_type': 'workflow_start',
+                        'timestamp': timezone.now().isoformat(),
+                        'response_time_ms': 0
+                    })
+                    message_sequence += 1
+                    
+                    # Save conversation history to execution record
+                    execution_record.conversation_history = conversation_history
+                    execution_record.executed_nodes = executed_nodes
+                    await sync_to_async(execution_record.save)(update_fields=['conversation_history', 'executed_nodes'])
+                    
+                    logger.info(f"✅ ORCHESTRATOR: StartNode executed - prompt: '{start_prompt[:100]}...'")
+                    node_index += 1  # Move past StartNode
+            
+            while node_index < len(execution_sequence):
                 # Check if execution has been stopped
                 await sync_to_async(execution_record.refresh_from_db)()
                 if execution_record.status == WorkflowExecutionStatus.STOPPED:
@@ -128,12 +195,114 @@ class WorkflowExecutor:
                         'execution_id': execution_id
                     }
                 
+                # PARALLEL EXECUTION: Find all nodes ready to execute in parallel
+                ready_nodes = self._find_ready_nodes(execution_sequence, executed_nodes, graph_json, node_index)
+                
+                if not ready_nodes:
+                    # No ready nodes, move to next
+                    node_index += 1
+                    continue
+                
+                # If only one node is ready, execute it sequentially
+                if len(ready_nodes) == 1:
+                    node_index, node = ready_nodes[0]
+                    node_index += 1  # Move to next after execution
+                else:
+                    # Multiple nodes ready - execute in parallel
+                    logger.info(f"🔀 PARALLEL: Executing {len(ready_nodes)} nodes in parallel")
+                    node_names = [n[1].get('data', {}).get('name', n[1].get('id')) for n in ready_nodes]
+                    logger.info(f"🔀 PARALLEL: Nodes: {', '.join(node_names)}")
+                    
+                    # CRITICAL FIX: Check if UserProxyAgent's dependencies are actually satisfied
+                    # Build dependency map to check UserProxyAgent dependencies
+                    edges = graph_json.get('edges', [])
+                    nodes = graph_json.get('nodes', [])
+                    node_map = {node.get('id'): node for node in nodes}
+                    dependency_map = {}
+                    for edge in edges:
+                        edge_type = edge.get('type', 'sequential')
+                        source_id = edge.get('source')
+                        target_id = edge.get('target')
+                        target_node = node_map.get(target_id)
+                        is_user_proxy = (target_node and 
+                                        target_node.get('type') == 'UserProxyAgent' and
+                                        target_node.get('data', {}).get('require_human_input', True))
+                        if edge_type == 'sequential' or (edge_type == 'reflection' and is_user_proxy):
+                            if target_id not in dependency_map:
+                                dependency_map[target_id] = set()
+                            dependency_map[target_id].add(source_id)
+                    
+                    # Separate UserProxyAgent nodes from other nodes
+                    ready_user_proxy_nodes = []
+                    other_ready_nodes = []
+                    
+                    for idx, node in ready_nodes:
+                        if node.get('type') == 'UserProxyAgent' and node.get('data', {}).get('require_human_input', True):
+                            node_id = node.get('id')
+                            dependencies = dependency_map.get(node_id, set())
+                            # Check if all dependencies (including reflection edges) are satisfied
+                            if all(dep_id in executed_nodes for dep_id in dependencies):
+                                ready_user_proxy_nodes.append((idx, node))
+                                logger.info(f"✅ PARALLEL: UserProxyAgent {node.get('data', {}).get('name')} dependencies satisfied")
+                            else:
+                                # Dependencies not satisfied - don't execute yet
+                                missing_deps = [dep_id for dep_id in dependencies if dep_id not in executed_nodes]
+                                logger.info(f"⏳ PARALLEL: UserProxyAgent {node.get('data', {}).get('name')} waiting for dependencies: {missing_deps}")
+                        else:
+                            other_ready_nodes.append((idx, node))
+                    
+                    # CRITICAL FIX: Always execute other nodes first if available
+                    # This ensures parallel execution happens before UserProxyAgent pauses
+                    if other_ready_nodes:
+                        # Execute other nodes in parallel first, UserProxyAgent will wait
+                        parallel_results = await self._execute_nodes_in_parallel(
+                            other_ready_nodes, workflow, graph_json, executed_nodes, conversation_history,
+                            execution_record, messages, message_sequence, agents_involved,
+                            total_response_time, providers_used, project_id
+                        )
+                        
+                        # Update state from parallel execution results
+                        for result in parallel_results:
+                            if result.get('executed'):
+                                executed_nodes[result['node_id']] = result['output']
+                                conversation_history += f"\n{result['node_name']}: {result['output']}"
+                                agents_involved.update(result.get('agents_involved', []))
+                                total_response_time += result.get('response_time_ms', 0)
+                                for provider in result.get('providers_used', []):
+                                    if provider not in providers_used:
+                                        providers_used.append(provider)
+                        
+                        # Update message sequence
+                        executed_count = sum(1 for r in parallel_results if r.get('executed'))
+                        message_sequence += executed_count
+                        
+                        # Save updated state
+                        execution_record.executed_nodes = executed_nodes
+                        execution_record.conversation_history = conversation_history
+                        execution_record.messages_data = messages
+                        await sync_to_async(execution_record.save)(update_fields=['executed_nodes', 'conversation_history', 'messages_data'])
+                        
+                        # Move past all executed nodes
+                        max_index = max(idx for idx, _ in other_ready_nodes)
+                        node_index = max_index + 1
+                        # Continue loop to check UserProxyAgent again after parallel execution
+                        continue
+                    elif ready_user_proxy_nodes:
+                        # Only UserProxyAgent nodes ready (dependencies satisfied) - execute sequentially to pause
+                        node_index, node = ready_user_proxy_nodes[0]
+                        # Will be handled in single node execution below
+                    else:
+                        # No ready nodes (shouldn't happen)
+                        node_index += 1
+                        continue
+                
+                # Single node execution - node is already set from ready_nodes[0] or ready_user_proxy_nodes[0]
                 node_type = node.get('type')
                 node_data = node.get('data', {})
                 node_name = node_data.get('name', f'Node_{node.get("id", "unknown")}')
                 node_id = node.get('id')
                 
-                logger.info(f"🎯 ORCHESTRATOR: Executing node {node_name} (type: {node_type})")
+                logger.info(f"🎯 ORCHESTRATOR: Executing node {node_name} (type: {node_type}) [SEQUENTIAL]")
                 
                 if node_type == 'StartNode':
                     # Handle start node
@@ -282,6 +451,20 @@ class WorkflowExecutor:
                         # Check for multiple inputs to this agent
                         input_sources = self.workflow_parser.find_multiple_inputs_to_node(node_id, graph_json)
                         
+                        # CRITICAL FIX: Validate all required inputs are available before executing
+                        if len(input_sources) > 0:
+                            missing_inputs = []
+                            for input_source in input_sources:
+                                source_id = input_source.get('source_id')
+                                source_name = input_source.get('name', source_id)
+                                if source_id not in executed_nodes:
+                                    missing_inputs.append(f"{source_name} (node_id: {source_id})")
+                            
+                            if missing_inputs:
+                                error_msg = f"Cannot execute {node_name}: Missing required inputs from {', '.join(missing_inputs)}. Available inputs: {list(executed_nodes.keys())}"
+                                logger.error(f"❌ ORCHESTRATOR: {error_msg}")
+                                raise Exception(error_msg)
+                        
                         try:
                             if len(input_sources) > 1:
                                 # Use multi-input processing
@@ -400,9 +583,13 @@ class WorkflowExecutor:
                             # Store node output for multi-input support
                             executed_nodes[node_id] = agent_response_text
                             
+                            # CRITICAL FIX: Save executed_nodes immediately to prevent duplicate execution
+                            execution_record.executed_nodes = executed_nodes
+                            
                             # CRITICAL FIX: Save updated conversation history to database
                             execution_record.conversation_history = conversation_history
-                            await sync_to_async(execution_record.save)()
+                            await sync_to_async(execution_record.save)(update_fields=['executed_nodes', 'conversation_history'])
+                            logger.info(f"💾 ORCHESTRATOR: Saved executed_nodes and conversation_history for {node_name} (node_id: {node_id})")
                             
                         except Exception as agent_error:
                             logger.error(f"❌ ORCHESTRATOR: Agent {node_name} failed: {agent_error}")
@@ -623,13 +810,77 @@ class WorkflowExecutor:
                 node_name = node_data.get('name', f'Node_{node.get("id", "unknown")}')
                 node_id = node.get('id')
                 
+                # CRITICAL FIX: Refresh executed_nodes from database to get latest state
+                executed_nodes = execution_record.executed_nodes or {}
+                
+                # CRITICAL FIX: Check if node has already been executed
+                # Skip StartNode and EndNode as they don't have outputs in executed_nodes
+                if node_type not in ['StartNode', 'EndNode'] and node_id in executed_nodes:
+                    logger.info(f"⏭️ CONTINUE WORKFLOW: Skipping {node_name} (node_id: {node_id}) - already executed")
+                    continue
+                
                 logger.info(f"🎯 CONTINUE WORKFLOW: Executing node {node_name} (type: {node_type}) at position {node_index}")
                 
                 if node_type in ['AssistantAgent', 'UserProxyAgent', 'GroupChatManager', 'DelegateAgent']:
-                    # Skip UserProxyAgent if it requires human input (already processed in reflection)
+                    # CRITICAL FIX: Only skip the specific UserProxyAgent that was just processed
+                    # Check if this is the UserProxyAgent that just provided human input
                     if node_type == 'UserProxyAgent' and node_data.get('require_human_input', True):
-                        logger.info(f"⏭️ CONTINUE WORKFLOW: Skipping UserProxyAgent {node_name} - human input already processed")
-                        continue
+                        # Refresh execution record to get latest state
+                        await sync_to_async(execution_record.refresh_from_db)()
+                        
+                        # Check if this UserProxyAgent was the one that just provided input
+                        awaiting_agent = execution_record.awaiting_human_input_agent or ""
+                        human_input_context = execution_record.human_input_context or {}
+                        reflection_source = human_input_context.get('reflection_source')
+                        
+                        # CRITICAL FIX: Only skip if:
+                        # 1. This is a regular UserProxyAgent (not reflection) AND it matches the awaiting agent AND awaiting_agent is not empty
+                        # 2. We should NOT skip UserProxyAgent nodes that are in the main workflow sequence after reflection completes
+                        #    because the reflection context has been cleared
+                        # ROOT CAUSE FIX: Use node_id instead of node_name for accurate matching
+                        user_proxy_agent_id_from_context = execution_record.human_input_agent_id
+                        should_skip = False
+                        if not reflection_source and awaiting_agent and user_proxy_agent_id_from_context:
+                            # Regular UserProxyAgent - skip only if it's the one that just provided input
+                            # AND we're still in a regular human input context (not after reflection)
+                            # CRITICAL FIX: Use node_id for matching, not node_name
+                            if node_id == user_proxy_agent_id_from_context:
+                                should_skip = True
+                                logger.info(f"⏭️ CONTINUE WORKFLOW: Skipping UserProxyAgent {node_name} (node_id: {node_id}) - just processed regular human input")
+                        elif reflection_source and awaiting_agent and user_proxy_agent_id_from_context:
+                            # Reflection workflow - but if context is cleared, don't skip
+                            # Only skip if we're still in the reflection context
+                            # CRITICAL FIX: Use node_id for matching, not node_name
+                            if node_id == user_proxy_agent_id_from_context:
+                                # Check if this is still an active reflection context
+                                # If human_input_context is empty or cleared, don't skip
+                                if human_input_context and human_input_context.get('reflection_source'):
+                                    should_skip = True
+                                    logger.info(f"⏭️ CONTINUE WORKFLOW: Skipping UserProxyAgent {node_name} (node_id: {node_id}) - just processed reflection input")
+                                else:
+                                    # CRITICAL FIX: Check if UserProxyAgent was already executed via reflection
+                                    # If it's in executed_nodes, skip it even if context is cleared
+                                    if node_id in executed_nodes:
+                                        should_skip = True
+                                        logger.info(f"⏭️ CONTINUE WORKFLOW: Skipping UserProxyAgent {node_name} (node_id: {node_id}) - already executed via reflection")
+                                    else:
+                                        logger.info(f"✅ CONTINUE WORKFLOW: UserProxyAgent {node_name} (node_id: {node_id}) was in reflection but context cleared - will execute in main workflow")
+                        
+                        if should_skip:
+                            continue
+                        else:
+                            # CRITICAL FIX: Check if this UserProxyAgent requires human input
+                            # If it does, pause for human input instead of executing as regular agent
+                            if node_data.get('require_human_input', True):
+                                logger.info(f"👤 CONTINUE WORKFLOW: UserProxyAgent {node_name} requires human input - pausing workflow")
+                                
+                                # PAUSE WORKFLOW - Same as in execute_workflow
+                                human_input_data = await self.human_input_handler.pause_for_human_input(
+                                    workflow, node, executed_nodes, conversation_history, execution_record
+                                )
+                                return human_input_data  # Return paused state
+                            else:
+                                logger.info(f"✅ CONTINUE WORKFLOW: Processing UserProxyAgent {node_name} - not the one that was just processed, and doesn't require human input")
                     
                     # Handle agent nodes with real LLM calls
                     agent_config = {
@@ -649,13 +900,30 @@ class WorkflowExecutor:
                     # Find input sources
                     input_sources = self.workflow_parser.find_multiple_inputs_to_node(node_id, graph_json)
                     
+                    # CRITICAL FIX: Validate all required inputs are available before executing
+                    # This includes checking if reflection responses are in executed_nodes
+                    if len(input_sources) > 0:
+                        missing_inputs = []
+                        for input_source in input_sources:
+                            source_id = input_source.get('source_id')
+                            source_name = input_source.get('name', source_id)
+                            if source_id not in executed_nodes:
+                                missing_inputs.append(f"{source_name} (node_id: {source_id})")
+                        
+                        if missing_inputs:
+                            error_msg = f"Cannot execute {node_name}: Missing required inputs from {', '.join(missing_inputs)}. Available inputs: {list(executed_nodes.keys())}"
+                            logger.warning(f"⏳ CONTINUE WORKFLOW: {error_msg} - waiting for dependencies")
+                            # CRITICAL FIX: Don't raise exception, skip this node and continue
+                            # It will be checked again in the next iteration when dependencies are satisfied
+                            continue
+                    
                     if len(input_sources) > 1:
                         # Multi-input mode
                         logger.info(f"📥 CONTINUE WORKFLOW: Agent {node_name} has {len(input_sources)} input sources - using multi-input mode")
                         aggregated_context = self.workflow_parser.aggregate_multiple_inputs(input_sources, executed_nodes)
-                        # CRITICAL FIX: Use chat_manager to craft proper prompt even in multi-input mode
-                        combined_prompt = await self.chat_manager.craft_conversation_prompt_with_multiple_inputs(
-                            aggregated_context, node, str(project.project_id)
+                        # CRITICAL FIX: Use craft_conversation_prompt_with_docaware for multi-input (same as main execution)
+                        combined_prompt = await self.chat_manager.craft_conversation_prompt_with_docaware(
+                            aggregated_context, node, str(project.project_id), conversation_history
                         )
                     else:
                         # Single-input mode - CRITICAL FIX: Use proper prompt crafting
@@ -701,9 +969,73 @@ class WorkflowExecutor:
                         }
                     )
                     
+                    # Store original response before any reflection processing
+                    original_agent_response = agent_response_text
+                    
+                    # CRITICAL FIX: Check for cross-agent reflection connections
+                    # This was missing from continue_workflow_execution, causing AI Assistant 2's
+                    # reflection to User Proxy 2 to be skipped
+                    try:
+                        cross_agent_reflection_edges = []
+                        for edge in graph_json.get('edges', []):
+                            if (edge.get('source') == node_id and 
+                                edge.get('type') == 'reflection' and 
+                                edge.get('target') != node_id):  # Cross-agent reflection
+                                cross_agent_reflection_edges.append(edge)
+                        
+                        if cross_agent_reflection_edges:
+                            logger.info(f"🔄 CONTINUE WORKFLOW REFLECTION: Found {len(cross_agent_reflection_edges)} cross-agent reflection edges from {node_name}")
+                        
+                        # Process cross-agent reflections using original response
+                        for reflection_edge in cross_agent_reflection_edges:
+                            logger.info(f"🔄 CONTINUE WORKFLOW REFLECTION: Processing cross-agent reflection from {node_name}")
+                            
+                            reflection_result, updated_conversation = await self.reflection_handler.handle_cross_agent_reflection(
+                                node, original_agent_response, reflection_edge, graph_json, execution_record, conversation_history
+                            )
+                            
+                            # Check if we're waiting for human input in reflection
+                            if reflection_result == 'AWAITING_REFLECTION_INPUT':
+                                logger.info(f"👤 CONTINUE WORKFLOW REFLECTION: Pausing workflow - awaiting human input for reflection")
+                                # Save current state before returning
+                                execution_record.executed_nodes = executed_nodes
+                                execution_record.messages_data = message_manager.get_messages()
+                                execution_record.conversation_history = conversation_history
+                                await sync_to_async(execution_record.save)()
+                                return {
+                                    'status': 'paused_for_reflection_input',
+                                    'conversation_history': updated_conversation,
+                                    'message': f'Workflow paused - {execution_record.awaiting_human_input_agent} needs to provide reflection feedback',
+                                    'execution_id': execution_record.execution_id
+                                }
+                            else:
+                                # Reflection completed successfully (no human input required)
+                                agent_response_text = reflection_result
+                                conversation_history = updated_conversation
+                                logger.info(f"✅ CONTINUE WORKFLOW REFLECTION: Completed cross-agent reflection - final response length: {len(agent_response_text)} chars")
+                    
+                    except Exception as reflection_error:
+                        logger.error(f"❌ CONTINUE WORKFLOW REFLECTION: Error processing reflection for {node_name}: {reflection_error}")
+                        import traceback
+                        logger.error(f"❌ CONTINUE WORKFLOW REFLECTION: Traceback: {traceback.format_exc()}")
+                        # Continue with original response if reflection fails
+                    
                     # Update conversation history and executed nodes
                     conversation_history += f"\n{node_name}: {agent_response_text}"
                     executed_nodes[node_id] = agent_response_text
+                    
+                    # CRITICAL FIX: Save executed_nodes to database after each agent execution
+                    # This ensures downstream agents can access the output immediately
+                    execution_record.executed_nodes = executed_nodes
+                    await sync_to_async(execution_record.save)(update_fields=['executed_nodes'])
+                    logger.info(f"💾 CONTINUE WORKFLOW: Saved executed_nodes for {node_name} (node_id: {node_id}) to database")
+                    
+                    # CRITICAL FIX: Save messages_data to database after each agent execution
+                    # This ensures messages are persisted even if the workflow pauses or encounters an error
+                    execution_record.messages_data = message_manager.get_messages()
+                    execution_record.conversation_history = conversation_history
+                    await sync_to_async(execution_record.save)(update_fields=['messages_data', 'conversation_history'])
+                    logger.info(f"💾 CONTINUE WORKFLOW: Saved messages_data for {node_name} to database")
                     
                 elif node_type == 'EndNode':
                     # Handle end node
@@ -820,6 +1152,252 @@ class WorkflowExecutor:
                 logger.error(f"❌ SAVE MESSAGE: Failed to save message {message['sequence']}: {save_error}")
         
         logger.info(f"💾 SAVE MESSAGE: Saved {saved_count} new messages, skipped {skipped_count} duplicates")
+    
+    def _find_ready_nodes(self, execution_sequence: List[Dict[str, Any]], executed_nodes: Dict[str, str],
+                         graph_json: Dict[str, Any], current_index: int) -> List[Tuple[int, Dict[str, Any]]]:
+        """
+        Find all nodes that are ready to execute in parallel (all dependencies satisfied)
+        
+        Args:
+            execution_sequence: Full execution sequence
+            executed_nodes: Dictionary of executed node outputs
+            graph_json: Full workflow graph
+            current_index: Current position in execution sequence
+            
+        Returns:
+            List of (index, node) tuples for nodes ready to execute in parallel
+        """
+        ready_nodes = []
+        edges = graph_json.get('edges', [])
+        
+        # Build dependency map: node_id -> set of source node_ids it depends on
+        dependency_map = {}
+        nodes = graph_json.get('nodes', [])
+        node_map = {node.get('id'): node for node in nodes}  # Create lookup for fast access
+        
+        for edge in edges:
+            edge_type = edge.get('type', 'sequential')
+            source_id = edge.get('source')
+            target_id = edge.get('target')
+            
+            # Get target node to check if it's a UserProxyAgent
+            target_node = node_map.get(target_id)
+            is_user_proxy = (target_node and 
+                            target_node.get('type') == 'UserProxyAgent' and
+                            target_node.get('data', {}).get('require_human_input', True))
+            
+            # Include sequential edges for all nodes
+            # Include reflection edges ONLY for UserProxyAgent nodes (they depend on reflection sources)
+            if edge_type == 'sequential' or (edge_type == 'reflection' and is_user_proxy):
+                if target_id not in dependency_map:
+                    dependency_map[target_id] = set()
+                dependency_map[target_id].add(source_id)
+        
+        # Check nodes from current_index onwards
+        for i in range(current_index, len(execution_sequence)):
+            node = execution_sequence[i]
+            node_id = node.get('id')
+            node_type = node.get('type')
+            
+            # Skip if already executed
+            if node_id in executed_nodes:
+                continue
+            
+            # Skip StartNode and EndNode (handled separately)
+            if node_type in ['StartNode', 'EndNode']:
+                continue
+            
+            # Check if all dependencies are satisfied
+            dependencies = dependency_map.get(node_id, set())
+            all_dependencies_satisfied = all(dep_id in executed_nodes for dep_id in dependencies)
+            
+            if all_dependencies_satisfied:
+                # CRITICAL FIX: Check if this node depends on any node that's currently executing in parallel
+                # If a dependency is in the current ready_nodes batch, this node should wait
+                depends_on_parallel_node = False
+                node_name = node.get('data', {}).get('name', node_id)
+                for dep_id in dependencies:
+                    # Check if this dependency is in the ready_nodes we're about to execute
+                    # (This prevents nodes from being ready if their dependency is executing in parallel)
+                    for ready_idx, ready_node in ready_nodes:
+                        if ready_node.get('id') == dep_id:
+                            depends_on_parallel_node = True
+                            dep_name = ready_node.get('data', {}).get('name', dep_id)
+                            logger.info(f"⏳ PARALLEL: Node {node_name} depends on {dep_name} which is executing in parallel - will wait")
+                            break
+                    if depends_on_parallel_node:
+                        break
+                
+                if not depends_on_parallel_node:
+                    ready_nodes.append((i, node))
+                else:
+                    # This node depends on a node that's executing in parallel, so it must wait
+                    break
+            else:
+                # If this node's dependencies aren't satisfied, no nodes after it can be ready either
+                # (due to topological sort ordering)
+                break
+        
+        return ready_nodes
+    
+    async def _execute_nodes_in_parallel(self, ready_nodes: List[Tuple[int, Dict[str, Any]]],
+                                        workflow, graph_json, executed_nodes, conversation_history,
+                                        execution_record, messages, message_sequence, agents_involved,
+                                        total_response_time, providers_used, project_id) -> List[Dict[str, Any]]:
+        """
+        Execute multiple nodes in parallel using asyncio.gather
+        
+        Args:
+            ready_nodes: List of (index, node) tuples to execute
+            workflow: Workflow instance
+            graph_json: Full workflow graph
+            executed_nodes: Current executed nodes state
+            conversation_history: Current conversation history
+            execution_record: Execution record
+            messages: Current messages list
+            message_sequence: Current message sequence number
+            agents_involved: Set of agents involved
+            total_response_time: Total response time so far
+            providers_used: List of providers used
+            project_id: Project ID
+            
+        Returns:
+            List of execution results for each node
+        """
+        async def execute_single_node(node_tuple):
+            """Execute a single node and return result"""
+            idx, node = node_tuple
+            node_id = node.get('id')
+            node_type = node.get('type')
+            node_data = node.get('data', {})
+            node_name = node_data.get('name', f'Node_{node_id}')
+            
+            try:
+                logger.info(f"🔀 PARALLEL: Executing {node_name} (type: {node_type})")
+                
+                # Handle UserProxyAgent separately (can't parallelize if requires human input)
+                if node_type == 'UserProxyAgent' and node_data.get('require_human_input', True):
+                    return {
+                        'node_id': node_id,
+                        'node_name': node_name,
+                        'executed': False,
+                        'paused': True,
+                        'index': idx
+                    }
+                
+                # Get LLM provider
+                agent_config = {
+                    'llm_provider': node_data.get('llm_provider', 'openai'),
+                    'llm_model': node_data.get('llm_model', 'gpt-3.5-turbo')
+                }
+                
+                project = await sync_to_async(lambda: workflow.project)()
+                llm_provider = await self.llm_provider_manager.get_llm_provider(agent_config, project)
+                if not llm_provider:
+                    raise Exception(f"Failed to create LLM provider for agent {node_name}")
+                
+                # Get input sources - use a snapshot of executed_nodes to avoid race conditions
+                # Each parallel execution gets its own snapshot
+                input_sources = self.workflow_parser.find_multiple_inputs_to_node(node_id, graph_json)
+                
+                # Validate inputs
+                if len(input_sources) > 0:
+                    missing_inputs = []
+                    for input_source in input_sources:
+                        source_id = input_source.get('source_id')
+                        if source_id not in executed_nodes:
+                            missing_inputs.append(source_id)
+                    if missing_inputs:
+                        raise Exception(f"Missing required inputs: {missing_inputs}")
+                
+                # Craft prompt - use conversation_history snapshot
+                # Note: In parallel execution, conversation_history may not include other parallel nodes yet
+                # This is correct - each node sees the state before parallel execution started
+                if len(input_sources) > 1:
+                    aggregated_context = self.workflow_parser.aggregate_multiple_inputs(input_sources, executed_nodes)
+                    prompt = await self.chat_manager.craft_conversation_prompt_with_docaware(
+                        aggregated_context, node, str(project_id), conversation_history
+                    )
+                else:
+                    prompt = await self.chat_manager.craft_conversation_prompt(
+                        conversation_history, node, str(project_id)
+                    )
+                
+                # Execute LLM call
+                agent_response = await llm_provider.generate_response(prompt=prompt)
+                
+                if agent_response.error:
+                    raise Exception(f"Agent {node_name} error: {agent_response.error}")
+                
+                agent_response_text = agent_response.text.strip()
+                response_time_ms = getattr(agent_response, 'response_time_ms', 0) if hasattr(agent_response, 'response_time_ms') else 0
+                
+                logger.info(f"✅ PARALLEL: {node_name} completed - {len(agent_response_text)} chars, {response_time_ms}ms")
+                
+                return {
+                    'node_id': node_id,
+                    'node_name': node_name,
+                    'executed': True,
+                    'output': agent_response_text,
+                    'response_time_ms': response_time_ms,
+                    'token_count': getattr(agent_response, 'token_count', None),
+                    'agents_involved': {node_name},
+                    'providers_used': [agent_config['llm_provider']],
+                    'metadata': {
+                        'llm_provider': agent_config['llm_provider'],
+                        'llm_model': agent_config['llm_model'],
+                        'cost_estimate': getattr(agent_response, 'cost_estimate', None)
+                    },
+                    'index': idx
+                }
+            except Exception as e:
+                logger.error(f"❌ PARALLEL: {node_name} failed: {e}")
+                return {
+                    'node_id': node_id,
+                    'node_name': node_name,
+                    'executed': False,
+                    'error': str(e),
+                    'index': idx
+                }
+        
+        # Execute all nodes in parallel
+        results = await asyncio.gather(*[execute_single_node(node_tuple) for node_tuple in ready_nodes])
+        
+        # Process results and create messages (in order of execution sequence)
+        results.sort(key=lambda r: r['index'])
+        next_sequence = message_sequence
+        new_messages = []
+        
+        for result in results:
+            if result.get('executed'):
+                # Get node type from original node
+                node_idx = result['index']
+                node_type = next((n[1].get('type', 'AssistantAgent') for n in ready_nodes if n[0] == node_idx), 'AssistantAgent')
+                
+                # Create message for this node
+                new_messages.append({
+                    'sequence': next_sequence,
+                    'agent_name': result['node_name'],
+                    'agent_type': node_type,
+                    'content': result['output'],
+                    'message_type': 'chat',
+                    'timestamp': timezone.now().isoformat(),
+                    'response_time_ms': result.get('response_time_ms', 0),
+                    'token_count': result.get('token_count'),
+                    'metadata': result.get('metadata', {})
+                })
+                next_sequence += 1
+        
+        # Append new messages to existing messages list
+        messages.extend(new_messages)
+        
+        # Update execution record with all messages
+        execution_record.messages_data = messages
+        await sync_to_async(execution_record.save)(update_fields=['messages_data'])
+        
+        logger.info(f"💾 PARALLEL: Saved {len(new_messages)} messages from parallel execution")
+        
+        return results
     
     def get_workflow_execution_summary(self, workflow: AgentWorkflow) -> Dict[str, Any]:
         """

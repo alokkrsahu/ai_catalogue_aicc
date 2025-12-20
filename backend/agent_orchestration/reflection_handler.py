@@ -6,6 +6,9 @@ Handles reflection connections and cross-agent reflection for conversation orche
 """
 
 import logging
+import asyncio
+import time
+import traceback
 from typing import Dict, List, Any
 from asgiref.sync import sync_to_async
 from django.utils import timezone
@@ -177,6 +180,7 @@ Please provide your feedback, suggestions, or response:
                         'primary_input': original_source_response,
                         # Reflection-specific context
                         'reflection_source': source_name,
+                        'reflection_source_id': source_node.get('id'),  # CRITICAL FIX: Store node_id for accurate position calculation
                         'source_message': original_source_response,
                         'iteration': iteration + 1,
                         'max_iterations': max_iterations,
@@ -532,6 +536,7 @@ Please revise your response based on this feedback:
             project = None
             
         source_llm = await self.llm_provider_manager.get_llm_provider(source_config, project)
+        revised_response = None  # Initialize to track response metadata
         if source_llm:
             source_reflection_prompt = f"""
             You previously said:
@@ -544,26 +549,42 @@ Please provide your final response, taking this feedback into account:
 """
 
             logger.info(f"🔄 REFLECTION RESUME: Sending feedback back to {source_name} for final processing")
+            logger.info(f"🔄 REFLECTION RESUME: Prompt length: {len(source_reflection_prompt)} chars, model: {source_config.get('llm_model')}")
 
             try:
+                llm_start_time = time.time()
+                logger.info(f"⏱️ REFLECTION RESUME: Starting LLM call for {source_name} at {time.strftime('%H:%M:%S')}")
+                
                 revised_response = await source_llm.generate_response(
                     prompt=source_reflection_prompt,
                     temperature=source_config.get('temperature', 0.7)
                 )
+                
+                llm_end_time = time.time()
+                llm_duration = llm_end_time - llm_start_time
+                logger.info(f"⏱️ REFLECTION RESUME: LLM call completed in {llm_duration:.2f} seconds")
 
                 if not revised_response.error:
                     final_response = revised_response.text.strip()
                     updated_conversation += f"\n{source_name} (Final): {final_response}"
-                    logger.info(f"✅ REFLECTION RESUME: {source_name} provided final response based on {target_name} feedback")
+                    logger.info(f"✅ REFLECTION RESUME: {source_name} provided final response based on {target_name} feedback ({len(final_response)} chars)")
                 else:
                     logger.error(f"❌ REFLECTION RESUME: Error from {source_name}: {revised_response.error}")
                     final_response = source_message  # Fallback to original
+                    revised_response = None  # Clear on error
+            except asyncio.TimeoutError as e:
+                logger.error(f"❌ REFLECTION RESUME: Timeout waiting for {source_name} response: {e}")
+                final_response = source_message  # Fallback to original
+                revised_response = None  # Clear on error
             except Exception as e:
                 logger.error(f"❌ REFLECTION RESUME: Exception processing {source_name} reflection: {e}")
+                logger.error(f"❌ REFLECTION RESUME: Traceback: {traceback.format_exc()}")
                 final_response = source_message  # Fallback to original
+                revised_response = None  # Clear on error
         else:
             logger.error(f"❌ REFLECTION RESUME: Could not get LLM provider for {source_name}")
             final_response = source_message  # Fallback to original
+            revised_response = None  # Clear on error
 
         # Clear human input requirements
         execution_record.human_input_required = False
@@ -574,18 +595,28 @@ Please provide your final response, taking this feedback into account:
         # Update executed_nodes with the final response from reflection
         executed_nodes = execution_record.executed_nodes or {}
         if source_node:
-            executed_nodes[source_node.get('id')] = final_response
+            source_node_id = source_node.get('id')
+            executed_nodes[source_node_id] = final_response
+            logger.info(f"💾 REFLECTION RESUME: Updated executed_nodes[{source_node_id}] with final response ({len(final_response)} chars)")
+            logger.info(f"💾 REFLECTION RESUME: executed_nodes now contains {len(executed_nodes)} entries: {list(executed_nodes.keys())}")
         execution_record.executed_nodes = executed_nodes
+        execution_record.conversation_history = updated_conversation
+
+        # CRITICAL FIX: Save executed_nodes and conversation_history BEFORE adding message
+        await sync_to_async(execution_record.save)(update_fields=['executed_nodes', 'conversation_history'])
+        logger.info(f"💾 REFLECTION RESUME: Saved executed_nodes and conversation_history for {source_name}")
 
         # CRITICAL FIX: Add the final reflection response to messages array
         # Refresh from database to get latest messages and avoid sequence conflicts
         await sync_to_async(execution_record.refresh_from_db)()
+        # CRITICAL FIX: Restore executed_nodes after refresh (refresh overwrites it)
+        execution_record.executed_nodes = executed_nodes
         messages = execution_record.messages_data or []
         
         # Get the next sequence number
         next_sequence = len(messages)
         
-        # Add final reflection response message
+        # Add final reflection response message with proper metadata
         messages.append({
             'sequence': next_sequence,
             'agent_name': source_name,
@@ -593,17 +624,23 @@ Please provide your final response, taking this feedback into account:
             'content': final_response,
             'message_type': 'reflection_final',
             'timestamp': timezone.now().isoformat(),
-            'response_time_ms': 0,
+            'response_time_ms': getattr(revised_response, 'response_time_ms', 0) if revised_response and hasattr(revised_response, 'response_time_ms') else 0,
+            'token_count': getattr(revised_response, 'token_count', None) if revised_response and hasattr(revised_response, 'token_count') else None,
             'metadata': {
                 'input_method': 'reflection_completion',
                 'reflection_target': target_name,
-                'based_on_feedback': True
+                'based_on_feedback': True,
+                'llm_provider': source_config.get('llm_provider'),
+                'llm_model': source_config.get('llm_model')
             }
         })
         
-        # Update execution record with final response and messages
+        # CRITICAL FIX: Save messages immediately with executed_nodes
         execution_record.messages_data = messages
-        await sync_to_async(execution_record.save)()
+        await sync_to_async(execution_record.save)(update_fields=['messages_data', 'executed_nodes'])
+        logger.info(f"💾 REFLECTION RESUME: Saved reflection response message for {source_name} (sequence {next_sequence}, {len(final_response)} chars)")
+        logger.info(f"💾 REFLECTION RESUME: Total messages in messages_data: {len(messages)}")
+        logger.info(f"💾 REFLECTION RESUME: Last message type: {messages[-1].get('message_type') if messages else 'N/A'}, agent: {messages[-1].get('agent_name') if messages else 'N/A'}")
 
         # Return the final response and updated conversation
         return final_response, updated_conversation

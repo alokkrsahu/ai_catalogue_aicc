@@ -250,6 +250,42 @@ export function validateWorkflowGraph(graph: WorkflowGraph): { valid: boolean; e
       }
     }
   });
+
+  // ROOT CAUSE FIX: Validate reflection edge constraints for ALL agents
+  // If any agent has reflection edges as input, it must have NO outgoing edges
+  // This applies to: AssistantAgent, UserProxyAgent, GroupChatManager, DelegateAgent, etc.
+  graph.nodes.forEach(node => {
+    // Skip StartNode and EndNode as they have special roles
+    if (node.type === 'StartNode' || node.type === 'EndNode') {
+      return;
+    }
+    
+    const nodeId = node.id;
+    const nodeName = node.data?.name || nodeId;
+    const nodeType = node.type;
+    
+    // Check if this agent has reflection edges as input
+    const reflectionInputEdges = graph.edges.filter(
+      edge => edge.target === nodeId && edge.type === 'reflection'
+    );
+    
+    if (reflectionInputEdges.length > 0) {
+      // Check for outgoing edges
+      const outgoingEdges = graph.edges.filter(edge => edge.source === nodeId);
+      
+      if (outgoingEdges.length > 0) {
+        const reflectionSources = reflectionInputEdges.map(edge => {
+          const sourceNode = graph.nodes.find(n => n.id === edge.source);
+          return sourceNode?.data?.name || edge.source;
+        }).join(', ');
+        
+        errors.push(
+          `${nodeType} "${nodeName}" is connected to its preceding agent(s) (${reflectionSources}) with Reflection edge(s), but has ${outgoingEdges.length} outgoing edge(s). ` +
+          `Agents with reflection input must have NO outgoing edges, as reflection is a feedback loop where the workflow continues from the reflection source position.`
+        );
+      }
+    }
+  });
   
   return {
     valid: errors.length === 0,

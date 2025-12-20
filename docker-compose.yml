@@ -128,6 +128,13 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      # CRITICAL FIX: Add network configuration for better connectivity
+      network: host
+      # Alternative: use default bridge network with DNS
+      # network: bridge
+      # dns:
+      #   - 8.8.8.8
+      #   - 8.8.4.4
     container_name: ai_catalogue_backend
     restart: unless-stopped
     env_file:

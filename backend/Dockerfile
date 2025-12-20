@@ -1,34 +1,62 @@
 # Dockerfile for Django backend
-FROM python:3.13-slim
+# CRITICAL FIX: Use stable Debian Bookworm instead of Trixie (testing) for better network reliability
+FROM python:3.13-slim-bookworm
 
 WORKDIR /app
 
-# Install system dependencies for document processing and Python packages
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    python3-dev \
-    libxml2-dev \
-    libxslt1-dev \
-    antiword \
-    unrtf \
-    poppler-utils \
-    tesseract-ocr \
-    flac \
-    ffmpeg \
-    lame \
-    libmad0 \
-    libsox-fmt-mp3 \
-    sox \
-    libjpeg-dev \
-    swig \
-    libpulse-dev \
-    libmagic1 \
-    curl \
-    wget \
-    git \
-    pkg-config \
-    libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+# CRITICAL FIX: Install system dependencies with robust retry logic and error handling
+# Split into essential and optional packages - continue even if optional packages fail
+RUN set -eux; \
+    # Retry apt-get update up to 3 times with delays
+    for i in 1 2 3; do \
+        apt-get update --fix-missing && break || (echo "Retry $i failed, waiting..." && sleep 10); \
+    done && \
+    # Install essential network and build tools first (must succeed)
+    apt-get install -y --no-install-recommends \
+        curl \
+        wget \
+        ca-certificates \
+        gnupg2 \
+        build-essential \
+        python3-dev \
+        libpq-dev \
+        pkg-config \
+        git \
+    && \
+    # Install essential document processing libraries (must succeed)
+    apt-get install -y --no-install-recommends \
+        libxml2-dev \
+        libxslt1-dev \
+        libjpeg-dev \
+        libmagic1 \
+    && \
+    # Install document processing tools (retry on failure, but continue)
+    (apt-get install -y --no-install-recommends \
+        poppler-utils \
+        tesseract-ocr \
+        antiword \
+        unrtf \
+    || (echo "Warning: Some document tools failed, retrying..." && \
+        sleep 5 && \
+        apt-get install -y --no-install-recommends \
+            poppler-utils \
+            tesseract-ocr \
+            antiword \
+            unrtf \
+    || echo "Warning: Document tools installation failed, continuing...")) && \
+    # Install audio processing tools (optional - continue even if they fail)
+    (apt-get install -y --no-install-recommends \
+        flac \
+        ffmpeg \
+        lame \
+        libmad0 \
+        libsox-fmt-mp3 \
+        sox \
+        swig \
+        libpulse-dev \
+    || echo "Warning: Audio packages failed to install, continuing without them...") && \
+    rm -rf /var/lib/apt/lists/* && \
+    apt-get clean
 
 # Copy requirements first for better caching
 COPY requirements.txt .
