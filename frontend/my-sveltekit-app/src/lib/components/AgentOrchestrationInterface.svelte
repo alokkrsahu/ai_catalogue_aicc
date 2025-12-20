@@ -1133,7 +1133,7 @@
                                 </div>
                               {:else if conversationHistory && conversationHistory.length > 0}
                                 <h4 class="font-medium text-gray-900 mb-3">Conversation History</h4>
-                                <div class="space-y-3 max-h-96 overflow-y-auto">
+                                <div class="space-y-3">
                                   {#each conversationHistory as message}
                                     <div class="flex items-start space-x-3 p-3 rounded-lg {message.agent_type === 'StartNode' ? 'bg-blue-50' : message.agent_type === 'EndNode' ? 'bg-green-50' : 'bg-gray-50'}">
                                       <div class="flex-shrink-0">
