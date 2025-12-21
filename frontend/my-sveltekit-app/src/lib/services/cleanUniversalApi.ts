@@ -213,17 +213,21 @@ export class CleanUniversalApiService {
   async deleteProject(projectId: string, password: string): Promise<void> {
     console.log(`🗑️ UNIVERSAL: Deleting project via /api/projects/${projectId}/`);
     
-    const response = await fetch(`${API_BASE}/projects/${projectId}/`, {
+    const response = await this.handleAuthenticatedRequest(`${API_BASE}/projects/${projectId}/`, {
       method: 'DELETE',
       headers: this.getAuthHeaders(),
       body: JSON.stringify({ password }),
     });
 
     if (!response.ok) {
-      throw new Error(`Delete project failed: ${response.status}`);
+      const errorData = await response.json().catch(() => ({}));
+      const errorMessage = errorData.detail || errorData.error || `Delete project failed: ${response.status}`;
+      console.error('❌ UNIVERSAL: Delete project failed:', errorData);
+      throw new Error(errorMessage);
     }
 
-    console.log('✅ UNIVERSAL: Project deleted successfully');
+    const result = await response.json().catch(() => ({}));
+    console.log('✅ UNIVERSAL: Project deleted successfully', result);
   }
 
   // ============================================================================
@@ -853,6 +857,75 @@ export class CleanUniversalApiService {
 
     const result = await response.json();
     console.log('✅ TEMPLATE: Template duplicated successfully');
+    return result;
+  }
+
+  // ============================================================================
+  // WORKFLOW EVALUATION
+  // ============================================================================
+
+  /**
+   * Evaluate workflow with CSV file
+   */
+  async evaluateWorkflow(projectId: string, workflowId: string, csvFile: File): Promise<any> {
+    console.log(`🔍 UNIVERSAL: Evaluating workflow ${workflowId} with CSV file`);
+    
+    const formData = new FormData();
+    formData.append('csv_file', csvFile);
+
+    const response = await this.handleAuthenticatedRequest(`${API_BASE}/projects/${projectId}/workflows/${workflowId}/evaluate/`, {
+      method: 'POST',
+      headers: this.getAuthHeadersForFormData(),
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || errorData.error || `Evaluation failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+    console.log('✅ UNIVERSAL: Workflow evaluation started successfully');
+    return result;
+  }
+
+  /**
+   * Get evaluation history for a workflow
+   */
+  async getEvaluationHistory(projectId: string, workflowId: string): Promise<any[]> {
+    console.log(`📊 UNIVERSAL: Getting evaluation history for workflow ${workflowId}`);
+    
+    const response = await this.handleAuthenticatedRequest(`${API_BASE}/projects/${projectId}/workflows/${workflowId}/evaluation_history/`, {
+      method: 'GET',
+      headers: this.getAuthHeaders(),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Get evaluation history failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+    console.log(`✅ UNIVERSAL: Retrieved ${result.evaluations?.length || 0} evaluation runs`);
+    return result.evaluations || [];
+  }
+
+  /**
+   * Get detailed evaluation results
+   */
+  async getEvaluationResults(projectId: string, workflowId: string, evaluationId: string): Promise<any> {
+    console.log(`📊 UNIVERSAL: Getting evaluation results for evaluation ${evaluationId}`);
+    
+    const response = await this.handleAuthenticatedRequest(`${API_BASE}/projects/${projectId}/workflows/${workflowId}/evaluation_results/?evaluation_id=${evaluationId}`, {
+      method: 'GET',
+      headers: this.getAuthHeaders(),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Get evaluation results failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+    console.log(`✅ UNIVERSAL: Retrieved evaluation results with ${result.results?.length || 0} rows`);
     return result;
   }
 }

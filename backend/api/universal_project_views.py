@@ -785,11 +785,17 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                 except Exception as e:
                     logger.error(f"❌ UNIVERSAL: Failed to delete vector collection: {e}")
                 
-                # Delete all agent workflows
+                # Delete all agent workflows (this will cascade delete evaluations, execution history, etc.)
                 workflows_count = project.agent_workflows.count()
                 if workflows_count > 0:
                     project.agent_workflows.all().delete()
                     logger.info(f"🗑️ UNIVERSAL: Deleted {workflows_count} agent workflows")
+                
+                # Delete all project API keys explicitly (CASCADE should handle it, but explicit is safer)
+                api_keys_count = project.api_keys.count()
+                if api_keys_count > 0:
+                    project.api_keys.all().delete()
+                    logger.info(f"🗑️ UNIVERSAL: Deleted {api_keys_count} API keys")
                 
                 # Delete the project itself (will cascade delete documents, permissions, etc.)
                 project.delete()
@@ -809,7 +815,10 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_200_OK)
                 
         except Exception as e:
+            import traceback
+            error_traceback = traceback.format_exc()
             logger.error(f"❌ UNIVERSAL: Failed to delete project {project_name}: {e}")
+            logger.error(f"❌ UNIVERSAL: Delete error traceback:\n{error_traceback}")
             return Response({
                 'error': 'Deletion failed',
                 'detail': str(e),

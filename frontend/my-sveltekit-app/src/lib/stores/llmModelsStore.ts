@@ -136,11 +136,21 @@ export const loadingProgress = derived(llmModelsStore, ($store) => $store.loadin
 
 // Service class
 class LLMModelsService {
-  private readonly CACHE_KEY = 'llm_models_bulk_data';
+  private readonly CACHE_KEY_PREFIX = 'llm_models_bulk_data';
   private readonly CACHE_TTL = 60 * 60 * 1000; // 1 hour in milliseconds
   
   constructor() {
     console.log('🤖 LLM MODELS STORE: Service initialized');
+  }
+
+  /**
+   * Get project-specific cache key
+   */
+  private getCacheKey(projectId?: string): string {
+    if (projectId) {
+      return `${this.CACHE_KEY_PREFIX}_${projectId}`;
+    }
+    return `${this.CACHE_KEY_PREFIX}_global`;
   }
 
   /**
@@ -156,17 +166,39 @@ class LLMModelsService {
       return this.waitForLoad();
     }
     
-    // Check if we have valid cached data
-    if (!forceRefresh && this.hasValidCache()) {
-      const cachedData = this.getCachedData();
+    // Determine projectId (use provided one or try to get from context)
+    let actualProjectId = projectId;
+    if (!actualProjectId) {
+      try {
+        const cleanUniversalApiModule = await import('$lib/services/cleanUniversalApi');
+        const cleanUniversalApi = new cleanUniversalApiModule.CleanUniversalApiService();
+        const projects = await cleanUniversalApi.getAllProjects();
+        if (projects && projects.length > 0) {
+          actualProjectId = projects[0].project_id;
+        }
+      } catch (error) {
+        // Ignore error, will use global cache
+      }
+    }
+
+    // Check if we have valid cached data for this project
+    if (!forceRefresh && this.hasValidCache(actualProjectId)) {
+      const cachedData = this.getCachedData(actualProjectId);
       if (cachedData) {
-        console.log('✅ LLM MODELS: Using cached data');
-        this.updateStore({ 
-          isLoaded: true, 
-          bulkData: cachedData,
-          lastLoadTime: Date.now()
-        });
-        return cachedData;
+        // Validate that cached project matches current project
+        const cachedProjectId = cachedData.metadata?.project_id;
+        if (cachedProjectId === actualProjectId || (!cachedProjectId && !actualProjectId)) {
+          console.log(`✅ LLM MODELS: Using cached data for project ${actualProjectId || 'global'}`);
+          this.updateStore({ 
+            isLoaded: true, 
+            bulkData: cachedData,
+            lastLoadTime: Date.now()
+          });
+          return cachedData;
+        } else {
+          console.log(`⚠️ LLM MODELS: Cached data project mismatch (cached: ${cachedProjectId}, current: ${actualProjectId}), clearing cache`);
+          this.clearCache(cachedProjectId);
+        }
       }
     }
     
@@ -186,25 +218,12 @@ class LLMModelsService {
         max_age_minutes: 60
       };
       
-      // Get project_id from URL or user's first project if not provided
-      if (projectId) {
-        params.project_id = projectId;
+      // Use the actualProjectId determined earlier
+      if (actualProjectId) {
+        params.project_id = actualProjectId;
+        console.log('🔑 LLM MODELS: Using project for API keys:', actualProjectId);
       } else {
-        // Try to get project from URL params or user context
-        try {
-          // Import cleanUniversalApi to get user's projects
-          const cleanUniversalApiModule = await import('$lib/services/cleanUniversalApi');
-          const cleanUniversalApi = new cleanUniversalApiModule.CleanUniversalApiService();
-          const projects = await cleanUniversalApi.getAllProjects();
-          if (projects && projects.length > 0) {
-            params.project_id = projects[0].project_id;
-            console.log('🔑 LLM MODELS: Using first project for API keys:', projects[0].name);
-          } else {
-            console.warn('⚠️ LLM MODELS: No projects found, API keys may not be available');
-          }
-        } catch (error) {
-          console.warn('⚠️ LLM MODELS: Could not get project context:', error);
-        }
+        console.warn('⚠️ LLM MODELS: No project ID available, API keys may not be available');
       }
       
       const response = await api.get('/llm/bulk-load/', {
@@ -217,8 +236,14 @@ class LLMModelsService {
       
       const bulkData: BulkModelData = response.data;
       
-      // Cache the data
-      this.cacheData(bulkData);
+      // Store project ID in metadata for validation
+      if (!bulkData.metadata) {
+        bulkData.metadata = {} as any;
+      }
+      (bulkData.metadata as any).project_id = actualProjectId;
+      
+      // Cache the data with project-specific key
+      this.cacheData(bulkData, actualProjectId);
       
       this.updateStore({
         loadingProgress: { stage: 'Finalizing...', percentage: 90 }
@@ -294,8 +319,12 @@ class LLMModelsService {
       const response = await api.post(`/llm/refresh/${providerId}/`);
       const updatedBulkData: BulkModelData = response.data.bulk_data;
       
-      // Update cache and store
-      this.cacheData(updatedBulkData);
+      // Extract projectId from existing cached data or metadata
+      const state = get(llmModelsStore);
+      const existingProjectId = (state.bulkData?.metadata as any)?.project_id || (updatedBulkData.metadata as any)?.project_id;
+      
+      // Update cache and store with project context
+      this.cacheData(updatedBulkData, existingProjectId);
       this.updateStore({
         bulkData: updatedBulkData,
         lastLoadTime: Date.now(),
@@ -314,18 +343,18 @@ class LLMModelsService {
   /**
    * Clear all caches and force fresh reload
    */
-  async clearCacheAndReload(): Promise<BulkModelData> {
+  async clearCacheAndReload(projectId?: string): Promise<BulkModelData> {
     try {
-      console.log('🧹 LLM MODELS: Clearing cache and reloading');
+      console.log(`🧹 LLM MODELS: Clearing cache and reloading for project ${projectId || 'global'}`);
       
       // Clear backend cache
       await api.delete('/llm/clear-cache/');
       
-      // Clear frontend cache
-      this.clearCache();
+      // Clear frontend cache (all projects if no projectId specified)
+      this.clearCache(projectId);
       
-      // Force fresh reload
-      return await this.preLoadAllModels(true);
+      // Force fresh reload with project context
+      return await this.preLoadAllModels(true, projectId);
       
     } catch (error) {
       console.error('❌ LLM MODELS: Failed to clear cache and reload:', error);
@@ -378,30 +407,38 @@ class LLMModelsService {
   }
 
   /**
-   * Cache data in localStorage
+   * Cache data in localStorage with project-specific key
    */
-  private cacheData(data: BulkModelData) {
+  private cacheData(data: BulkModelData, projectId?: string) {
     try {
+      const cacheKey = this.getCacheKey(projectId);
       const cacheItem = {
         data,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        projectId: projectId || null
       };
-      localStorage.setItem(this.CACHE_KEY, JSON.stringify(cacheItem));
-      console.log('💾 LLM MODELS: Data cached successfully');
+      localStorage.setItem(cacheKey, JSON.stringify(cacheItem));
+      console.log(`💾 LLM MODELS: Data cached successfully for project ${projectId || 'global'}`);
     } catch (error) {
       console.warn('⚠️ LLM MODELS: Failed to cache data:', error);
     }
   }
 
   /**
-   * Get cached data from localStorage
+   * Get cached data from localStorage with project-specific key
    */
-  private getCachedData(): BulkModelData | null {
+  private getCachedData(projectId?: string): BulkModelData | null {
     try {
-      const cached = localStorage.getItem(this.CACHE_KEY);
+      const cacheKey = this.getCacheKey(projectId);
+      const cached = localStorage.getItem(cacheKey);
       if (!cached) return null;
       
       const cacheItem = JSON.parse(cached);
+      // Validate project ID matches
+      if (cacheItem.projectId !== (projectId || null)) {
+        console.warn(`⚠️ LLM MODELS: Cached project ID mismatch (cached: ${cacheItem.projectId}, requested: ${projectId || 'global'})`);
+        return null;
+      }
       return cacheItem.data;
     } catch (error) {
       console.warn('⚠️ LLM MODELS: Failed to get cached data:', error);
@@ -410,14 +447,19 @@ class LLMModelsService {
   }
 
   /**
-   * Check if cached data is still valid
+   * Check if cached data is still valid for the given project
    */
-  private hasValidCache(): boolean {
+  private hasValidCache(projectId?: string): boolean {
     try {
-      const cached = localStorage.getItem(this.CACHE_KEY);
+      const cacheKey = this.getCacheKey(projectId);
+      const cached = localStorage.getItem(cacheKey);
       if (!cached) return false;
       
       const cacheItem = JSON.parse(cached);
+      // Validate project ID matches
+      if (cacheItem.projectId !== (projectId || null)) {
+        return false;
+      }
       const age = Date.now() - cacheItem.timestamp;
       return age < this.CACHE_TTL;
     } catch (error) {
@@ -426,12 +468,28 @@ class LLMModelsService {
   }
 
   /**
-   * Clear cached data
+   * Clear cached data for the given project (or all if projectId not provided)
    */
-  private clearCache() {
+  private clearCache(projectId?: string) {
     try {
-      localStorage.removeItem(this.CACHE_KEY);
-      console.log('🧹 LLM MODELS: Cache cleared');
+      if (projectId !== undefined) {
+        // Clear specific project cache
+        const cacheKey = this.getCacheKey(projectId);
+        localStorage.removeItem(cacheKey);
+        console.log(`🧹 LLM MODELS: Cache cleared for project ${projectId || 'global'}`);
+      } else {
+        // Clear all project caches (legacy behavior)
+        // This iterates through all localStorage keys and removes matching ones
+        const keysToRemove: string[] = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key && key.startsWith(this.CACHE_KEY_PREFIX)) {
+            keysToRemove.push(key);
+          }
+        }
+        keysToRemove.forEach(key => localStorage.removeItem(key));
+        console.log(`🧹 LLM MODELS: All project caches cleared (${keysToRemove.length} keys)`);
+      }
     } catch (error) {
       console.warn('⚠️ LLM MODELS: Failed to clear cache:', error);
     }
@@ -479,7 +537,8 @@ class LLMModelsService {
     cacheAge: number;
   } {
     const state = get(llmModelsStore);
-    const cacheAge = this.hasValidCache() ? Date.now() - state.lastLoadTime : 0;
+    // Calculate cache age from lastLoadTime (in milliseconds)
+    const cacheAge = state.lastLoadTime > 0 ? Date.now() - state.lastLoadTime : 0;
     
     return {
       isLoading: state.isLoading,

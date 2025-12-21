@@ -84,10 +84,10 @@ Navigate through different pages to access various features and capabilities.'''
                 },
                 {
                     'page_number': 3,
-                    'name': 'Insights',
-                    'short_name': 'Insights',
-                    'icon': 'fa-lightbulb',
-                    'features': ['hierarchical_analysis', 'category_filtering', 'document_organization', 'ai_insights']
+                    'name': 'Evaluation',
+                    'short_name': 'Evaluation',
+                    'icon': 'fa-clipboard-check',
+                    'features': ['workflow_evaluation', 'csv_upload', 'metrics_comparison', 'batch_testing']
                 },
                 {
                     'page_number': 4,

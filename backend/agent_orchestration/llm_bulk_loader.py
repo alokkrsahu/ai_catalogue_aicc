@@ -20,13 +20,25 @@ logger = logging.getLogger('llm_bulk_loader')
 class LLMBulkLoaderService:
     """Service for efficient bulk loading of all LLM models"""
     
-    BULK_CACHE_KEY = "agent_orchestration_all_models_bulk"
+    BULK_CACHE_KEY_PREFIX = "agent_orchestration_all_models_bulk"
     BULK_CACHE_TTL = 3600  # 1 hour cache for bulk data
-    LAST_LOADED_KEY = "agent_orchestration_models_last_loaded"
+    LAST_LOADED_KEY_PREFIX = "agent_orchestration_models_last_loaded"
     
     def __init__(self):
         self.is_loading = False
         self.load_lock = asyncio.Lock()
+    
+    def _get_cache_key(self, project=None) -> str:
+        """Generate project-specific cache key"""
+        if project and hasattr(project, 'project_id'):
+            return f"{self.BULK_CACHE_KEY_PREFIX}_{project.project_id}"
+        return f"{self.BULK_CACHE_KEY_PREFIX}_global"
+    
+    def _get_last_loaded_key(self, project=None) -> str:
+        """Generate project-specific last loaded timestamp key"""
+        if project and hasattr(project, 'project_id'):
+            return f"{self.LAST_LOADED_KEY_PREFIX}_{project.project_id}"
+        return f"{self.LAST_LOADED_KEY_PREFIX}_global"
     
     async def pre_load_all_models(self, force_refresh: bool = False, project=None) -> Dict[str, Any]:
         """
@@ -44,7 +56,7 @@ class LLMBulkLoaderService:
                 # Wait for existing load to complete
                 while self.is_loading:
                     await asyncio.sleep(0.1)
-                return self.get_cached_bulk_data()
+                return self.get_cached_bulk_data(project)
             
             try:
                 self.is_loading = True
@@ -54,9 +66,9 @@ class LLMBulkLoaderService:
                 
                 # Check if we need to refresh
                 if not force_refresh:
-                    cached_data = self.get_cached_bulk_data()
+                    cached_data = self.get_cached_bulk_data(project)
                     if cached_data:
-                        logger.info("✅ BULK LOADER: Returning cached bulk model data")
+                        logger.info(f"✅ BULK LOADER: Returning cached bulk model data for project {project.name if project else 'global'}")
                         return cached_data
                 
                 # Clear individual provider caches if force refresh
@@ -110,8 +122,8 @@ class LLMBulkLoaderService:
                     provider_errors
                 )
                 
-                # Cache the bulk data
-                self._cache_bulk_data(bulk_data)
+                # Cache the bulk data (with project context)
+                self._cache_bulk_data(bulk_data, project)
                 
                 end_time = time.time()
                 total_models = sum(len(models) for models in provider_models.values())
@@ -223,48 +235,61 @@ class LLMBulkLoaderService:
             }
         }
     
-    def _cache_bulk_data(self, bulk_data: Dict[str, Any]):
-        """Cache bulk model data"""
+    def _cache_bulk_data(self, bulk_data: Dict[str, Any], project=None):
+        """Cache bulk model data with project-specific key"""
         try:
-            cache.set(self.BULK_CACHE_KEY, bulk_data, self.BULK_CACHE_TTL)
-            cache.set(self.LAST_LOADED_KEY, time.time(), self.BULK_CACHE_TTL)
-            logger.info("💾 BULK LOADER: Cached bulk model data successfully")
+            cache_key = self._get_cache_key(project)
+            last_loaded_key = self._get_last_loaded_key(project)
+            project_name = project.name if project and hasattr(project, 'name') else 'global'
+            
+            cache.set(cache_key, bulk_data, self.BULK_CACHE_TTL)
+            cache.set(last_loaded_key, time.time(), self.BULK_CACHE_TTL)
+            logger.info(f"💾 BULK LOADER: Cached bulk model data successfully for project {project_name}")
         except Exception as e:
             logger.error(f"❌ BULK LOADER: Failed to cache bulk data: {e}")
     
-    def get_cached_bulk_data(self) -> Optional[Dict[str, Any]]:
-        """Get cached bulk model data"""
+    def get_cached_bulk_data(self, project=None) -> Optional[Dict[str, Any]]:
+        """Get cached bulk model data with project-specific key"""
         try:
-            bulk_data = cache.get(self.BULK_CACHE_KEY)
+            cache_key = self._get_cache_key(project)
+            last_loaded_key = self._get_last_loaded_key(project)
+            project_name = project.name if project and hasattr(project, 'name') else 'global'
+            
+            bulk_data = cache.get(cache_key)
             if bulk_data:
-                last_loaded = cache.get(self.LAST_LOADED_KEY, 0)
+                last_loaded = cache.get(last_loaded_key, 0)
                 age_minutes = (time.time() - last_loaded) / 60
-                logger.info(f"📦 BULK LOADER: Retrieved cached bulk data (age: {age_minutes:.1f} minutes)")
+                logger.info(f"📦 BULK LOADER: Retrieved cached bulk data for project {project_name} (age: {age_minutes:.1f} minutes)")
                 return bulk_data
             return None
         except Exception as e:
             logger.error(f"❌ BULK LOADER: Failed to get cached bulk data: {e}")
             return None
     
-    def is_cache_valid(self, max_age_minutes: int = 60) -> bool:
-        """Check if cached data is still valid"""
+    def is_cache_valid(self, max_age_minutes: int = 60, project=None) -> bool:
+        """Check if cached data is still valid for the given project"""
         try:
-            last_loaded = cache.get(self.LAST_LOADED_KEY, 0)
+            last_loaded_key = self._get_last_loaded_key(project)
+            last_loaded = cache.get(last_loaded_key, 0)
             age_minutes = (time.time() - last_loaded) / 60
             return age_minutes < max_age_minutes
         except:
             return False
     
-    def clear_bulk_cache(self):
-        """Clear bulk model cache"""
+    def clear_bulk_cache(self, project=None):
+        """Clear bulk model cache for the given project"""
         try:
-            cache.delete(self.BULK_CACHE_KEY)
-            cache.delete(self.LAST_LOADED_KEY)
-            logger.info("🧹 BULK LOADER: Cleared bulk model cache")
+            cache_key = self._get_cache_key(project)
+            last_loaded_key = self._get_last_loaded_key(project)
+            project_name = project.name if project and hasattr(project, 'name') else 'global'
+            
+            cache.delete(cache_key)
+            cache.delete(last_loaded_key)
+            logger.info(f"🧹 BULK LOADER: Cleared bulk model cache for project {project_name}")
         except Exception as e:
             logger.error(f"❌ BULK LOADER: Failed to clear bulk cache: {e}")
     
-    async def refresh_models_for_provider(self, provider_id: str) -> Dict[str, Any]:
+    async def refresh_models_for_provider(self, provider_id: str, project=None) -> Dict[str, Any]:
         """Refresh models for a specific provider and update bulk cache"""
         try:
             logger.info(f"🔄 BULK LOADER: Refreshing models for {provider_id}")
@@ -275,11 +300,12 @@ class LLMBulkLoaderService:
             # Load fresh models
             models = await dynamic_models_service.get_models_for_provider(
                 provider_id, 
-                use_cache=False
+                use_cache=False,
+                project=project
             )
             
             # Get cached bulk data and update it
-            bulk_data = self.get_cached_bulk_data()
+            bulk_data = self.get_cached_bulk_data(project)
             if bulk_data:
                 # Update the provider's models in bulk data
                 bulk_data['provider_models'][provider_id] = [asdict(model) for model in models]
@@ -294,14 +320,14 @@ class LLMBulkLoaderService:
                 # Update metadata
                 bulk_data['metadata']['loaded_at'] = time.strftime("%Y-%m-%d %H:%M:%S")
                 
-                # Re-cache updated data
-                self._cache_bulk_data(bulk_data)
+                # Re-cache updated data (with project context)
+                self._cache_bulk_data(bulk_data, project)
                 
                 logger.info(f"✅ BULK LOADER: Refreshed {len(models)} models for {provider_id}")
                 return bulk_data
             else:
                 # No bulk data cached, trigger full reload
-                return await self.pre_load_all_models(force_refresh=True)
+                return await self.pre_load_all_models(force_refresh=True, project=project)
                 
         except Exception as e:
             logger.error(f"❌ BULK LOADER: Failed to refresh models for {provider_id}: {e}")

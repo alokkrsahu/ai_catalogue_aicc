@@ -30,12 +30,18 @@ class ProjectAPIKeyViewSet(viewsets.ViewSet):
         self.api_key_service = get_project_api_key_service()
     
     def get_project(self, project_id):
-        """Get project and ensure user has access"""
+        """Get project and ensure user has access using project permission system"""
         project = get_object_or_404(
             IntelliDocProject,
-            project_id=project_id,
-            created_by=self.request.user
+            project_id=project_id
         )
+        
+        # Use project permission system to verify access (not just creator check)
+        if not project.has_user_access(self.request.user):
+            logger.warning(f"🚫 API KEY ACCESS: User {self.request.user.email} denied access to project {project.name} (project_id: {project_id})")
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You do not have permission to access this project's API keys")
+        
         return project
     
     @action(detail=False, methods=['get'], url_path='providers')

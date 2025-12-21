@@ -121,6 +121,15 @@ urlpatterns = [
     path('api/projects/<uuid:project_id>/workflows/<uuid:workflow_id>/conversation/', AgentWorkflowViewSet.as_view({
         'get': 'conversation'
     }), name='project-workflow-conversation'),
+    path('api/projects/<uuid:project_id>/workflows/<uuid:workflow_id>/evaluate/', AgentWorkflowViewSet.as_view({
+        'post': 'evaluate'
+    }), name='project-workflow-evaluate'),
+    path('api/projects/<uuid:project_id>/workflows/<uuid:workflow_id>/evaluation_history/', AgentWorkflowViewSet.as_view({
+        'get': 'evaluation_history'
+    }), name='project-workflow-evaluation-history'),
+    path('api/projects/<uuid:project_id>/workflows/<uuid:workflow_id>/evaluation_results/', AgentWorkflowViewSet.as_view({
+        'get': 'evaluation_results'
+    }), name='project-workflow-evaluation-results'),
     
     # PHASE 3: Universal Processing Endpoints (Consolidated via UniversalProjectViewSet)
     # All processing now handled through UniversalProjectViewSet actions:

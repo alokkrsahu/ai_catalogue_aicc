@@ -444,17 +444,17 @@ class SimpleAgentWorkflowViewSet(viewsets.ViewSet):
             
             # Only validate if workflow has nodes
             
-            # Check for Start Node
+            # Check for Start Node (REQUIRED - validation error if missing)
             start_nodes = [n for n in nodes if n.get('type') == 'StartNode']
             if not start_nodes:
-                warnings.append("Workflow should contain a Start Node")
+                errors.append("Workflow must contain at least one Start Node")
             elif len(start_nodes) > 1:
                 warnings.append("Workflow should contain only one Start Node")
             
-            # Check for End Node
+            # Check for End Node (REQUIRED - validation error if missing)
             end_nodes = [n for n in nodes if n.get('type') == 'EndNode']
             if not end_nodes:
-                warnings.append("Workflow should contain an End Node")
+                errors.append("Workflow must contain at least one End Node")
             
             # Check for orphaned nodes
             if len(nodes) > 1:

@@ -210,8 +210,14 @@ export function validateWorkflowGraph(graph: WorkflowGraph): { valid: boolean; e
   
   // Only validate if workflow has nodes
   if (graph.nodes.length > 0) {
+    // Check for required Start Node
     if (!graph.nodes.some(node => node.type === 'StartNode')) {
-      errors.push('Workflow must contain a Start Node');
+      errors.push('Workflow must contain at least one Start Node');
+    }
+    
+    // Check for required End Node
+    if (!graph.nodes.some(node => node.type === 'EndNode')) {
+      errors.push('Workflow must contain at least one End Node');
     }
   }
   

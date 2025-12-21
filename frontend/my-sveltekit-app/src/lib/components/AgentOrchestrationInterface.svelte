@@ -177,9 +177,10 @@
       preloadProgress = { stage: 'Starting model pre-loading...', percentage: 10 };
       
       console.log('📚 AGENT ORCHESTRATION: Pre-loading LLM models for efficient agent configuration');
+      console.log(`🔑 AGENT ORCHESTRATION: Using project ${projectId} for API key context`);
       
-      // Pre-load all models
-      bulkModelData = await ensureModelsLoaded();
+      // Pre-load all models with project ID to use project-specific API keys
+      bulkModelData = await ensureModelsLoaded(false, projectId);
       
       modelsLoaded = true;
       preloadProgress = { stage: 'Models ready', percentage: 100 };
@@ -600,12 +601,18 @@
       // REAL IMPLEMENTATION: Call the actual backend execute endpoint
       const response = await api.post(`/projects/${projectId}/workflows/${workflow.workflow_id}/execute/`);
       
-      console.log('✅ WORKFLOW EXECUTION: Response received:', response.data);
+      // Handle response data structure (may be response.data or response directly)
+      const responseData = response.data || response;
+      console.log('✅ WORKFLOW EXECUTION: Response received:', responseData);
       
-      // Capture execution ID for stop functionality
-      if (response.data && response.data.execution_id) {
-        currentExecutionId = response.data.execution_id;
+      // Capture execution ID for stop functionality and monitoring
+      // Check both top-level and nested in result object
+      const executionId = responseData.execution_id || responseData.result?.execution_id;
+      if (executionId) {
+        currentExecutionId = executionId;
         console.log(`📝 EXECUTION: Tracking execution ID: ${currentExecutionId}`);
+      } else {
+        console.warn('⚠️ EXECUTION: No execution_id found in response - completion monitoring will not work');
       }
       
       if (toasts && toasts.success) {

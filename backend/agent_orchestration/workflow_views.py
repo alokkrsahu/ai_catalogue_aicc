@@ -4,13 +4,20 @@ from rest_framework import viewsets, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import MultiPartParser, FormParser
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from asgiref.sync import sync_to_async
 from typing import List, Dict, Any
 import logging
 
-from users.models import IntelliDocProject, AgentWorkflow, AgentWorkflowStatus
+from users.models import (
+    IntelliDocProject, AgentWorkflow, AgentWorkflowStatus,
+    WorkflowEvaluation, WorkflowEvaluationResult, EvaluationStatus
+)
 from .serializers import AgentWorkflowSerializer, AgentWorkflowCreateSerializer
+from .workflow_evaluator import WorkflowEvaluator
+from .conversation_orchestrator import ConversationOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +168,7 @@ class AgentWorkflowViewSet(viewsets.ModelViewSet):
                 'status': 'success',
                 'message': 'Workflow executed successfully',
                 'workflow_id': str(workflow.workflow_id),
+                'execution_id': result.get('execution_id'),  # CRITICAL: Include at top level for frontend monitoring
                 'result': result
             })
             
@@ -663,17 +671,17 @@ class AgentWorkflowViewSet(viewsets.ModelViewSet):
         if not nodes:
             errors.append("Workflow must contain at least one node")
         
-        # Check for Start Node
+        # Check for Start Node (REQUIRED - validation error if missing)
         start_nodes = [n for n in nodes if n.get('type') == 'StartNode']
         if not start_nodes:
-            warnings.append("Workflow should contain a Start Node")
+            errors.append("Workflow must contain at least one Start Node")
         elif len(start_nodes) > 1:
             warnings.append("Workflow should contain only one Start Node")
         
-        # Check for End Node
+        # Check for End Node (REQUIRED - validation error if missing)
         end_nodes = [n for n in nodes if n.get('type') == 'EndNode']
         if not end_nodes:
-            warnings.append("Workflow should contain an End Node")
+            errors.append("Workflow must contain at least one End Node")
         
         # Check for orphaned nodes
         node_ids = set(n['id'] for n in nodes)
@@ -698,3 +706,212 @@ class AgentWorkflowViewSet(viewsets.ModelViewSet):
             'status': workflow.status,
             'validated_at': timezone.now()
         })
+    
+    @action(detail=True, methods=['post'], parser_classes=[MultiPartParser, FormParser])
+    def evaluate(self, request, project_id=None, workflow_id=None):
+        """
+        POST /api/projects/{project_id}/workflows/{workflow_id}/evaluate/
+        Upload CSV and start workflow evaluation
+        """
+        workflow = self.get_object()
+        
+        logger.info(f"🔍 WORKFLOW EVALUATE: {workflow.workflow_id} by {request.user.email}")
+        
+        if 'csv_file' not in request.FILES:
+            return Response({
+                'error': 'No CSV file provided',
+                'detail': 'Please upload a CSV file with "input" and "expected_output" columns'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        csv_file = request.FILES['csv_file']
+        
+        # Validate file type
+        if not csv_file.name.lower().endswith('.csv'):
+            return Response({
+                'error': 'Invalid file type',
+                'detail': 'File must be a CSV file'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            # Import here to avoid circular imports
+            import asyncio
+            
+            # Create orchestrator to get dependencies
+            orchestrator = ConversationOrchestrator()
+            
+            # Create evaluator
+            evaluator = WorkflowEvaluator(
+                workflow_executor=orchestrator.workflow_executor,
+                llm_provider_manager=orchestrator.llm_provider_manager,
+                workflow_parser=orchestrator.workflow_parser
+            )
+            
+            # Run evaluation asynchronously
+            async def run_evaluation():
+                return await evaluator.evaluate_workflow(
+                    workflow=workflow,
+                    csv_file=csv_file,
+                    executed_by=request.user
+                )
+            
+            evaluation = asyncio.run(run_evaluation())
+            
+            logger.info(f"✅ WORKFLOW EVALUATE: Evaluation {evaluation.evaluation_id} completed")
+            
+            return Response({
+                'evaluation_id': str(evaluation.evaluation_id),
+                'status': evaluation.status,
+                'total_rows': evaluation.total_rows,
+                'completed_rows': evaluation.completed_rows,
+                'failed_rows': evaluation.failed_rows,
+                'csv_filename': evaluation.csv_filename,
+                'created_at': evaluation.created_at.isoformat()
+            }, status=status.HTTP_201_CREATED)
+            
+        except ValueError as e:
+            logger.error(f"❌ WORKFLOW EVALUATE: CSV parsing error: {e}")
+            return Response({
+                'error': 'CSV parsing failed',
+                'detail': str(e)
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"❌ WORKFLOW EVALUATE: Evaluation failed: {e}")
+            import traceback
+            logger.error(f"❌ WORKFLOW EVALUATE TRACEBACK: {traceback.format_exc()}")
+            return Response({
+                'error': 'Evaluation failed',
+                'detail': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=True, methods=['get'])
+    def evaluation_history(self, request, project_id=None, workflow_id=None):
+        """
+        GET /api/projects/{project_id}/workflows/{workflow_id}/evaluation_history/
+        Get all evaluation runs for a workflow
+        """
+        workflow = self.get_object()
+        
+        logger.info(f"📊 WORKFLOW EVALUATION HISTORY: {workflow.workflow_id}")
+        
+        try:
+            evaluations = WorkflowEvaluation.objects.filter(workflow=workflow).order_by('-created_at')
+            
+            evaluation_list = []
+            for eval_obj in evaluations:
+                evaluation_list.append({
+                    'evaluation_id': str(eval_obj.evaluation_id),
+                    'csv_filename': eval_obj.csv_filename,
+                    'total_rows': eval_obj.total_rows,
+                    'completed_rows': eval_obj.completed_rows,
+                    'failed_rows': eval_obj.failed_rows,
+                    'status': eval_obj.status,
+                    'created_at': eval_obj.created_at.isoformat(),
+                    'executed_by': {
+                        'email': eval_obj.executed_by.email,
+                        'first_name': eval_obj.executed_by.first_name
+                    }
+                })
+            
+            return Response({
+                'workflow_id': str(workflow.workflow_id),
+                'workflow_name': workflow.name,
+                'evaluations': evaluation_list,
+                'total_evaluations': len(evaluation_list)
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ WORKFLOW EVALUATION HISTORY: Failed: {e}")
+            return Response({
+                'error': 'Failed to retrieve evaluation history',
+                'detail': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=True, methods=['get'])
+    def evaluation_results(self, request, project_id=None, workflow_id=None):
+        """
+        GET /api/projects/{project_id}/workflows/{workflow_id}/evaluation_results/?evaluation_id={id}
+        Get detailed results for a specific evaluation run
+        """
+        workflow = self.get_object()
+        evaluation_id = request.query_params.get('evaluation_id')
+        
+        if not evaluation_id:
+            return Response({
+                'error': 'evaluation_id parameter is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        logger.info(f"📊 WORKFLOW EVALUATION RESULTS: {workflow.workflow_id} - {evaluation_id}")
+        
+        try:
+            evaluation = WorkflowEvaluation.objects.get(
+                evaluation_id=evaluation_id,
+                workflow=workflow
+            )
+            
+            results = WorkflowEvaluationResult.objects.filter(
+                evaluation=evaluation
+            ).order_by('row_number')
+            
+            results_list = []
+            for result in results:
+                results_list.append({
+                    'row_number': result.row_number,
+                    'input_text': result.input_text,
+                    'expected_output': result.expected_output,
+                    'workflow_output': result.workflow_output,
+                    'execution_id': result.execution_id,
+                    'rouge_1_score': result.rouge_1_score,
+                    'rouge_2_score': result.rouge_2_score,
+                    'rouge_l_score': result.rouge_l_score,
+                    'bleu_score': result.bleu_score,
+                    'bert_score': result.bert_score,
+                    'semantic_similarity': result.semantic_similarity,
+                    'average_score': result.average_score,
+                    'status': result.status,
+                    'error_message': result.error_message,
+                    'execution_time_seconds': result.execution_time_seconds,
+                    'created_at': result.created_at.isoformat()
+                })
+            
+            # Calculate aggregate statistics
+            successful_results = [r for r in results_list if r['status'] == 'success']
+            if successful_results:
+                avg_scores = {
+                    'rouge_1': sum(r['rouge_1_score'] or 0 for r in successful_results) / len(successful_results),
+                    'rouge_2': sum(r['rouge_2_score'] or 0 for r in successful_results) / len(successful_results),
+                    'rouge_l': sum(r['rouge_l_score'] or 0 for r in successful_results) / len(successful_results),
+                    'bleu': sum(r['bleu_score'] or 0 for r in successful_results) / len(successful_results),
+                    'bert_score': sum(r['bert_score'] or 0 for r in successful_results) / len(successful_results),
+                    'semantic_similarity': sum(r['semantic_similarity'] or 0 for r in successful_results) / len(successful_results),
+                    'average_score': sum(r['average_score'] or 0 for r in successful_results) / len(successful_results)
+                }
+            else:
+                avg_scores = None
+            
+            return Response({
+                'evaluation_id': str(evaluation.evaluation_id),
+                'workflow_id': str(workflow.workflow_id),
+                'workflow_name': workflow.name,
+                'csv_filename': evaluation.csv_filename,
+                'status': evaluation.status,
+                'total_rows': evaluation.total_rows,
+                'completed_rows': evaluation.completed_rows,
+                'failed_rows': evaluation.failed_rows,
+                'created_at': evaluation.created_at.isoformat(),
+                'results': results_list,
+                'aggregate_statistics': avg_scores
+            })
+            
+        except WorkflowEvaluation.DoesNotExist:
+            return Response({
+                'error': 'Evaluation not found',
+                'detail': f'No evaluation found with ID {evaluation_id} for this workflow'
+            }, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"❌ WORKFLOW EVALUATION RESULTS: Failed: {e}")
+            import traceback
+            logger.error(f"❌ WORKFLOW EVALUATION RESULTS TRACEBACK: {traceback.format_exc()}")
+            return Response({
+                'error': 'Failed to retrieve evaluation results',
+                'detail': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

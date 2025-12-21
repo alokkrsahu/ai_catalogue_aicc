@@ -73,3 +73,10 @@ timeout-decorator>=0.5.0  # Function timeouts
 # autogen-agentchat - REMOVED
 # autogen-core - REMOVED
 # docker - REMOVED (was only for AutoGen sandbox)
+
+# Workflow Evaluation Metrics
+rouge-score>=0.1.2
+nltk>=3.8.1
+sacrebleu>=2.3.1
+bert-score>=0.3.13
+torch>=2.0.0  # Required for bert-score

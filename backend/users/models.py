@@ -1316,35 +1316,100 @@ class HumanInputInteraction(models.Model):
     
     def __str__(self):
         return f"{self.agent_name} - Human Input ({self.response_timestamp.strftime('%H:%M:%S') if self.response_timestamp else 'Pending'})"
+
+
+# ============================================================================
+# WORKFLOW EVALUATION MODELS
+# ============================================================================
+
+class EvaluationStatus(models.TextChoices):
+    """Status choices for workflow evaluations"""
+    PENDING = 'pending', 'Pending'
+    RUNNING = 'running', 'Running'
+    COMPLETED = 'completed', 'Completed'
+    FAILED = 'failed', 'Failed'
+    CANCELLED = 'cancelled', 'Cancelled'
+
+
+class WorkflowEvaluation(models.Model):
+    """Stores evaluation run metadata"""
+    workflow = models.ForeignKey(AgentWorkflow, on_delete=models.CASCADE, related_name='evaluations')
+    evaluation_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    csv_filename = models.CharField(max_length=255)
+    total_rows = models.IntegerField()
+    completed_rows = models.IntegerField(default=0)
+    failed_rows = models.IntegerField(default=0)
+    status = models.CharField(max_length=20, choices=EvaluationStatus.choices, default=EvaluationStatus.PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    executed_by = models.ForeignKey('User', on_delete=models.CASCADE)
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['workflow', 'status']),
+            models.Index(fields=['evaluation_id']),
+            models.Index(fields=['created_at']),
+        ]
+    
+    def __str__(self):
+        return f"{self.workflow.name} - Evaluation {self.evaluation_id.hex[:8]} ({self.status})"
+
+
+class EvaluationResultStatus(models.TextChoices):
+    """Status choices for individual evaluation results"""
+    SUCCESS = 'success', 'Success'
+    FAILED = 'failed', 'Failed'
+    PENDING = 'pending', 'Pending'
+
+
+class WorkflowEvaluationResult(models.Model):
+    """Stores individual evaluation result for each CSV row"""
+    evaluation = models.ForeignKey(WorkflowEvaluation, on_delete=models.CASCADE, related_name='results')
+    row_number = models.IntegerField()
+    input_text = models.TextField()
+    expected_output = models.TextField()
+    workflow_output = models.TextField(blank=True, help_text='Aggregated End node input messages')
+    execution_id = models.CharField(max_length=100, blank=True, help_text='Reference to WorkflowExecution')
+    
+    # Metric scores
+    rouge_1_score = models.FloatField(null=True, blank=True)
+    rouge_2_score = models.FloatField(null=True, blank=True)
+    rouge_l_score = models.FloatField(null=True, blank=True)
+    bleu_score = models.FloatField(null=True, blank=True)
+    bert_score = models.FloatField(null=True, blank=True)
+    semantic_similarity = models.FloatField(null=True, blank=True)
+    
+    # Average score for quick reference
+    average_score = models.FloatField(null=True, blank=True)
+    
+    status = models.CharField(max_length=20, choices=EvaluationResultStatus.choices, default=EvaluationResultStatus.PENDING)
+    error_message = models.TextField(blank=True)
+    execution_time_seconds = models.FloatField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['row_number']
+        indexes = [
+            models.Index(fields=['evaluation', 'row_number']),
+            models.Index(fields=['evaluation', 'status']),
+            models.Index(fields=['average_score']),
+        ]
+        unique_together = ['evaluation', 'row_number']
+    
+    def __str__(self):
+        return f"Evaluation {self.evaluation.evaluation_id.hex[:8]} - Row {self.row_number} ({self.status})"
     
     @property
-    def formatted_response_time(self):
-        """Get human-readable response time"""
-        if not self.response_time_seconds:
+    def formatted_execution_time(self):
+        """Get human-readable execution time"""
+        if not self.execution_time_seconds:
             return 'N/A'
         
-        if self.response_time_seconds < 60:
-            return f"{self.response_time_seconds:.1f}s"
-        elif self.response_time_seconds < 3600:
-            minutes = self.response_time_seconds / 60
+        if self.execution_time_seconds < 60:
+            return f"{self.execution_time_seconds:.1f}s"
+        elif self.execution_time_seconds < 3600:
+            minutes = self.execution_time_seconds / 60
             return f"{minutes:.1f}m"
         else:
-            hours = self.response_time_seconds / 3600
+            hours = self.execution_time_seconds / 3600
             return f"{hours:.1f}h"
-    
-    @property
-    def input_context_summary(self):
-        """Get summary of input context for UI display"""
-        if not self.input_messages:
-            return 'No input messages'
-        
-        sources = [msg.get('name', 'Unknown') for msg in self.input_messages if isinstance(msg, dict)]
-        return f"{len(sources)} input sources: {', '.join(sources[:3])}{'...' if len(sources) > 3 else ''}"
-    
-    def save(self, *args, **kwargs):
-        # Calculate response time if both timestamps are available
-        if self.requested_at and self.response_timestamp and not self.response_time_seconds:
-            delta = self.response_timestamp - self.requested_at
-            self.response_time_seconds = delta.total_seconds()
-        
-        super().save(*args, **kwargs)

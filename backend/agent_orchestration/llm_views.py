@@ -24,19 +24,33 @@ logger = logging.getLogger('agent_llm_api')
 def get_user_project(user, project_id=None):
     """
     Get user's project - either specific project_id or user's first project
+    Uses project permission system to check access (not just creator)
     """
     try:
         if project_id:
-            # Get specific project for user
-            return IntelliDocProject.objects.get(
-                project_id=project_id,
-                created_by=user
-            )
+            # Get specific project and check if user has access
+            project = IntelliDocProject.objects.get(project_id=project_id)
+            # Use project permission system to verify access
+            if not project.has_user_access(user):
+                logger.warning(f"🚫 PROJECT ACCESS: User {user.email} denied access to project {project.name} (project_id: {project_id})")
+                return None
+            return project
         else:
-            # Get user's first project as default
+            # Get user's first accessible project as default
+            # Admin users can see all projects
+            if user.is_admin:
+                return IntelliDocProject.objects.first()
+            
+            # Get projects where user is creator or has permissions
+            from django.db.models import Q
+            created_projects = Q(created_by=user)
+            user_permissions = Q(user_permissions__user=user)
+            user_groups = user.groups.all()
+            group_permissions = Q(group_permissions__group__in=user_groups)
+            
             return IntelliDocProject.objects.filter(
-                created_by=user
-            ).first()
+                created_projects | user_permissions | group_permissions
+            ).distinct().first()
     except IntelliDocProject.DoesNotExist:
         return None
 
@@ -729,11 +743,11 @@ def bulk_load_all_models(request):
         
         logger.info(f"🚀 BULK LOAD API: Starting bulk model loading (force_refresh: {force_refresh}, project: {project.name if project else 'None'})")
         
-        # Check if we have valid cached data
-        if not force_refresh and llm_bulk_loader.is_cache_valid(max_age_minutes):
-            cached_data = llm_bulk_loader.get_cached_bulk_data()
+        # Check if we have valid cached data for this project
+        if not force_refresh and llm_bulk_loader.is_cache_valid(max_age_minutes, project=project):
+            cached_data = llm_bulk_loader.get_cached_bulk_data(project=project)
             if cached_data:
-                logger.info("✅ BULK LOAD API: Returning cached bulk model data")
+                logger.info(f"✅ BULK LOAD API: Returning cached bulk model data for project {project.name if project else 'global'}")
                 return Response({
                     **cached_data,
                     'source': 'cache',
@@ -784,9 +798,14 @@ def refresh_provider_models(request, provider_id):
     
     Args:
         provider_id: Provider to refresh ('openai', 'anthropic', 'google')
+    Query Parameters:
+        project_id (optional): Specific project ID to check API keys for
     """
     try:
-        logger.info(f"🔄 PROVIDER REFRESH API: Refreshing models for {provider_id}")
+        project_id = request.GET.get('project_id') or request.data.get('project_id')
+        project = get_user_project(request.user, project_id)
+        
+        logger.info(f"🔄 PROVIDER REFRESH API: Refreshing models for {provider_id} (project: {project.name if project else 'None'})")
         
         if provider_id not in ['openai', 'anthropic', 'google']:
             return Response({
@@ -794,9 +813,9 @@ def refresh_provider_models(request, provider_id):
                 'valid_providers': ['openai', 'anthropic', 'google']
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Refresh models for specific provider
+        # Refresh models for specific provider with project context
         async def refresh_provider():
-            return await llm_bulk_loader.refresh_models_for_provider(provider_id)
+            return await llm_bulk_loader.refresh_models_for_provider(provider_id, project=project)
         
         updated_bulk_data = run_async(refresh_provider)
         
