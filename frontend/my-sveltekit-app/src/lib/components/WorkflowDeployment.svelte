@@ -108,12 +108,6 @@
     htmlParts.push('    messagesEl.scrollTop = messagesEl.scrollHeight;');
     htmlParts.push('  }');
     htmlParts.push('');
-    htmlParts.push('  function serializeConversation() {');
-    htmlParts.push('    return conversation');
-    htmlParts.push('      .map(m => (m.role === \'user\' ? \'User\' : \'Assistant\') + \': \' + m.content)');
-    htmlParts.push('      .join(\'\\\\n\');');
-    htmlParts.push('  }');
-    htmlParts.push('');
     htmlParts.push('  async function sendMessage() {');
     htmlParts.push('    const text = inputEl.value.trim();');
     htmlParts.push('    if (!text) return;');
@@ -125,16 +119,13 @@
     htmlParts.push('    sendBtn.disabled = true;');
     htmlParts.push('    statusEl.textContent = \'Contacting workflow...\';');
     htmlParts.push('');
-    htmlParts.push('    const fullPrompt = serializeConversation();');
-    htmlParts.push('');
     htmlParts.push('    try {');
     htmlParts.push('      const resp = await fetch(ENDPOINT_URL, {');
     htmlParts.push('        method: \'POST\',');
     htmlParts.push('        headers: { \'Content-Type\': \'application/json\' },');
     htmlParts.push('        body: JSON.stringify({');
-    htmlParts.push('          message: fullPrompt,');
-    htmlParts.push('          session_id: sessionId,');
-    htmlParts.push('          conversation: conversation');
+    htmlParts.push('          user_query: text,');
+    htmlParts.push('          session_id: sessionId');
     htmlParts.push('        })');
     htmlParts.push('      });');
     htmlParts.push('');
@@ -701,6 +692,34 @@
               Copy and paste this HTML code into your website where you want the chatbot to appear. The chatbot will load automatically.
             </p>
           </div>
+        </div>
+      </div>
+    {/if}
+    
+    <!-- Activity Tracker Section -->
+    {#if deployment && deployment.workflow_id}
+      <div class="deployment-section mb-8">
+        <h3 class="text-xl font-semibold text-gray-900 mb-4">
+          <i class="fas fa-chart-line mr-2 text-oxford-blue"></i>
+          Activity Tracker
+        </h3>
+        
+        <div class="bg-white rounded-lg shadow-md p-6">
+          {#await import('$lib/components/DeploymentActivityTracker.svelte')}
+            <div class="flex items-center justify-center min-h-48">
+              <div class="text-center">
+                <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-oxford-blue mx-auto mb-2"></div>
+                <p class="text-oxford-blue text-sm">Loading Activity Tracker...</p>
+              </div>
+            </div>
+          {:then ActivityTrackerModule}
+            <svelte:component this={ActivityTrackerModule.default} {projectId} {deployment} />
+          {:catch error}
+            <div class="text-center text-red-600">
+              <i class="fas fa-exclamation-triangle text-2xl mb-2"></i>
+              <p>Failed to load Activity Tracker</p>
+            </div>
+          {/await}
         </div>
       </div>
     {/if}

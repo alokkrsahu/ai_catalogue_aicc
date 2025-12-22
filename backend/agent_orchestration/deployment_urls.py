@@ -50,5 +50,10 @@ urlpatterns = [
         }),
         name='deployment-origin-detail'
     ),
+    path(
+        'api/agent-orchestration/projects/<uuid:project_id>/deployment/activity/',
+        DeploymentViewSet.as_view({'get': 'get_deployment_activity'}),
+        name='deployment-activity'
+    ),
 ]
 

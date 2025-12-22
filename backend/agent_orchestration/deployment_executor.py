@@ -28,16 +28,18 @@ class WorkflowDeploymentExecutor:
     async def execute_deployment_workflow(
         self,
         deployment: WorkflowDeployment,
-        user_query: str,
-        session_id: Optional[str] = None
+        conversation_history: str,
+        session_id: Optional[str] = None,
+        execution_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Execute a deployed workflow with user query
+        Execute a deployed workflow with full conversation history
         
         Args:
             deployment: WorkflowDeployment instance
-            user_query: User's query/input
+            conversation_history: Full conversation history as formatted string
             session_id: Optional session ID for conversation tracking
+            execution_id: Optional execution ID for linking to DeploymentExecution
             
         Returns:
             Dict containing execution results
@@ -56,16 +58,16 @@ class WorkflowDeploymentExecutor:
             # Get workflow graph and make a deep copy to avoid modifying original
             graph_json = copy.deepcopy(await sync_to_async(lambda: workflow.graph_json)())
             
-            # Find Start node and replace prompt with user_query
+            # Find Start node and replace prompt with full conversation history
             start_node_modified = False
             for node in graph_json.get('nodes', []):
                 if node.get('type') == 'StartNode':
                     node_data = node.get('data', {})
                     if isinstance(node_data, dict):
-                        node_data['prompt'] = user_query
+                        node_data['prompt'] = conversation_history
                         node['data'] = node_data
                         start_node_modified = True
-                        logger.info(f"🔄 DEPLOYMENT: Replaced Start node prompt with user query")
+                        logger.info(f"🔄 DEPLOYMENT: Replaced Start node prompt with conversation history ({len(conversation_history)} chars)")
                         break
             
             if not start_node_modified:
@@ -94,15 +96,17 @@ class WorkflowDeploymentExecutor:
                 
                 logger.info(f"✅ DEPLOYMENT: Workflow execution completed in {execution_time_ms}ms")
                 
+                # Get execution_id from execution_result or use provided one
+                result_execution_id = execution_result.get('execution_id')
+                
                 return {
                     'status': 'success',
                     'response': end_node_output,
                     'execution_time_ms': execution_time_ms,
                     'workflow_name': await sync_to_async(lambda: workflow.name)(),
-                    'execution_id': execution_result.get('execution_id'),
+                    'execution_id': result_execution_id,
                     'conversation_history': execution_result.get('conversation_history', '')
                 }
-                
             finally:
                 # Always restore original graph, even if execution fails
                 workflow.graph_json = original_graph

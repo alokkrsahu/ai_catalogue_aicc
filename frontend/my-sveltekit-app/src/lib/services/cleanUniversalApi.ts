@@ -1080,6 +1080,49 @@ export class CleanUniversalApiService {
     console.log('✅ DEPLOYMENT: Origin updated successfully');
     return result;
   }
+
+  /**
+   * Get deployment activity (all sessions and conversations)
+   */
+  async getDeploymentActivity(projectId: string, params?: { session_id?: string; limit?: number; offset?: number }): Promise<any> {
+    console.log(`📊 DEPLOYMENT: Getting deployment activity for project ${projectId}`);
+    
+    const queryParams = new URLSearchParams();
+    if (params?.session_id) queryParams.append('session_id', params.session_id);
+    if (params?.limit) queryParams.append('limit', params.limit.toString());
+    if (params?.offset) queryParams.append('offset', params.offset.toString());
+    
+    const url = `${API_BASE}/agent-orchestration/projects/${projectId}/deployment/activity${queryParams.toString() ? '?' + queryParams.toString() : ''}`;
+    
+    const response = await this.handleAuthenticatedRequest(url, {
+      method: 'GET',
+      headers: this.getAuthHeaders(),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Get deployment activity failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+    console.log('✅ DEPLOYMENT: Retrieved deployment activity');
+    return result;
+  }
+
+  /**
+   * Get specific deployment session details
+   */
+  async getDeploymentSession(projectId: string, sessionId: string): Promise<any> {
+    console.log(`📋 DEPLOYMENT: Getting session ${sessionId} for project ${projectId}`);
+    
+    const response = await this.getDeploymentActivity(projectId, { session_id: sessionId, limit: 1 });
+    
+    if (response.sessions && response.sessions.length > 0) {
+      return response.sessions[0];
+    }
+    
+    throw new Error('Session not found');
+  }
 }
 
 // Export singleton instance

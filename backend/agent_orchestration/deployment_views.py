@@ -27,7 +27,9 @@ from .models import (
     WorkflowDeployment,
     WorkflowAllowedOrigin,
     WorkflowDeploymentRequest,
-    WorkflowDeploymentRequestStatus
+    WorkflowDeploymentRequestStatus,
+    DeploymentSession,
+    DeploymentExecution
 )
 from .deployment_executor import WorkflowDeploymentExecutor
 from .deployment_rate_limiter import WorkflowDeploymentRateLimiter
@@ -39,6 +41,7 @@ class DeploymentViewSet(viewsets.ViewSet):
     """
     ViewSet for managing workflow deployments
     """
+    permission_classes = [IsAuthenticated]
     permission_classes = [IsAuthenticated]
     
     def retrieve(self, request, project_id=None):
@@ -436,6 +439,98 @@ class DeploymentViewSet(viewsets.ViewSet):
                 {'error': 'Failed to update origin'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+    
+    @action(detail=False, methods=['get'], url_path='projects/(?P<project_id>[^/.]+)/deployment/activity')
+    def get_deployment_activity(self, request, project_id=None):
+        """
+        Get all deployment sessions and their conversation history for Activity Tracker
+        GET /api/agent-orchestration/projects/{project_id}/deployment/activity/
+        """
+        try:
+            # Get project
+            try:
+                project = IntelliDocProject.objects.get(project_id=project_id)
+            except IntelliDocProject.DoesNotExist:
+                return Response(
+                    {'error': 'Project not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Check permissions
+            if not project.has_user_access(request.user):
+                return Response(
+                    {'error': 'You do not have permission to access this project'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
+            # Get deployment
+            try:
+                deployment = WorkflowDeployment.objects.get(project=project)
+            except WorkflowDeployment.DoesNotExist:
+                return Response({
+                    'sessions': [],
+                    'total_sessions': 0,
+                    'message': 'No deployment found for this project'
+                })
+            
+            # Get query parameters
+            session_id_filter = request.query_params.get('session_id', '').strip()
+            limit = int(request.query_params.get('limit', 50))
+            offset = int(request.query_params.get('offset', 0))
+            
+            # Query sessions
+            sessions_query = DeploymentSession.objects.filter(deployment=deployment)
+            
+            if session_id_filter:
+                sessions_query = sessions_query.filter(session_id__icontains=session_id_filter)
+            
+            total_sessions = sessions_query.count()
+            sessions = sessions_query.order_by('-last_activity')[offset:offset + limit]
+            
+            # Build response
+            sessions_data = []
+            for session in sessions:
+                # Get executions for this session
+                executions = DeploymentExecution.objects.filter(
+                    deployment_session=session
+                ).order_by('created_at')[:100]  # Limit to recent 100 executions
+                
+                sessions_data.append({
+                    'session_id': session.session_id,
+                    'message_count': session.message_count,
+                    'is_active': session.is_active,
+                    'created_at': session.created_at.isoformat(),
+                    'last_activity': session.last_activity.isoformat(),
+                    'conversation_history': session.conversation_history or [],
+                    'executions': [
+                        {
+                            'execution_id': exec.execution_id,
+                            'user_query': exec.user_query,
+                            'assistant_response': exec.assistant_response,
+                            'execution_time_ms': exec.execution_time_ms,
+                            'status': exec.status,
+                            'created_at': exec.created_at.isoformat(),
+                            'workflow_execution_id': exec.workflow_execution.execution_id if exec.workflow_execution else None
+                        }
+                        for exec in executions
+                    ]
+                })
+            
+            logger.info(f"📊 DEPLOYMENT: Retrieved {len(sessions_data)} sessions for project {project.name}")
+            
+            return Response({
+                'sessions': sessions_data,
+                'total_sessions': total_sessions,
+                'limit': limit,
+                'offset': offset
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ DEPLOYMENT: Error getting deployment activity: {e}", exc_info=True)
+            return Response(
+                {'error': 'Failed to retrieve deployment activity'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 # Public endpoint (unauthenticated)
@@ -502,24 +597,84 @@ def public_chat_endpoint(request, project_id):
                 'request_id': request_id
             }, status=400)
         
-        # Extract message
-        message = data.get('message', '').strip()
-        session_id = data.get('session_id', '')
+        # Extract user query and session_id (client now sends only current query)
+        user_query = data.get('user_query', '').strip()
+        # Fallback to 'message' for backward compatibility
+        if not user_query:
+            user_query = data.get('message', '').strip()
+        session_id = data.get('session_id', '').strip()
         
-        if not message:
+        if not user_query:
             return JsonResponse({
                 'status': 'error',
-                'error': 'Message is required',
+                'error': 'User query is required',
+                'request_id': request_id
+            }, status=400)
+        
+        if not session_id:
+            return JsonResponse({
+                'status': 'error',
+                'error': 'Session ID is required',
                 'request_id': request_id
             }, status=400)
         
         # Validate message length
-        if len(message) > 1000:
+        if len(user_query) > 1000:
             return JsonResponse({
                 'status': 'error',
                 'error': 'Message too long (max 1000 characters)',
                 'request_id': request_id
             }, status=400)
+        
+        # Get or create deployment session
+        try:
+            deployment_session, created = DeploymentSession.objects.get_or_create(
+                deployment=deployment,
+                session_id=session_id,
+                defaults={
+                    'conversation_history': [],
+                    'message_count': 0,
+                    'is_active': True
+                }
+            )
+            
+            conversation_history = deployment_session.conversation_history or []
+            
+            if created:
+                # Add initial greeting for new sessions
+                initial_greeting = getattr(deployment, 'initial_greeting', 'Hi! I am your AI assistant.')
+                conversation_history.append({
+                    'role': 'assistant',
+                    'content': initial_greeting,
+                    'timestamp': timezone.now().isoformat()
+                })
+                logger.info(f"🆕 DEPLOYMENT: Created new session {session_id[:8]} for project {project.name} with initial greeting")
+            else:
+                logger.info(f"🔄 DEPLOYMENT: Retrieved existing session {session_id[:8]} with {deployment_session.message_count} messages")
+            
+            # Add user query to conversation history
+            conversation_history.append({
+                'role': 'user',
+                'content': user_query,
+                'timestamp': timezone.now().isoformat()
+            })
+            
+            # Build full conversation history string for workflow execution
+            # Format: "Assistant: greeting\nUser: query1\nAssistant: response1\nUser: query2..."
+            conversation_text_parts = []
+            for msg in conversation_history:
+                role_label = 'User' if msg['role'] == 'user' else 'Assistant'
+                conversation_text_parts.append(f"{role_label}: {msg['content']}")
+            
+            full_conversation = '\n'.join(conversation_text_parts)
+            
+        except Exception as e:
+            logger.error(f"❌ DEPLOYMENT: Error managing session: {e}", exc_info=True)
+            return JsonResponse({
+                'status': 'error',
+                'error': 'Failed to manage session',
+                'request_id': request_id
+            }, status=500)
         
         # Check rate limit
         rate_limiter = WorkflowDeploymentRateLimiter()
@@ -533,7 +688,7 @@ def public_chat_endpoint(request, project_id):
                     origin=origin,
                     request_id=request_id,
                     session_id=session_id[:100] if session_id else None,
-                    message_preview=message[:100],
+                    message_preview=user_query[:100],
                     status=WorkflowDeploymentRequestStatus.RATE_LIMITED,
                     response_generated=False
                 )
@@ -547,22 +702,25 @@ def public_chat_endpoint(request, project_id):
                 'request_id': request_id
             }, status=429)
         
-        # Create tracking record
+        # Create tracking record (will be updated after execution)
         try:
             deployment_request = WorkflowDeploymentRequest.objects.create(
                 deployment=deployment,
                 origin=origin,
                 request_id=request_id,
                 session_id=session_id[:100] if session_id else None,
-                message_preview=message[:100],
+                message_preview=user_query[:100],
                 status=WorkflowDeploymentRequestStatus.SUCCESS,
                 response_generated=False
             )
         except Exception as e:
             logger.error(f"❌ DEPLOYMENT: Failed to create request record: {e}")
         
-        # Execute workflow
+        # Execute workflow with full conversation history
         executor = WorkflowDeploymentExecutor()
+        
+        # Generate unique execution ID
+        execution_id = f"deploy_exec_{timezone.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         
         # Run async execution
         loop = asyncio.new_event_loop()
@@ -571,14 +729,60 @@ def public_chat_endpoint(request, project_id):
             execution_result = loop.run_until_complete(
                 executor.execute_deployment_workflow(
                     deployment,
-                    message,
-                    session_id
+                    full_conversation,
+                    session_id,
+                    execution_id
                 )
             )
         finally:
             loop.close()
         
         execution_time_ms = int((timezone.now() - start_time).total_seconds() * 1000)
+        
+        # Extract assistant response
+        assistant_response = execution_result.get('response', '') if execution_result.get('status') == 'success' else ''
+        
+        # Update session with assistant response
+        if assistant_response:
+            conversation_history.append({
+                'role': 'assistant',
+                'content': assistant_response,
+                'timestamp': timezone.now().isoformat()
+            })
+            deployment_session.conversation_history = conversation_history
+            deployment_session.message_count = len(conversation_history)
+            deployment_session.last_activity = timezone.now()
+            deployment_session.save()
+            logger.info(f"💾 DEPLOYMENT: Updated session {session_id[:8]} with {deployment_session.message_count} messages")
+        
+        # Create DeploymentExecution record
+        workflow_execution_id = execution_result.get('execution_id')
+        workflow_execution = None
+        if workflow_execution_id:
+            try:
+                from users.models import WorkflowExecution
+                workflow_execution = WorkflowExecution.objects.filter(execution_id=workflow_execution_id).first()
+            except Exception as e:
+                logger.warning(f"⚠️ DEPLOYMENT: Could not link to WorkflowExecution {workflow_execution_id}: {e}")
+        
+        try:
+            deployment_execution = DeploymentExecution.objects.create(
+                execution_id=execution_id,
+                deployment_session=deployment_session,
+                workflow_execution=workflow_execution,
+                user_query=user_query,
+                assistant_response=assistant_response,
+                execution_time_ms=execution_time_ms,
+                status=(
+                    WorkflowDeploymentRequestStatus.SUCCESS
+                    if execution_result.get('status') == 'success'
+                    else WorkflowDeploymentRequestStatus.ERROR
+                ),
+                error_message=execution_result.get('error', '') if execution_result.get('status') != 'success' else None
+            )
+            logger.info(f"📝 DEPLOYMENT: Created execution record {execution_id[:8]} for session {session_id[:8]}")
+        except Exception as e:
+            logger.error(f"❌ DEPLOYMENT: Failed to create execution record: {e}", exc_info=True)
         
         # Update tracking record
         if deployment_request:
@@ -600,11 +804,12 @@ def public_chat_endpoint(request, project_id):
         if execution_result.get('status') == 'success':
             return JsonResponse({
                 'status': 'success',
-                'response': execution_result.get('response', ''),
+                'response': assistant_response,
                 'metadata': {
                     'request_id': request_id,
                     'execution_time_ms': execution_time_ms,
-                    'workflow_name': execution_result.get('workflow_name', '')
+                    'workflow_name': execution_result.get('workflow_name', ''),
+                    'session_id': session_id
                 }
             })
         else:
@@ -731,12 +936,6 @@ def embed_chatbot_html(request, project_id):
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }}
 
-  function serializeConversation() {{
-    return messages
-      .map(m => (m.role === 'user' ? 'User' : 'Assistant') + ': ' + m.content)
-      .join('\\n');
-  }}
-
   async function sendMessage() {{
     const text = inputEl.value.trim();
     if (!text) return;
@@ -748,16 +947,13 @@ def embed_chatbot_html(request, project_id):
     sendBtn.disabled = true;
     statusEl.textContent = 'Contacting workflow...';
 
-    const fullPrompt = serializeConversation();
-
     try {{
       const resp = await fetch(ENDPOINT_URL, {{
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json' }},
         body: JSON.stringify({{
-          message: fullPrompt,
-          session_id: sessionId,
-          conversation: messages
+          user_query: text,
+          session_id: sessionId
         }})
       }});
 

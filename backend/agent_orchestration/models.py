@@ -196,3 +196,102 @@ class WorkflowDeploymentRequest(models.Model):
     def __str__(self):
         return f"{self.deployment.project.name} - {self.request_id[:8]} ({self.status})"
 
+
+class DeploymentSession(models.Model):
+    """Stores session state and conversation history for deployed chatbots"""
+    deployment = models.ForeignKey(
+        WorkflowDeployment,
+        on_delete=models.CASCADE,
+        related_name='sessions'
+    )
+    session_id = models.CharField(
+        max_length=100,
+        help_text='Unique session identifier from client'
+    )
+    conversation_history = models.JSONField(
+        default=list,
+        help_text='Full conversation history as list of messages: [{"role": "user|assistant", "content": "..."}, ...]'
+    )
+    message_count = models.IntegerField(
+        default=0,
+        help_text='Total number of messages in this session'
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text='Whether this session is currently active'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    last_activity = models.DateTimeField(
+        auto_now=True,
+        help_text='Last time a message was added to this session'
+    )
+    
+    class Meta:
+        ordering = ['-last_activity']
+        unique_together = ['deployment', 'session_id']
+        indexes = [
+            models.Index(fields=['deployment', 'session_id']),
+            models.Index(fields=['deployment', 'last_activity']),
+            models.Index(fields=['is_active', 'last_activity']),
+        ]
+    
+    def __str__(self):
+        return f"Session {self.session_id[:8]} for {self.deployment.project.name} ({self.message_count} messages)"
+
+
+class DeploymentExecution(models.Model):
+    """Track individual executions within a deployment session"""
+    execution_id = models.CharField(
+        max_length=100,
+        unique=True,
+        help_text='Unique execution identifier'
+    )
+    deployment_session = models.ForeignKey(
+        DeploymentSession,
+        on_delete=models.CASCADE,
+        related_name='executions'
+    )
+    workflow_execution = models.ForeignKey(
+        'users.WorkflowExecution',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='deployment_executions',
+        help_text='Reference to underlying WorkflowExecution record'
+    )
+    user_query = models.TextField(
+        help_text='The user query that triggered this execution'
+    )
+    assistant_response = models.TextField(
+        help_text='The assistant response from the workflow'
+    )
+    execution_time_ms = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text='Execution time in milliseconds'
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=WorkflowDeploymentRequestStatus.choices,
+        default=WorkflowDeploymentRequestStatus.SUCCESS,
+        help_text='Execution status'
+    )
+    error_message = models.TextField(
+        blank=True,
+        null=True,
+        help_text='Error message if execution failed'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['deployment_session', 'created_at']),
+            models.Index(fields=['execution_id']),
+            models.Index(fields=['status']),
+        ]
+    
+    def __str__(self):
+        return f"Execution {self.execution_id[:8]} for session {self.deployment_session.session_id[:8]}"
+
