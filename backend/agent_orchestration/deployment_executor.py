@@ -140,17 +140,28 @@ class WorkflowDeploymentExecutor:
             messages = execution_result.get('messages', [])
             if not messages:
                 logger.warning("⚠️ DEPLOYMENT: No messages in execution result")
+                # Try to get from conversation_history as last resort
+                conv_history = execution_result.get('conversation_history', '')
+                if conv_history:
+                    logger.info("✅ DEPLOYMENT: Using conversation_history as fallback")
+                    return conv_history
                 return ''
+
+            logger.debug(f"🔍 DEPLOYMENT: Processing {len(messages)} messages from execution result")
 
             # Find End node(s)
             end_nodes = [node for node in workflow_graph.get('nodes', []) if node.get('type') == 'EndNode']
             if not end_nodes:
                 logger.warning("⚠️ DEPLOYMENT: No End node found in workflow graph")
-                # Fallback: last chat message
+                # Fallback: last chat message (preferred over result_summary)
                 fallback = self._get_last_chat_message(execution_result)
                 if fallback:
                     return fallback
-                return execution_result.get('result_summary', '') or execution_result.get('conversation_history', '')
+                # Last resort: conversation_history
+                conv_history = execution_result.get('conversation_history', '')
+                if conv_history:
+                    return conv_history
+                return ''
 
             # For now we assume a single End node is used for deployment
             end_node = end_nodes[0]
@@ -169,7 +180,11 @@ class WorkflowDeploymentExecutor:
                 fallback = self._get_last_chat_message(execution_result)
                 if fallback:
                     return fallback
-                return execution_result.get('result_summary', '') or execution_result.get('conversation_history', '')
+                # Last resort: conversation_history
+                conv_history = execution_result.get('conversation_history', '')
+                if conv_history:
+                    return conv_history
+                return ''
 
             predecessor_id = predecessor_node_ids[0]
 
@@ -182,34 +197,112 @@ class WorkflowDeploymentExecutor:
 
             # Find the last message from the predecessor agent
             end_node_messages = []
+            logger.info(f"🔍 DEPLOYMENT: Looking for messages from predecessor '{predecessor_name}' (ID: {predecessor_id})")
+            logger.info(f"🔍 DEPLOYMENT: Total messages to check: {len(messages)}")
+            
+            # Log all message agent names and content preview for debugging
+            all_agent_names = [msg.get('agent_name', 'N/A') for msg in messages if isinstance(msg, dict)]
+            logger.info(f"🔍 DEPLOYMENT: Available agent names in messages: {all_agent_names}")
+            
+            # Log message details for debugging
+            for idx, msg in enumerate(messages):
+                if isinstance(msg, dict):
+                    agent_name = msg.get('agent_name', 'N/A')
+                    content_preview = (msg.get('content', '') or msg.get('message', ''))[:50]
+                    logger.debug(f"🔍 DEPLOYMENT: Message {idx}: agent_name='{agent_name}', content_preview='{content_preview}...'")
+            
             for msg in messages:
                 if not isinstance(msg, dict):
                     continue
                 agent_name = msg.get('agent_name', '')
+                agent_type = msg.get('agent_type', '')
+                content = msg.get('content', '') or msg.get('message', '')
+                
+                # Match by agent name (exact match first)
                 if agent_name == predecessor_name:
-                    content = msg.get('content', '') or msg.get('message', '')
-                    if content:
+                    if content and content.strip():  # Ensure content is not empty
                         end_node_messages.append(content)
+                        logger.info(f"✅ DEPLOYMENT: Found message from '{agent_name}': {content[:100]}...")
+                
+                # Also try case-insensitive matching
+                elif agent_name.lower() == predecessor_name.lower():
+                    if content and content.strip():
+                        end_node_messages.append(content)
+                        logger.info(f"✅ DEPLOYMENT: Found message from '{agent_name}' (case-insensitive match): {content[:100]}...")
 
             if end_node_messages:
-                chosen = end_node_messages[-1]
-                logger.info(f"✅ DEPLOYMENT: Using End node input from predecessor '{predecessor_name}'")
-                return chosen
+                chosen = end_node_messages[-1].strip()
+                if chosen:
+                    logger.info(f"✅ DEPLOYMENT: Using End node input from predecessor '{predecessor_name}': {chosen[:100]}...")
+                    return chosen
+                else:
+                    logger.warning(f"⚠️ DEPLOYMENT: Found messages but content is empty")
 
-            # As a final fallback, use last chat message
-            logger.warning("⚠️ DEPLOYMENT: No messages found for End node predecessor, using fallback")
+            # As a fallback, try to find the last agent message (before End node)
+            logger.warning(f"⚠️ DEPLOYMENT: No messages found for End node predecessor '{predecessor_name}', trying fallback")
+            
+            # Get all non-End, non-Start messages in reverse order
+            agent_messages = [
+                msg for msg in reversed(messages)
+                if isinstance(msg, dict)
+                and msg.get('agent_type') not in ['EndNode', 'StartNode']
+                and msg.get('agent_name') not in ['End', 'Start']
+                and (msg.get('content') or msg.get('message'))
+            ]
+            
+            logger.info(f"🔍 DEPLOYMENT: Found {len(agent_messages)} agent messages as fallback candidates")
+            
+            if agent_messages:
+                # Try each message until we find one with actual content
+                for msg in agent_messages:
+                    fallback_content = msg.get('content') or msg.get('message', '')
+                    if fallback_content and fallback_content.strip():
+                        logger.info(f"✅ DEPLOYMENT: Using agent message from '{msg.get('agent_name', 'unknown')}' as fallback: {fallback_content[:100]}...")
+                        return fallback_content.strip()
+                
+                logger.warning(f"⚠️ DEPLOYMENT: Agent messages found but all have empty content")
+            
+            # Final fallback: use last chat message
             fallback = self._get_last_chat_message(execution_result)
             if fallback:
+                logger.info(f"✅ DEPLOYMENT: Using _get_last_chat_message fallback: {fallback[:100]}...")
                 return fallback
-            return execution_result.get('result_summary', '') or execution_result.get('conversation_history', '')
+            
+            # Last resort: try to extract last response from conversation_history
+            conv_history = execution_result.get('conversation_history', '')
+            if conv_history:
+                logger.warning(f"⚠️ DEPLOYMENT: Attempting to extract response from conversation_history")
+                # Try to extract the last assistant response from conversation_history
+                # Format is typically: "Assistant: ...\nUser: ...\nAssistant: ..."
+                last_assistant_response = self._extract_last_assistant_from_history(conv_history)
+                if last_assistant_response:
+                    logger.info(f"✅ DEPLOYMENT: Extracted last assistant response from conversation_history: {last_assistant_response[:100]}...")
+                    return last_assistant_response
+                # If extraction fails, return the whole history (better than nothing)
+                logger.warning(f"⚠️ DEPLOYMENT: Could not extract response, returning full conversation_history")
+                return conv_history
+            
+            # Only return result_summary if absolutely nothing else is available
+            result_summary = execution_result.get('result_summary', '')
+            if result_summary:
+                logger.error(f"❌ DEPLOYMENT: All extraction methods failed, returning result_summary (this should not happen): {result_summary}")
+            return result_summary
 
         except Exception as e:
             logger.error(f"❌ DEPLOYMENT: Error extracting End node output: {e}", exc_info=True)
-            # Fallback to last assistant/chat message, then result_summary
+            # Fallback to last assistant/chat message
             fallback = self._get_last_chat_message(execution_result)
             if fallback:
                 return fallback
-            return execution_result.get('result_summary', '') or 'An error occurred while processing the response.'
+            # Try conversation_history
+            conv_history = execution_result.get('conversation_history', '')
+            if conv_history:
+                return conv_history
+            # Only use result_summary as absolute last resort
+            result_summary = execution_result.get('result_summary', '')
+            if result_summary:
+                logger.error(f"❌ DEPLOYMENT: Exception fallback returning result_summary (should not happen): {result_summary}")
+            return result_summary or 'An error occurred while processing the response.'
 
     def _get_last_chat_message(self, execution_result: Dict[str, Any]) -> str:
         """
@@ -219,22 +312,91 @@ class WorkflowDeploymentExecutor:
         try:
             messages = execution_result.get('messages') or []
             if not isinstance(messages, list) or not messages:
+                logger.warning(f"⚠️ DEPLOYMENT: No messages array or empty in execution_result")
                 return ''
 
-            # Prefer messages explicitly marked as chat
+            logger.debug(f"🔍 DEPLOYMENT: Checking {len(messages)} messages for chat content")
+            
+            # Prefer messages explicitly marked as chat (agent responses)
             chat_messages = [
                 m for m in messages
                 if isinstance(m, dict) and m.get('message_type') == 'chat'
             ]
-            candidates = chat_messages or [
-                m for m in messages if isinstance(m, dict)
-            ]
+            
+            logger.debug(f"🔍 DEPLOYMENT: Found {len(chat_messages)} chat messages")
+            
+            # If no chat messages, look for any non-End, non-Start messages
+            if not chat_messages:
+                candidates = [
+                    m for m in messages 
+                    if isinstance(m, dict) 
+                    and m.get('agent_type') not in ['EndNode', 'StartNode']
+                    and m.get('agent_name') not in ['End', 'Start']
+                ]
+                logger.debug(f"🔍 DEPLOYMENT: Found {len(candidates)} non-End/Start messages as fallback")
+            else:
+                candidates = chat_messages
+            
             if not candidates:
+                logger.warning(f"⚠️ DEPLOYMENT: No candidate messages found")
                 return ''
 
+            # Get the last candidate message
             last = candidates[-1]
-            return last.get('content', '') or last.get('message', '') or ''
+            content = last.get('content', '') or last.get('message', '') or ''
+            
+            if content:
+                logger.info(f"✅ DEPLOYMENT: Extracted chat message from agent '{last.get('agent_name', 'unknown')}': {content[:100]}...")
+            else:
+                logger.warning(f"⚠️ DEPLOYMENT: Last candidate message has no content: {last}")
+            
+            return content
         except Exception as e:
             logger.error(f"❌ DEPLOYMENT: Error extracting last chat message: {e}", exc_info=True)
+            return ''
+    
+    def _extract_last_assistant_from_history(self, conversation_history: str) -> str:
+        """
+        Extract the last assistant response from conversation_history string.
+        Format is typically: "Assistant: greeting\nUser: query1\nAssistant: response1\nUser: query2\nAssistant: response2"
+        
+        Returns the last Assistant: line content, or empty string if not found.
+        """
+        try:
+            if not conversation_history or not isinstance(conversation_history, str):
+                return ''
+            
+            lines = conversation_history.split('\n')
+            logger.debug(f"🔍 DEPLOYMENT: Extracting from conversation_history with {len(lines)} lines")
+            
+            # Look for the last line that starts with "Assistant:" or contains "AI Assistant"
+            for line in reversed(lines):
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                # Check for "Assistant:" prefix
+                if line.startswith('Assistant:'):
+                    content = line[len('Assistant:'):].strip()
+                    if content:
+                        logger.debug(f"✅ DEPLOYMENT: Found Assistant: response: {content[:100]}...")
+                        return content
+                
+                # Check for "AI Assistant" or node names like "AI Assistant 1:"
+                if ':' in line:
+                    parts = line.split(':', 1)
+                    if len(parts) == 2:
+                        first_part = parts[0].strip().lower()
+                        content = parts[1].strip()
+                        
+                        # Check if it's likely an assistant response (not a user query)
+                        if content and ('assistant' in first_part or 'ai' in first_part) and 'user' not in first_part:
+                            logger.debug(f"✅ DEPLOYMENT: Found assistant response from '{parts[0]}': {content[:100]}...")
+                            return content
+            
+            logger.warning(f"⚠️ DEPLOYMENT: Could not extract assistant response from conversation_history")
+            return ''
+        except Exception as e:
+            logger.error(f"❌ DEPLOYMENT: Error extracting last assistant from history: {e}", exc_info=True)
             return ''
 

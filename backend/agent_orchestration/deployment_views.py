@@ -6,6 +6,7 @@ import logging
 import json
 import uuid
 import hashlib
+import threading
 from datetime import datetime
 from typing import Dict, Any, Optional
 
@@ -15,6 +16,7 @@ from django.views.decorators.http import require_http_methods
 from django.utils import timezone
 from django.views.decorators.cache import never_cache
 from django.shortcuts import get_object_or_404
+from django.db import transaction
 from rest_framework import viewsets, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
@@ -37,11 +39,93 @@ from .deployment_rate_limiter import WorkflowDeploymentRateLimiter
 logger = logging.getLogger('workflow_deployment')
 
 
+def _save_deployment_data_async(
+    deployment_session,
+    conversation_history,
+    assistant_response,
+    execution_id,
+    deployment_request,
+    execution_result,
+    execution_time_ms,
+    workflow_execution_id,
+    user_query
+):
+    """
+    Background task to save deployment data after response is sent to client.
+    This function runs in a separate thread to avoid blocking the response.
+    """
+    from django.db import close_old_connections
+    
+    # Ensure fresh database connection for this thread
+    close_old_connections()
+    
+    try:
+        # Update session with assistant response
+        if assistant_response:
+            deployment_session.conversation_history = conversation_history
+            deployment_session.message_count = len(conversation_history)
+            deployment_session.last_activity = timezone.now()
+            deployment_session.save()
+            logger.info(f"💾 DEPLOYMENT: Updated session {deployment_session.session_id[:8]} with {deployment_session.message_count} messages (background)")
+        
+        # Try to get WorkflowExecution (non-blocking, optional)
+        workflow_execution = None
+        if workflow_execution_id:
+            try:
+                from users.models import WorkflowExecution
+                workflow_execution = WorkflowExecution.objects.filter(execution_id=workflow_execution_id).first()
+            except Exception as e:
+                logger.warning(f"⚠️ DEPLOYMENT: Could not link to WorkflowExecution {workflow_execution_id}: {e}")
+        
+        # Create DeploymentExecution record
+        try:
+            from .models import DeploymentExecution, WorkflowDeploymentRequestStatus
+            DeploymentExecution.objects.create(
+                execution_id=execution_id,
+                deployment_session=deployment_session,
+                workflow_execution=workflow_execution,
+                user_query=user_query,
+                assistant_response=assistant_response,
+                execution_time_ms=execution_time_ms,
+                status=(
+                    WorkflowDeploymentRequestStatus.SUCCESS
+                    if execution_result.get('status') == 'success'
+                    else WorkflowDeploymentRequestStatus.ERROR
+                ),
+                error_message=execution_result.get('error', '') if execution_result.get('status') != 'success' else None
+            )
+            logger.info(f"📝 DEPLOYMENT: Created execution record {execution_id[:8]} for session {deployment_session.session_id[:8]} (background)")
+        except Exception as e:
+            logger.error(f"❌ DEPLOYMENT: Failed to create execution record in background: {e}", exc_info=True)
+        
+        # Update tracking record
+        if deployment_request:
+            try:
+                deployment_request.response_generated = execution_result.get('status') == 'success'
+                deployment_request.status = (
+                    WorkflowDeploymentRequestStatus.SUCCESS
+                    if execution_result.get('status') == 'success'
+                    else WorkflowDeploymentRequestStatus.ERROR
+                )
+                deployment_request.execution_time_ms = execution_time_ms
+                if execution_result.get('error'):
+                    deployment_request.error_message = execution_result['error']
+                deployment_request.save()
+                logger.debug(f"📊 DEPLOYMENT: Updated request record {deployment_request.request_id[:8]} (background)")
+            except Exception as e:
+                logger.error(f"❌ DEPLOYMENT: Failed to update request record in background: {e}", exc_info=True)
+                
+    except Exception as e:
+        logger.error(f"❌ DEPLOYMENT: Error in background save task: {e}", exc_info=True)
+    finally:
+        # Clean up database connection for this thread
+        close_old_connections()
+
+
 class DeploymentViewSet(viewsets.ViewSet):
     """
     ViewSet for managing workflow deployments
     """
-    permission_classes = [IsAuthenticated]
     permission_classes = [IsAuthenticated]
     
     def retrieve(self, request, project_id=None):
@@ -722,11 +806,9 @@ def public_chat_endpoint(request, project_id):
         # Generate unique execution ID
         execution_id = f"deploy_exec_{timezone.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         
-        # Run async execution
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Run async execution - use asyncio.run() for better efficiency
         try:
-            execution_result = loop.run_until_complete(
+            execution_result = asyncio.run(
                 executor.execute_deployment_workflow(
                     deployment,
                     full_conversation,
@@ -734,73 +816,52 @@ def public_chat_endpoint(request, project_id):
                     execution_id
                 )
             )
-        finally:
-            loop.close()
+        except Exception as e:
+            logger.error(f"❌ DEPLOYMENT: Error executing workflow: {e}", exc_info=True)
+            return JsonResponse({
+                'status': 'error',
+                'error': 'Workflow execution failed',
+                'request_id': request_id
+            }, status=500)
         
         execution_time_ms = int((timezone.now() - start_time).total_seconds() * 1000)
         
         # Extract assistant response
         assistant_response = execution_result.get('response', '') if execution_result.get('status') == 'success' else ''
         
-        # Update session with assistant response
+        # Add assistant response to conversation history for background save
         if assistant_response:
             conversation_history.append({
                 'role': 'assistant',
                 'content': assistant_response,
                 'timestamp': timezone.now().isoformat()
             })
-            deployment_session.conversation_history = conversation_history
-            deployment_session.message_count = len(conversation_history)
-            deployment_session.last_activity = timezone.now()
-            deployment_session.save()
-            logger.info(f"💾 DEPLOYMENT: Updated session {session_id[:8]} with {deployment_session.message_count} messages")
         
-        # Create DeploymentExecution record
+        # Get workflow_execution_id for background task
         workflow_execution_id = execution_result.get('execution_id')
-        workflow_execution = None
-        if workflow_execution_id:
-            try:
-                from users.models import WorkflowExecution
-                workflow_execution = WorkflowExecution.objects.filter(execution_id=workflow_execution_id).first()
-            except Exception as e:
-                logger.warning(f"⚠️ DEPLOYMENT: Could not link to WorkflowExecution {workflow_execution_id}: {e}")
         
-        try:
-            deployment_execution = DeploymentExecution.objects.create(
-                execution_id=execution_id,
-                deployment_session=deployment_session,
-                workflow_execution=workflow_execution,
-                user_query=user_query,
-                assistant_response=assistant_response,
-                execution_time_ms=execution_time_ms,
-                status=(
-                    WorkflowDeploymentRequestStatus.SUCCESS
-                    if execution_result.get('status') == 'success'
-                    else WorkflowDeploymentRequestStatus.ERROR
-                ),
-                error_message=execution_result.get('error', '') if execution_result.get('status') != 'success' else None
-            )
-            logger.info(f"📝 DEPLOYMENT: Created execution record {execution_id[:8]} for session {session_id[:8]}")
-        except Exception as e:
-            logger.error(f"❌ DEPLOYMENT: Failed to create execution record: {e}", exc_info=True)
+        # Start background task to save all deployment data (non-blocking)
+        # This allows us to return the response immediately
+        background_thread = threading.Thread(
+            target=_save_deployment_data_async,
+            args=(
+                deployment_session,
+                conversation_history,
+                assistant_response,
+                execution_id,
+                deployment_request,
+                execution_result,
+                execution_time_ms,
+                workflow_execution_id,
+                user_query
+            ),
+            daemon=True,
+            name=f"deploy-save-{execution_id[:8]}"
+        )
+        background_thread.start()
+        logger.debug(f"🚀 DEPLOYMENT: Started background save task for execution {execution_id[:8]}")
         
-        # Update tracking record
-        if deployment_request:
-            try:
-                deployment_request.response_generated = execution_result.get('status') == 'success'
-                deployment_request.status = (
-                    WorkflowDeploymentRequestStatus.SUCCESS
-                    if execution_result.get('status') == 'success'
-                    else WorkflowDeploymentRequestStatus.ERROR
-                )
-                deployment_request.execution_time_ms = execution_time_ms
-                if execution_result.get('error'):
-                    deployment_request.error_message = execution_result['error']
-                deployment_request.save()
-            except Exception as e:
-                logger.error(f"❌ DEPLOYMENT: Failed to update request record: {e}")
-        
-        # Return response
+        # Return response immediately (don't wait for database writes)
         if execution_result.get('status') == 'success':
             return JsonResponse({
                 'status': 'success',
