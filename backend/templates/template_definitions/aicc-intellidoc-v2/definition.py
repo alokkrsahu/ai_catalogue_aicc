@@ -91,10 +91,10 @@ Navigate through different pages to access various features and capabilities.'''
                 },
                 {
                     'page_number': 4,
-                    'name': 'Export',
-                    'short_name': 'Export',
-                    'icon': 'fa-download',
-                    'features': ['advanced_search', 'content_reconstruction', 'export_options']
+                    'name': 'Deploy',
+                    'short_name': 'Deploy',
+                    'icon': 'fa-rocket',
+                    'features': ['workflow_deployment', 'public_endpoint', 'origin_management', 'rate_limiting']
                 }
             ],
             'processing_capabilities': {

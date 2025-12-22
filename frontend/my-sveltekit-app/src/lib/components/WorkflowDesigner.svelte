@@ -1205,6 +1205,18 @@
       return;
     }
     
+    // ✅ END NODE VALIDATION: Only one incoming edge allowed
+    if (target.type === 'EndNode') {
+      const incomingToEnd = edges.filter(edge => edge.target === target.id);
+      if (incomingToEnd.length >= 1) {
+        console.log('❌ CANVAS: End node already has an incoming connection');
+        if (toasts && toasts.error) {
+          toasts.error('End node can only receive input from a single agent');
+        }
+        return;
+      }
+    }
+    
     // ✅ DELEGATE CONNECTION VALIDATION
     if (source.type === 'DelegateAgent' && target.type !== 'GroupChatManager') {
       console.log('❌ CANVAS: Delegate agents can only connect to GroupChatManager');

@@ -931,19 +931,35 @@
     {/if}
     
     {#if hasNavigation && currentPage === 4}
-      <!-- Page 4: Coming Soon -->
-      <div class="flex items-center justify-center min-h-96">
-        <div class="text-center">
-          <div class="w-16 h-16 bg-oxford-blue text-white rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
-            <i class="fas fa-lightbulb text-2xl"></i>
+      <!-- Page 4: Deploy -->
+      <div class="deploy-page h-full flex-1 w-full">
+        {#await import('$lib/components/WorkflowDeployment.svelte')}
+          <div class="flex items-center justify-center min-h-96">
+            <div class="text-center">
+              <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
+              <p class="text-oxford-blue">Loading Deploy...</p>
+            </div>
           </div>
-          <h2 class="text-xl font-bold text-gray-900 mb-2">Page 4</h2>
-          <p class="text-gray-600 mb-4">Coming Soon</p>
-          <div class="inline-flex items-center px-4 py-2 bg-gray-100 text-gray-600 rounded-lg text-sm">
-            <i class="fas fa-clock mr-2"></i>
-            This feature is under development
+        {:then WorkflowDeploymentModule}
+          <svelte:component this={WorkflowDeploymentModule.default} {project} {projectId} />
+        {:catch error}
+          <div class="flex items-center justify-center min-h-96">
+            <div class="text-center">
+              <div class="w-16 h-16 bg-red-100 text-red-600 rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
+                <i class="fas fa-exclamation-triangle text-2xl"></i>
+              </div>
+              <h2 class="text-xl font-bold text-gray-900 mb-2">Loading Error</h2>
+              <p class="text-gray-600">Failed to load deployment interface.</p>
+              <button 
+                class="mt-4 px-4 py-2 bg-oxford-blue text-white rounded-md hover:bg-oxford-blue-dark transition-colors"
+                on:click={() => window.location.reload()}
+              >
+                <i class="fas fa-refresh mr-2"></i>
+                Retry
+              </button>
+            </div>
           </div>
-        </div>
+        {/await}
       </div>
     {/if}
     

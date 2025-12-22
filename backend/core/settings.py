@@ -97,6 +97,9 @@ MIDDLEWARE = [
     # Custom CORS middleware for public chatbot (HIGHEST priority)
     'public_chatbot.middleware.cors.PublicChatbotCORSMiddleware',
     
+    # Custom CORS middleware for workflow deployments (HIGH priority)
+    'agent_orchestration.middleware.deployment_cors.WorkflowDeploymentCORSMiddleware',
+    
     # CORS middleware should be placed as high as possible
     'corsheaders.middleware.CorsMiddleware',
     

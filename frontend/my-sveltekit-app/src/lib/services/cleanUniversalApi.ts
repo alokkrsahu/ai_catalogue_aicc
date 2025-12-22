@@ -928,6 +928,158 @@ export class CleanUniversalApiService {
     console.log(`✅ UNIVERSAL: Retrieved evaluation results with ${result.results?.length || 0} rows`);
     return result;
   }
+
+  // ============================================================================
+  // WORKFLOW DEPLOYMENT
+  // ============================================================================
+
+  /**
+   * Get deployment configuration for a project
+   */
+  async getDeployment(projectId: string): Promise<any> {
+    console.log(`🚀 DEPLOYMENT: Getting deployment for project ${projectId}`);
+    
+    const response = await this.handleAuthenticatedRequest(`${API_BASE}/agent-orchestration/projects/${projectId}/deployment/`, {
+      method: 'GET',
+      headers: this.getAuthHeaders(),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Get deployment failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+    console.log('✅ DEPLOYMENT: Retrieved deployment configuration');
+    return result;
+  }
+
+  /**
+   * Create or update deployment configuration
+   */
+  async updateDeployment(projectId: string, deploymentData: any): Promise<any> {
+    console.log(`💾 DEPLOYMENT: Updating deployment for project ${projectId}`);
+    
+    const response = await this.handleAuthenticatedRequest(`${API_BASE}/agent-orchestration/projects/${projectId}/deployment/`, {
+      method: 'POST',
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify(deploymentData),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Update deployment failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+    console.log('✅ DEPLOYMENT: Deployment updated successfully');
+    return result;
+  }
+
+  /**
+   * Toggle deployment active status
+   */
+  async toggleDeployment(projectId: string): Promise<any> {
+    console.log(`🔄 DEPLOYMENT: Toggling deployment for project ${projectId}`);
+    
+    const response = await this.handleAuthenticatedRequest(`${API_BASE}/agent-orchestration/projects/${projectId}/deployment/toggle/`, {
+      method: 'PATCH',
+      headers: this.getAuthHeaders(),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Toggle deployment failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+    console.log('✅ DEPLOYMENT: Deployment toggled successfully');
+    return result;
+  }
+
+  /**
+   * Get allowed origins for deployment
+   */
+  async getAllowedOrigins(projectId: string): Promise<any> {
+    console.log(`🌍 DEPLOYMENT: Getting allowed origins for project ${projectId}`);
+    
+    const response = await this.handleAuthenticatedRequest(`${API_BASE}/agent-orchestration/projects/${projectId}/deployment/origins/`, {
+      method: 'GET',
+      headers: this.getAuthHeaders(),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Get allowed origins failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+    console.log('✅ DEPLOYMENT: Retrieved allowed origins');
+    return result;
+  }
+
+  /**
+   * Add allowed origin
+   */
+  async addAllowedOrigin(projectId: string, originData: any): Promise<any> {
+    console.log(`➕ DEPLOYMENT: Adding origin for project ${projectId}`);
+    
+    const response = await this.handleAuthenticatedRequest(`${API_BASE}/agent-orchestration/projects/${projectId}/deployment/origins/`, {
+      method: 'POST',
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify(originData),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Add origin failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+    console.log('✅ DEPLOYMENT: Origin added successfully');
+    return result;
+  }
+
+  /**
+   * Remove allowed origin
+   */
+  async removeAllowedOrigin(projectId: string, originId: number): Promise<void> {
+    console.log(`🗑️ DEPLOYMENT: Removing origin ${originId} for project ${projectId}`);
+    
+    const response = await this.handleAuthenticatedRequest(`${API_BASE}/agent-orchestration/projects/${projectId}/deployment/origins/${originId}/`, {
+      method: 'DELETE',
+      headers: this.getAuthHeaders(),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Remove origin failed: ${response.status}`);
+    }
+
+    console.log('✅ DEPLOYMENT: Origin removed successfully');
+  }
+
+  /**
+   * Update origin rate limit
+   */
+  async updateOriginRateLimit(projectId: string, originId: number, originData: any): Promise<any> {
+    console.log(`🔄 DEPLOYMENT: Updating origin ${originId} for project ${projectId}`);
+    
+    const response = await this.handleAuthenticatedRequest(`${API_BASE}/agent-orchestration/projects/${projectId}/deployment/origins/${originId}/`, {
+      method: 'PATCH',
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify(originData),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Update origin failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+    console.log('✅ DEPLOYMENT: Origin updated successfully');
+    return result;
+  }
 }
 
 // Export singleton instance

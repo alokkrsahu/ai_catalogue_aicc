@@ -211,6 +211,9 @@ urlpatterns = [
     # 🤖 PHASE 3: Agent Orchestration DocAware API
     path('api/agent-orchestration/', include('agent_orchestration.workflow_urls')),
     
+    # 🚀 Workflow Deployment API
+    path('', include('agent_orchestration.deployment_urls')),
+    
     # 🔑 PROJECT-SPECIFIC API KEY MANAGEMENT
     path('api/project-api-keys/', include('project_api_keys.urls')),
     
