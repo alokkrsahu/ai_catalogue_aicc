@@ -66,12 +66,12 @@ Navigate through different pages to access various features and capabilities.'''
             'icon_class': 'fa-sitemap',
             'color_theme': 'oxford-blue',
             'has_navigation': True,
-            'total_pages': 4,
+            'total_pages': 5,
             'navigation_pages': [
                 {
                     'page_number': 1,
-                    'name': 'Overview',
-                    'short_name': 'Overview',
+                    'name': 'Project Documents',
+                    'short_name': 'Documents',
                     'icon': 'fa-home',
                     'features': ['document_management', 'upload_interface', 'processing_status']
                 },
@@ -95,6 +95,13 @@ Navigate through different pages to access various features and capabilities.'''
                     'short_name': 'Deploy',
                     'icon': 'fa-rocket',
                     'features': ['workflow_deployment', 'public_endpoint', 'origin_management', 'rate_limiting']
+                },
+                {
+                    'page_number': 5,
+                    'name': 'Activity Tracker',
+                    'short_name': 'Activity',
+                    'icon': 'fa-chart-line',
+                    'features': ['deployment_activity', 'session_tracking', 'analytics']
                 }
             ],
             'processing_capabilities': {

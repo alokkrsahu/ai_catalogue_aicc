@@ -36,6 +36,7 @@ def run_processing_in_background(project_id: str, processing_mode: str = 'enhanc
         
         # Clean up thread reference
         if project_id in PROCESSING_THREADS:
+            logger.info(f"📦 PROJECT ISOLATION: Cleaning up processing thread for project {project_id}")
             del PROCESSING_THREADS[project_id]
             
     except Exception as e:
@@ -43,6 +44,7 @@ def run_processing_in_background(project_id: str, processing_mode: str = 'enhanc
         logger.error(f"Enhanced background processing failed for project {project_id}: {e}")
         # Clean up thread reference
         if project_id in PROCESSING_THREADS:
+            logger.info(f"📦 PROJECT ISOLATION: Cleaning up failed processing thread for project {project_id}")
             del PROCESSING_THREADS[project_id]
 
 @api_view(['POST'])
@@ -76,6 +78,7 @@ def start_processing(request, project_id):
         
         # Store thread reference
         PROCESSING_THREADS[project_id] = processing_thread
+        logger.info(f"📦 PROJECT ISOLATION: Started processing thread for project {project_id} (Total active threads: {len(PROCESSING_THREADS)})")
         
         # Give a small delay to let processing start
         time.sleep(0.5)

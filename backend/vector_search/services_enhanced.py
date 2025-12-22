@@ -19,10 +19,20 @@ class EnhancedProjectVectorSearchService:
     
     def __init__(self, project_id: str):
         self.project_id = project_id
+        # Load project object (required for processor initialization)
+        from users.models import IntelliDocProject
+        try:
+            self.project = IntelliDocProject.objects.get(project_id=project_id)
+        except IntelliDocProject.DoesNotExist:
+            logger.error(f"❌ Project {project_id} not found")
+            raise ValueError(f"Project {project_id} not found")
+        
         # Use singleton embedder instead of creating new instances
         from .embeddings import get_embedder_instance
         self.embedder = get_embedder_instance()
-        self.processor = EnhancedHierarchicalProcessor(self.embedder)
+        
+        # Pass project as first argument, embedder as keyword argument
+        self.processor = EnhancedHierarchicalProcessor(self.project, embedder=self.embedder)
         self.vector_db = EnhancedHierarchicalVectorDatabase(project_id)
         self.stop_processing = False
         self.processing_thread = None
@@ -431,16 +441,20 @@ class EnhancedProjectVectorSearchService:
             # Get project
             from users.models import IntelliDocProject
             project = IntelliDocProject.objects.get(project_id=self.project_id)
+            logger.debug(f"📊 STATUS: Getting processing status for project {self.project_id} ({project.name})")
             
             # Get total documents in project
             total_documents = ProjectDocument.objects.filter(project=project).count()
+            logger.debug(f"📊 STATUS: Total documents in project: {total_documents}")
             
             # Get current processing control status
             control_status = PROCESSING_CONTROL.get(self.project_id, {})
+            logger.debug(f"📊 STATUS: Processing control status: {control_status}")
             
             try:
                 # Get collection
                 collection = ProjectVectorCollection.objects.get(project=project)
+                logger.debug(f"📊 STATUS: Found collection {collection.collection_name} with status: {collection.status}")
                 
                 # Get document statuses
                 document_statuses = DocumentVectorStatus.objects.filter(collection=collection)
@@ -459,9 +473,14 @@ class EnhancedProjectVectorSearchService:
                     project=project
                 ).exclude(id__in=processed_doc_ids).count()
                 
+                # Normalize status to lowercase for frontend compatibility
+                raw_status = collection.status
+                normalized_status = raw_status.lower() if raw_status else 'not_created'
+                logger.debug(f"📊 STATUS: Normalized status '{raw_status}' -> '{normalized_status}'")
+                
                 return {
                     'project_id': self.project_id,
-                    'collection_status': collection.status,
+                    'collection_status': normalized_status,  # Return normalized lowercase status
                     'collection_name': collection.collection_name,
                     'total_documents': total_documents,
                     'unprocessed_documents': unprocessed_count,
@@ -479,9 +498,10 @@ class EnhancedProjectVectorSearchService:
                 }
                 
             except ProjectVectorCollection.DoesNotExist:
+                logger.info(f"📊 STATUS: No collection found for project {self.project_id}, returning NOT_CREATED")
                 return {
                     'project_id': self.project_id,
-                    'collection_status': 'NOT_CREATED',
+                    'collection_status': 'not_created',  # Normalize to lowercase
                     'collection_name': None,
                     'total_documents': total_documents,
                     'unprocessed_documents': total_documents,
@@ -504,10 +524,14 @@ class EnhancedProjectVectorSearchService:
                 }
                 
         except Exception as e:
-            logger.error(f"Failed to get processing status for project {self.project_id}: {e}")
+            logger.error(f"❌ STATUS: Failed to get processing status for project {self.project_id}: {e}")
+            logger.exception(e)  # Log full exception traceback
             return {
                 'project_id': self.project_id,
-                'error': str(e)
+                'collection_status': 'error',  # Return error status instead of missing field
+                'error': str(e),
+                'processing_progress': {'completed': 0, 'total': 0, 'percentage': 0},
+                'is_processing': False
             }
 
 class EnhancedVectorSearchManager:

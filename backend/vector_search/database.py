@@ -67,14 +67,19 @@ class MilvusProjectVectorDatabase:
             # Append project ID to ensure uniqueness
             collection_name = f"{sanitized_name}_{project_id.replace('-', '_')}"
             
-            logger.info(f"Generated collection name: {collection_name} for project '{project.name}'")
+            logger.info(f"📦 PROJECT ISOLATION: Generated collection name: {collection_name} for project '{project.name}' (ID: {project_id})")
+            # Validate collection name uniqueness
+            if not collection_name or len(collection_name) < 10:
+                logger.warning(f"⚠️ PROJECT ISOLATION: Collection name seems too short: {collection_name}")
             return collection_name
             
         except Exception as e:
             logger.warning(f"Failed to get project name for {project_id}: {e}")
             logger.warning(f"Falling back to generic collection name")
             # Fallback to original pattern if project lookup fails
-            return f"project_{project_id.replace('-', '_')}"
+            fallback_name = f"project_{project_id.replace('-', '_')}"
+            logger.info(f"📦 PROJECT ISOLATION: Using fallback collection name: {fallback_name}")
+            return fallback_name
     
     def _connect_to_milvus(self):
         """Connect to Milvus database with robust connection handling"""

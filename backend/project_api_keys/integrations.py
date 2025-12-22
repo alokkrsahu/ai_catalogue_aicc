@@ -29,6 +29,12 @@ class ProjectAPIKeyIntegration:
         Returns:
             OpenAI client instance or None if no key is configured
         """
+        # Type validation to prevent passing wrong object types
+        if not isinstance(project, IntelliDocProject):
+            error_msg = f"❌ Invalid project type: expected IntelliDocProject, got {type(project).__name__}"
+            logger.error(error_msg)
+            raise TypeError(error_msg)
+        
         try:
             api_key = self.api_key_service.get_project_api_key(project, 'openai')
             if not api_key:
@@ -42,8 +48,13 @@ class ProjectAPIKeyIntegration:
             logger.info(f"✅ OpenAI client configured for project {project.name}")
             return client
             
+        except TypeError:
+            # Re-raise TypeError (type validation errors)
+            raise
         except Exception as e:
-            logger.error(f"❌ Failed to create OpenAI client for project {project.name}: {e}")
+            # Safe error logging - check if project has name attribute
+            project_name = getattr(project, 'name', f'<{type(project).__name__}>')
+            logger.error(f"❌ Failed to create OpenAI client for project {project_name}: {e}")
             return None
     
     def get_google_client_config_for_project(self, project: IntelliDocProject) -> Optional[Dict[str, Any]]:

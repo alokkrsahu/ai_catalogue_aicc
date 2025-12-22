@@ -32,6 +32,12 @@ class ProjectAPIKeyService:
         Returns:
             Decrypted API key or None if not found/inactive
         """
+        # Type validation to prevent passing wrong object types
+        if not isinstance(project, IntelliDocProject):
+            error_msg = f"❌ Invalid project type: expected IntelliDocProject, got {type(project).__name__}"
+            logger.error(error_msg)
+            raise TypeError(error_msg)
+        
         try:
             api_key_obj = ProjectAPIKey.objects.get(
                 project=project,
@@ -56,8 +62,13 @@ class ProjectAPIKeyService:
         except ObjectDoesNotExist:
             logger.warning(f"⚠️ No active API key found for project {project.name} - {provider_type}")
             return None
+        except TypeError:
+            # Re-raise TypeError (type validation errors)
+            raise
         except Exception as e:
-            logger.error(f"❌ Failed to retrieve API key for project {project.name} - {provider_type}: {e}")
+            # Safe error logging - project is validated above, but be defensive
+            project_name = getattr(project, 'name', f'<{type(project).__name__}>')
+            logger.error(f"❌ Failed to retrieve API key for project {project_name} - {provider_type}: {e}")
             return None
 
     async def get_project_api_key_async(self, project: IntelliDocProject, provider_type: str) -> Optional[str]:

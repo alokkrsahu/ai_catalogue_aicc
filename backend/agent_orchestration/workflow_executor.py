@@ -489,6 +489,14 @@ class WorkflowExecutor:
                                 raise Exception(f"Agent {node_name} error: {agent_response.error}")
                             
                             agent_response_text = agent_response.text.strip()
+                            
+                            # Check for empty response - this is an error condition
+                            if not agent_response_text:
+                                error_msg = f"Agent {node_name} returned an empty response. This indicates an LLM error or configuration issue."
+                                logger.error(f"❌ ORCHESTRATOR: {error_msg}")
+                                logger.error(f"❌ ORCHESTRATOR: LLM Provider: {type(llm_provider).__name__}, Model: {node_config.get('llm_model', 'unknown')}")
+                                raise Exception(error_msg)
+                            
                             logger.info(f"✅ ORCHESTRATOR: Agent {node_name} completed successfully - response length: {len(agent_response_text)} chars")
                             logger.info(f"🔍 DEBUG: Raw agent response for {node_name}: {agent_response_text[:200]}...")
                             

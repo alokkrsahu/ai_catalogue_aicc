@@ -345,19 +345,30 @@ class UnifiedVectorSearchManager:
                 logger.info(f"Status verification: completed={completed_docs}, failed={failed_docs}, total={actual_doc_count}")
                 
                 # Only set as COMPLETED if all documents are processed and non-zero
-                if completed_docs > 0 and completed_docs == actual_doc_count:
+                if actual_doc_count == 0:
+                    # No documents to process
+                    status_to_set = VectorProcessingStatus.PENDING
+                    logger.info(f"Setting status to PENDING (no documents in project)")
+                elif completed_docs > 0 and completed_docs == actual_doc_count:
+                    # All documents completed successfully
                     status_to_set = VectorProcessingStatus.COMPLETED
-                    logger.info(f"Setting status to COMPLETED based on document status verification")
+                    logger.info(f"✅ Setting status to COMPLETED: all {completed_docs}/{actual_doc_count} documents processed successfully")
                 elif failed_docs > 0 and (completed_docs + failed_docs) == actual_doc_count:
+                    # All documents processed, but some failed
                     status_to_set = VectorProcessingStatus.FAILED
-                    logger.info(f"Setting status to FAILED based on document status verification")
+                    logger.info(f"❌ Setting status to FAILED: {failed_docs} documents failed, {completed_docs} completed")
                 elif completed_docs > 0 or failed_docs > 0:
+                    # Some documents still processing or pending
                     status_to_set = VectorProcessingStatus.PROCESSING
-                    logger.info(f"Setting status to PROCESSING based on document status verification")
+                    logger.info(f"🔄 Setting status to PROCESSING: {completed_docs} completed, {failed_docs} failed, {actual_doc_count - completed_docs - failed_docs} pending")
                 else:
                     # If no document statuses yet, use provided counts
-                    status_to_set = VectorProcessingStatus.COMPLETED if processed > 0 and failed == 0 else VectorProcessingStatus.PROCESSING
-                    logger.info(f"Setting status based on provided counts: {status_to_set}")
+                    if processed > 0 and failed == 0:
+                        status_to_set = VectorProcessingStatus.COMPLETED
+                        logger.info(f"✅ Setting status to COMPLETED based on provided counts: {processed} processed, {failed} failed")
+                    else:
+                        status_to_set = VectorProcessingStatus.PROCESSING
+                        logger.info(f"🔄 Setting status to PROCESSING based on provided counts: {processed} processed, {failed} failed")
                 
                 # Update the collection with verified status
                 collection.total_documents = actual_doc_count
@@ -367,7 +378,9 @@ class UnifiedVectorSearchManager:
                 collection.status = status_to_set
                 collection.save()
                 
-                logger.info(f"Collection status updated: {collection.status}")
+                # Verify the save was successful
+                collection.refresh_from_db()
+                logger.info(f"✅ Collection status updated and verified: {collection.status} (processed={completed_docs}, failed={failed_docs}, total={actual_doc_count})")
             
             # Verify the update was saved correctly
             collection.refresh_from_db()

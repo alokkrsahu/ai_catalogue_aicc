@@ -308,23 +308,100 @@ def get_vector_status_consolidated(request, project_id):
     """
     try:
         project = get_object_or_404(IntelliDocProject, project_id=project_id)
+        logger.debug(f"📊 CONSOLIDATED: Getting status for project {project_id} ({project.name})")
         
         # Get status from enhanced manager
         try:
+            logger.debug(f"📊 CONSOLIDATED: Attempting to get status via EnhancedVectorSearchManager")
             status_data = EnhancedVectorSearchManager.get_project_processing_status(project_id)
+            logger.debug(f"📊 CONSOLIDATED: Successfully retrieved status: collection_status={status_data.get('collection_status')}, is_processing={status_data.get('is_processing')}")
         except Exception as e:
-            logger.warning(f"⚠️ CONSOLIDATED: Could not get enhanced status, using basic: {e}")
-            status_data = {
-                'collection_status': 'UNKNOWN',
-                'processing_progress': {'completed': 0},
-                'total_documents': project.documents.count(),
-                'is_processing': False
-            }
+            logger.warning(f"⚠️ CONSOLIDATED: Could not get enhanced status, querying database directly: {e}")
+            logger.exception(e)  # Log full exception for debugging
+            
+            # Fallback: Query database directly instead of returning UNKNOWN
+            from users.models import ProjectVectorCollection, DocumentVectorStatus, VectorProcessingStatus
+            try:
+                collection = ProjectVectorCollection.objects.get(project=project)
+                total_docs = project.documents.count()
+                ready_docs = project.documents.filter(upload_status='ready').count()
+                
+                # Count document statuses
+                doc_statuses = DocumentVectorStatus.objects.filter(collection=collection)
+                completed_count = doc_statuses.filter(status=VectorProcessingStatus.COMPLETED).count()
+                failed_count = doc_statuses.filter(status=VectorProcessingStatus.FAILED).count()
+                processing_count = doc_statuses.filter(status=VectorProcessingStatus.PROCESSING).count()
+                
+                # Determine if processing is active
+                is_processing = (processing_count > 0) or (project_id in PROCESSING_THREADS and PROCESSING_THREADS[project_id].is_alive())
+                
+                # Normalize status to lowercase for frontend
+                collection_status = collection.status.lower() if collection.status else 'not_created'
+                
+                logger.info(f"📊 CONSOLIDATED FALLBACK: Collection status={collection.status}, completed={completed_count}, total={total_docs}")
+                
+                status_data = {
+                    'collection_status': collection_status,
+                    'processing_progress': {
+                        'completed': completed_count,
+                        'total': total_docs,
+                        'percentage': (completed_count / total_docs * 100) if total_docs > 0 else 0
+                    },
+                    'total_documents': total_docs,
+                    'ready_documents': ready_docs,
+                    'is_processing': is_processing,
+                    'last_processed_at': collection.last_processed_at.isoformat() if collection.last_processed_at else None
+                }
+            except ProjectVectorCollection.DoesNotExist:
+                logger.info(f"📊 CONSOLIDATED FALLBACK: No collection found for project {project_id}")
+                total_docs = project.documents.count()
+                status_data = {
+                    'collection_status': 'not_created',
+                    'processing_progress': {'completed': 0, 'total': total_docs, 'percentage': 0},
+                    'total_documents': total_docs,
+                    'ready_documents': project.documents.filter(upload_status='ready').count(),
+                    'is_processing': False,
+                    'last_processed_at': None
+                }
+            except Exception as db_error:
+                logger.error(f"❌ CONSOLIDATED FALLBACK: Database query also failed: {db_error}")
+                logger.exception(db_error)
+                # Last resort fallback
+                total_docs = project.documents.count()
+                status_data = {
+                    'collection_status': 'error',
+                    'processing_progress': {'completed': 0, 'total': total_docs, 'percentage': 0},
+                    'total_documents': total_docs,
+                    'ready_documents': project.documents.filter(upload_status='ready').count(),
+                    'is_processing': False,
+                    'last_processed_at': None
+                }
         
         # Format comprehensive status response
         vector_count = status_data.get('processing_progress', {}).get('completed', 0)
         total_documents = status_data.get('total_documents', 0)
         ready_documents = project.documents.filter(upload_status='ready').count()
+        
+        # Normalize status to lowercase for frontend compatibility
+        raw_status = status_data.get('collection_status', 'NOT_CREATED')
+        if isinstance(raw_status, str):
+            normalized_status = raw_status.lower()
+        else:
+            normalized_status = str(raw_status).lower() if raw_status else 'not_created'
+        
+        # Map common status values
+        status_mapping = {
+            'completed': 'completed',
+            'processing': 'processing',
+            'pending': 'pending',
+            'failed': 'failed',
+            'not_created': 'not_created',
+            'error': 'error',
+            'unknown': 'unknown'
+        }
+        normalized_status = status_mapping.get(normalized_status, normalized_status)
+        
+        logger.debug(f"📊 CONSOLIDATED: Normalized status '{raw_status}' -> '{normalized_status}' for project {project_id}")
         
         consolidated_status = {
             'project_id': project_id,
@@ -334,8 +411,8 @@ def get_vector_status_consolidated(request, project_id):
                 'vector_count': vector_count,
                 'total_documents': total_documents,
                 'ready_documents': ready_documents,
-                'collection_status': status_data.get('collection_status', 'NOT_CREATED'),
-                'processing_status': status_data.get('collection_status', 'ready'),
+                'collection_status': normalized_status,
+                'processing_status': normalized_status,  # Use normalized status for processing_status too
                 'is_processing': status_data.get('is_processing', False)
             },
             'processing_capabilities': project.processing_capabilities or {},
@@ -352,6 +429,7 @@ def get_vector_status_consolidated(request, project_id):
         
     except Exception as e:
         logger.error(f"❌ CONSOLIDATED: Failed to get status for project {project_id}: {e}")
+        logger.exception(e)  # Log full exception traceback
         return Response({
             'project_id': project_id,
             'vector_status': {
@@ -359,8 +437,8 @@ def get_vector_status_consolidated(request, project_id):
                 'vector_count': 0,
                 'total_documents': 0,
                 'ready_documents': 0,
-                'collection_status': 'ERROR',
-                'processing_status': 'error',
+                'collection_status': 'error',  # Normalize to lowercase
+                'processing_status': 'error',  # Normalize to lowercase
                 'is_processing': False
             },
             'error': str(e)

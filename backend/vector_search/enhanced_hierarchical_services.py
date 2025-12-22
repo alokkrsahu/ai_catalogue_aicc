@@ -30,7 +30,8 @@ class EnhancedHierarchicalVectorSearchManager:
             # Initialize components
             from .embeddings import get_embedder_instance
             embedder = get_embedder_instance()
-            processor = EnhancedHierarchicalProcessor(embedder, max_chunk_size=35000)
+            # Pass project as first argument, embedder as keyword argument
+            processor = EnhancedHierarchicalProcessor(project, embedder=embedder, max_chunk_size=35000)
             database = EnhancedHierarchicalVectorDatabase(project_id)
             
             # Get project documents

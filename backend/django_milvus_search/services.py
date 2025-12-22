@@ -216,6 +216,9 @@ class MilvusSearchService:
                 
                 if self.enable_monitoring:
                     logger.info(f"Search completed in {search_time:.4f}s, found {total_results} results")
+                    # Log project isolation info if collection name contains project ID
+                    if request.collection_name and '_' in request.collection_name:
+                        logger.debug(f"📦 PROJECT ISOLATION: Search performed on collection {request.collection_name} (thread-safe)")
                 
                 return result_obj
                 

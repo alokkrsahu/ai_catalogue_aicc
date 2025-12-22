@@ -44,7 +44,7 @@ class ConversationOrchestrator:
         # Initialize all specialized handlers
         self.llm_provider_manager = LLMProviderManager()
         self.workflow_parser = WorkflowParser()
-        self.docaware_handler = DocAwareHandler()
+        self.docaware_handler = DocAwareHandler(self.llm_provider_manager)
         
         # Initialize reflection handler with LLM provider manager
         self.reflection_handler = ReflectionHandler(self.llm_provider_manager)

@@ -37,6 +37,12 @@ class EnhancedDocAwareAgentService:
             self.project = IntelliDocProject.objects.get(project_id=project_id)
             self.collection_name = self.project.generate_collection_name()
             logger.info(f"📚 ENHANCED RAG: Loaded project {self.project.name}, collection: {self.collection_name}")
+            # Validate collection name matches project
+            expected_collection = self.project.generate_collection_name()
+            if self.collection_name != expected_collection:
+                logger.warning(f"⚠️ PROJECT ISOLATION: Collection name mismatch! Expected: {expected_collection}, Got: {self.collection_name}")
+                self.collection_name = expected_collection
+            logger.info(f"📦 PROJECT ISOLATION: DocAware service initialized for project {project_id} with collection {self.collection_name}")
         except IntelliDocProject.DoesNotExist:
             logger.error(f"📚 ENHANCED RAG: Project {project_id} not found")
             raise ValueError(f"Project {project_id} not found")

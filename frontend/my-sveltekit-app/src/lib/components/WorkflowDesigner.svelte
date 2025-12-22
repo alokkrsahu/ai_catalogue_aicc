@@ -951,7 +951,6 @@
           description: 'Specialized delegate for Chat Manager',
           system_message: 'You are a specialized delegate agent.',
           llm_config: 'gpt-4',
-          number_of_iterations: 5,
           termination_condition: 'FINISH',
           can_only_connect_to: 'GroupChatManager'
         };
@@ -1236,12 +1235,10 @@
     }
     
     // Determine connection type based on agent types
+    // GroupChatManager-DelegateAgent connections always use 'sequential' type
     let connectionType = 'sequential';
-    if (source.type === 'GroupChatManager' && target.type === 'DelegateAgent') {
-      connectionType = 'delegate';
-    } else if (target.type === 'GroupChatManager' && source.type === 'DelegateAgent') {
-      connectionType = 'delegate_return';
-    }
+    // Note: GroupChatManager-DelegateAgent connections are always sequential
+    // The 'delegate' and 'delegate_return' types are no longer used
     
     const newConnection = {
       id: `${source.id}-${target.id}`,
@@ -1492,6 +1489,20 @@
   
   function handleConnectionClick(connection: any) {
     console.log('🔧 Opening connection properties for:', connection.id.slice(-8));
+    
+    // Find source and target nodes
+    const sourceNode = nodes.find(n => n.id === connection.source);
+    const targetNode = nodes.find(n => n.id === connection.target);
+    
+    // Don't show properties for GroupChatManager <-> DelegateAgent connections
+    if ((sourceNode?.type === 'GroupChatManager' && targetNode?.type === 'DelegateAgent') ||
+        (sourceNode?.type === 'DelegateAgent' && targetNode?.type === 'GroupChatManager')) {
+      console.log('🔧 Connection properties disabled for GroupChatManager-DelegateAgent connection');
+      if (toasts && toasts.info) {
+        toasts.info('Connection properties are not configurable for GroupChatManager-DelegateAgent connections. They default to Sequential.');
+      }
+      return; // Don't show properties panel
+    }
     
     // Clear any selected node
     selectedNode = null;
@@ -1947,7 +1958,7 @@
                       {node.data?.name || node.data?.label || node.type}
                     </div>
                     <div class="text-xs text-gray-600 truncate">
-                      {node.type === 'DelegateAgent' ? `Specialized Agent • Max ${node.data?.number_of_iterations || 5} iterations` : node.type}
+                      {node.type === 'DelegateAgent' ? 'Specialized Agent' : node.type}
                     </div>
                     <div class="text-xs text-gray-500 mt-1">
                       <i class="fas fa-arrow-right mr-1"></i>

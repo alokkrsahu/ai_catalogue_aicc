@@ -72,12 +72,10 @@
     }
     
     if (node.type === 'DelegateAgent') {
-      if (!nodeConfig.number_of_iterations) {
-        nodeConfig.number_of_iterations = 5;
-      }
       if (!nodeConfig.termination_condition) {
         nodeConfig.termination_condition = 'FINISH';
       }
+      // Note: Max iterations are now controlled by Group Chat Manager's Max Rounds
     }
     
     if (node.type === 'GroupChatManager') {
@@ -366,30 +364,17 @@
     
     <!-- DELEGATE AGENT SETTINGS -->
     {#if node.type === 'DelegateAgent'}
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-2">Max Iterations</label>
-          <input
-            type="number"
-            bind:value={nodeConfig.number_of_iterations}
-            on:input={updateNodeData}
-            min="1"
-            max="50"
-            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
-            placeholder="5"
-          />
-        </div>
-        
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-2">Termination Condition</label>
-          <input
-            type="text"
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-2">Termination Condition</label>
+        <input
+          type="text"
             bind:value={nodeConfig.termination_condition}
             on:input={updateNodeData}
             class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
             placeholder="FINISH"
           />
-        </div>
+        <p class="text-xs text-gray-600 mt-1">Note: Max iterations are controlled by the Group Chat Manager's Max Rounds setting</p>
+      </div>
       </div>
     {/if}
     

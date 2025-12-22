@@ -695,34 +695,6 @@
         </div>
       </div>
     {/if}
-    
-    <!-- Activity Tracker Section -->
-    {#if deployment && deployment.workflow_id}
-      <div class="deployment-section mb-8">
-        <h3 class="text-xl font-semibold text-gray-900 mb-4">
-          <i class="fas fa-chart-line mr-2 text-oxford-blue"></i>
-          Activity Tracker
-        </h3>
-        
-        <div class="bg-white rounded-lg shadow-md p-6">
-          {#await import('$lib/components/DeploymentActivityTracker.svelte')}
-            <div class="flex items-center justify-center min-h-48">
-              <div class="text-center">
-                <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-oxford-blue mx-auto mb-2"></div>
-                <p class="text-oxford-blue text-sm">Loading Activity Tracker...</p>
-              </div>
-            </div>
-          {:then ActivityTrackerModule}
-            <svelte:component this={ActivityTrackerModule.default} {projectId} {deployment} />
-          {:catch error}
-            <div class="text-center text-red-600">
-              <i class="fas fa-exclamation-triangle text-2xl mb-2"></i>
-              <p>Failed to load Activity Tracker</p>
-            </div>
-          {/await}
-        </div>
-      </div>
-    {/if}
   {/if}
 </div>
 

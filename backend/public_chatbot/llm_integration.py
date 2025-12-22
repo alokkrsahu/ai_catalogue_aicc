@@ -8,6 +8,9 @@ from typing import Dict, Any, Optional, Generator
 from datetime import datetime
 import json
 
+# Initialize logger early (before imports that might use it)
+logger = logging.getLogger('public_chatbot')
+
 # Safely import existing LLM infrastructure
 try:
     # Import existing LLM providers (your sophisticated system)
@@ -18,8 +21,16 @@ except ImportError:
     OPENAI_AVAILABLE = False
 
 try:
-    import google.generativeai as genai
-    GEMINI_AVAILABLE = True
+    # Try new google.genai package first (recommended)
+    try:
+        import google.genai as genai
+        GEMINI_AVAILABLE = True
+        logger.info("✅ Using google.genai package (recommended)")
+    except ImportError:
+        # Fallback to deprecated google.generativeai
+        import google.generativeai as genai
+        GEMINI_AVAILABLE = True
+        logger.warning("⚠️ Using deprecated google.generativeai package. Please migrate to google.genai")
 except ImportError:
     GEMINI_AVAILABLE = False
 
@@ -28,8 +39,6 @@ try:
     ANTHROPIC_AVAILABLE = True
 except ImportError:
     ANTHROPIC_AVAILABLE = False
-
-logger = logging.getLogger('public_chatbot')
 
 
 class PublicLLMService:

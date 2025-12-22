@@ -66,12 +66,13 @@ async def execute_group_chat_manager_with_multiple_inputs(self, chat_manager_nod
     logger.info(f"🔧 GROUP CHAT MANAGER (MULTI-INPUT): Configuration - max_rounds: {max_rounds}, inputs: {aggregated_context['input_count']}")
 
     # Initialize delegate tracking
+    # Use Group Chat Manager's max_rounds to control delegate iterations
     delegate_status = {}
     for delegate in delegate_nodes:
         delegate_name = delegate.get('data', {}).get('name', 'Delegate')
         delegate_status[delegate_name] = {
             'iterations': 0,
-            'max_iterations': delegate.get('data', {}).get('number_of_iterations', 5),
+            'max_iterations': max_rounds,  # Use Group Chat Manager's max_rounds instead of delegate's number_of_iterations
             'termination_condition': delegate.get('data', {}).get('termination_condition', ''),  # NO DEFAULT - must come from UI
             'completed': False,
             'node': delegate
@@ -458,12 +459,13 @@ async def execute_group_chat_manager(self, chat_manager_node: Dict[str, Any], ll
     termination_strategy = manager_data.get('termination_strategy', 'all_delegates_complete')
 
     # Initialize delegate tracking
+    # Use Group Chat Manager's max_rounds to control delegate iterations
     delegate_status = {}
     for delegate in delegate_nodes:
         delegate_name = delegate.get('data', {}).get('name', 'Delegate')
         delegate_status[delegate_name] = {
             'iterations': 0,
-            'max_iterations': delegate.get('data', {}).get('number_of_iterations', 5),
+            'max_iterations': max_rounds,  # Use Group Chat Manager's max_rounds instead of delegate's number_of_iterations
             'termination_condition': delegate.get('data', {}).get('termination_condition', ''),  # NO DEFAULT - must come from UI
             'completed': False,
             'node': delegate

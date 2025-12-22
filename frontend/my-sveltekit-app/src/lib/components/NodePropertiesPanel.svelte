@@ -88,7 +88,13 @@
         nodeConfig.vector_collections = [];
         nodeConfig.rag_search_limit = 5;
         nodeConfig.rag_relevance_threshold = 0.7;
+        nodeConfig.query_refinement_enabled = false;
         console.log('📚 RAG CONFIG: Initialized default RAG config for', node.type);
+      }
+      
+      // Initialize query_refinement_enabled if not present (for existing nodes)
+      if (['AssistantAgent', 'UserProxyAgent', 'DelegateAgent'].includes(node.type) && !nodeConfig.hasOwnProperty('query_refinement_enabled')) {
+        nodeConfig.query_refinement_enabled = false;
       }
 
       // Initialize content_filters as array if not present
@@ -1129,6 +1135,28 @@
             <h4 class="font-medium text-blue-900">Document Search Configuration</h4>
           </div>
           
+          <!-- Query Refinement Toggle -->
+          <div class="mb-4">
+            <div class="flex items-center justify-between">
+              <div>
+                <label class="text-sm font-medium text-gray-700">Query Refinement</label>
+                <p class="text-xs text-gray-500 mt-1">Use LLM to optimize search queries while preserving all key concepts</p>
+              </div>
+              <label class="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={nodeConfig.query_refinement_enabled || false}
+                  on:change={(e) => {
+                    nodeConfig.query_refinement_enabled = e.target.checked;
+                    updateNodeData();
+                  }}
+                  class="sr-only peer"
+                />
+                <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+              </label>
+            </div>
+          </div>
+          
           <!-- Search Method Selection -->
           <div class="mb-4">
             <label class="block text-sm font-medium text-gray-700 mb-2">Search Method</label>
@@ -1417,6 +1445,28 @@
           <div class="flex items-center mb-3">
             <i class="fas fa-book text-blue-600 mr-2"></i>
             <h4 class="font-medium text-blue-900">Document Search Configuration</h4>
+          </div>
+          
+          <!-- Query Refinement Toggle -->
+          <div class="mb-4">
+            <div class="flex items-center justify-between">
+              <div>
+                <label class="text-sm font-medium text-gray-700">Query Refinement</label>
+                <p class="text-xs text-gray-500 mt-1">Use LLM to optimize search queries while preserving all key concepts</p>
+              </div>
+              <label class="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={nodeConfig.query_refinement_enabled || false}
+                  on:change={(e) => {
+                    nodeConfig.query_refinement_enabled = e.target.checked;
+                    updateNodeData();
+                  }}
+                  class="sr-only peer"
+                />
+                <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+              </label>
+            </div>
           </div>
           
           <!-- Search Method Selection -->
@@ -1809,30 +1859,16 @@
     
     <!-- DELEGATE-SPECIFIC FIELDS -->
     {#if node.type === 'DelegateAgent'}
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-2">Max Iterations</label>
-          <input
-            type="number"
-            bind:value={nodeConfig.number_of_iterations}
-            on:input={updateNodeData}
-            min="1"
-            max="50"
-            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
-            placeholder="5"
-          />
-        </div>
-        
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-2">Termination Condition</label>
-          <input
-            type="text"
-            bind:value={nodeConfig.termination_condition}
-            on:input={updateNodeData}
-            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
-            placeholder="FINISH"
-          />
-        </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-2">Termination Condition</label>
+        <input
+          type="text"
+          bind:value={nodeConfig.termination_condition}
+          on:input={updateNodeData}
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
+          placeholder="FINISH"
+        />
+        <p class="text-xs text-gray-600 mt-1">Note: Max iterations are controlled by the Group Chat Manager's Max Rounds setting</p>
       </div>
     {/if}
     

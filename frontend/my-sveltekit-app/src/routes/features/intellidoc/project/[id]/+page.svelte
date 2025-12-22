@@ -26,6 +26,10 @@
   let processing = false;
   let processingStatus: any = null;
   
+  // Deployment state for Activity Tracker
+  let deployment: any = null;
+  let loadingDeployment = false;
+  
   // Navigation state (capability-based, not template-based)
   let currentPage = 1;
   let hasNavigation = false;
@@ -50,6 +54,13 @@
   };
   
   console.log(`🎯 UNIVERSAL: Initializing universal project interface for project ${projectId}`);
+  
+  // Helper function to format processing status
+  function formatProcessingStatus(status: string | undefined | null): string {
+    if (!status) return 'Ready';
+    // Capitalize first letter
+    return status.charAt(0).toUpperCase() + status.slice(1);
+  }
   
   // Toggle sidebar function
   function toggleSidebar() {
@@ -167,6 +178,24 @@
       console.log('✅ UNIVERSAL: Processing status loaded');
     } catch (error) {
       console.error('❌ UNIVERSAL: Failed to load processing status:', error);
+    }
+  }
+  
+  async function loadDeployment() {
+    try {
+      loadingDeployment = true;
+      console.log(`🚀 ACTIVITY: Loading deployment for project ${projectId}`);
+      
+      const data = await cleanUniversalApi.getDeployment(projectId);
+      deployment = data.deployment || null;
+      
+      console.log('✅ ACTIVITY: Deployment loaded', deployment ? 'found' : 'not found');
+    } catch (error) {
+      console.error('❌ ACTIVITY: Failed to load deployment:', error);
+      deployment = null;
+      // Don't show error toast - deployment might not exist yet
+    } finally {
+      loadingDeployment = false;
     }
   }
   
@@ -379,6 +408,11 @@
   function goToPage(page: number) {
     if (hasNavigation && page >= 1 && page <= project.total_pages) {
       currentPage = page;
+      
+      // Load deployment when navigating to Activity Tracker page (page 5)
+      if (page === 5 && !deployment && !loadingDeployment) {
+        loadDeployment();
+      }
     }
   }
 </script>
@@ -544,8 +578,10 @@
               {#if processingStatus}
                 <div class="bg-white border border-gray-200 rounded-lg p-3 min-w-[200px]">
                   <div class="flex items-center justify-between text-sm mb-2">
-                    <span class="font-medium text-gray-700">Processing Status</span>
-                    <span class="text-oxford-blue font-semibold">{processingStatus.vector_status?.processing_status || 'Ready'}</span>
+                    <span class="font-medium text-gray-700">Processing Status:</span>
+                    <span class="text-oxford-blue font-semibold">
+                      {formatProcessingStatus(processingStatus.vector_status?.processing_status)}
+                    </span>
                   </div>
                   {#if processingStatus.vector_status?.total_documents > 0}
                     <div class="w-full bg-gray-200 rounded-full h-2">
@@ -762,9 +798,9 @@
                 {#if processingStatus}
                   <div class="mb-6">
                     <div class="flex items-center justify-between text-sm mb-3">
-                      <span class="font-medium text-gray-700">Status</span>
-                      <span class="font-semibold text-oxford-blue capitalize">
-                        {processingStatus.vector_status?.processing_status || 'Ready'}
+                      <span class="font-medium text-gray-700">Status:</span>
+                      <span class="font-semibold text-oxford-blue">
+                        {formatProcessingStatus(processingStatus.vector_status?.processing_status)}
                       </span>
                     </div>
                     
@@ -964,19 +1000,73 @@
     {/if}
     
     {#if hasNavigation && currentPage === 5}
-      <!-- Page 5: Coming Soon -->
-      <div class="flex items-center justify-center min-h-96">
-        <div class="text-center">
-          <div class="w-16 h-16 bg-oxford-blue text-white rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
-            <i class="fas fa-star text-2xl"></i>
-          </div>
-          <h2 class="text-xl font-bold text-gray-900 mb-2">Page 5</h2>
-          <p class="text-gray-600 mb-4">Coming Soon</p>
-          <div class="inline-flex items-center px-4 py-2 bg-gray-100 text-gray-600 rounded-lg text-sm">
-            <i class="fas fa-clock mr-2"></i>
-            This feature is under development
-          </div>
+      <!-- Page 5: Activity Tracker -->
+      <div class="activity-tracker-page h-full flex-1 w-full px-6 py-8">
+        <div class="mb-6">
+          <h2 class="text-2xl font-bold text-gray-900 flex items-center">
+            <i class="fas fa-chart-line mr-3 text-oxford-blue"></i>
+            Activity Tracker
+          </h2>
+          <p class="text-gray-600 mt-2">Monitor deployment activity and session analytics</p>
         </div>
+        
+        {#if loadingDeployment}
+          <div class="flex items-center justify-center min-h-96">
+            <div class="text-center">
+              <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
+              <p class="text-oxford-blue">Loading deployment information...</p>
+            </div>
+          </div>
+        {:else if !deployment || !deployment.workflow_id}
+          <div class="flex items-center justify-center min-h-96">
+            <div class="text-center max-w-md">
+              <div class="w-16 h-16 bg-gray-100 text-gray-400 rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
+                <i class="fas fa-chart-line text-2xl"></i>
+              </div>
+              <h3 class="text-xl font-bold text-gray-900 mb-2">No Deployment Found</h3>
+              <p class="text-gray-600 mb-4">
+                Activity Tracker requires an active deployment. Please deploy a workflow from the Deploy page first.
+              </p>
+              <button
+                class="px-4 py-2 bg-oxford-blue text-white rounded-lg hover:bg-blue-700 transition-colors"
+                on:click={() => goToPage(4)}
+              >
+                <i class="fas fa-rocket mr-2"></i>
+                Go to Deploy
+              </button>
+            </div>
+          </div>
+        {:else}
+          {#await import('$lib/components/DeploymentActivityTracker.svelte')}
+            <div class="flex items-center justify-center min-h-96">
+              <div class="text-center">
+                <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
+                <p class="text-oxford-blue">Loading Activity Tracker...</p>
+              </div>
+            </div>
+          {:then ActivityTrackerModule}
+            <div class="bg-white rounded-lg shadow-md p-6">
+              <svelte:component this={ActivityTrackerModule.default} {projectId} {deployment} />
+            </div>
+          {:catch error}
+            <div class="flex items-center justify-center min-h-96">
+              <div class="text-center">
+                <div class="w-16 h-16 bg-red-100 text-red-600 rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
+                  <i class="fas fa-exclamation-triangle text-2xl"></i>
+                </div>
+                <h3 class="text-xl font-bold text-gray-900 mb-2">Loading Error</h3>
+                <p class="text-gray-600">Failed to load Activity Tracker component.</p>
+                <button
+                  class="mt-4 px-4 py-2 bg-oxford-blue text-white rounded-lg hover:bg-blue-700 transition-colors"
+                  on:click={() => window.location.reload()}
+                >
+                  <i class="fas fa-refresh mr-2"></i>
+                  Reload Page
+                </button>
+              </div>
+            </div>
+          {/await}
+        {/if}
       </div>
     {/if}
       </div>

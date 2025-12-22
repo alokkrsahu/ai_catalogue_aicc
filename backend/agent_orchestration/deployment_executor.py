@@ -268,41 +268,20 @@ class WorkflowDeploymentExecutor:
                 logger.info(f"✅ DEPLOYMENT: Using _get_last_chat_message fallback: {fallback[:100]}...")
                 return fallback
             
-            # Last resort: try to extract last response from conversation_history
-            conv_history = execution_result.get('conversation_history', '')
-            if conv_history:
-                logger.warning(f"⚠️ DEPLOYMENT: Attempting to extract response from conversation_history")
-                # Try to extract the last assistant response from conversation_history
-                # Format is typically: "Assistant: ...\nUser: ...\nAssistant: ..."
-                last_assistant_response = self._extract_last_assistant_from_history(conv_history)
-                if last_assistant_response:
-                    logger.info(f"✅ DEPLOYMENT: Extracted last assistant response from conversation_history: {last_assistant_response[:100]}...")
-                    return last_assistant_response
-                # If extraction fails, return the whole history (better than nothing)
-                logger.warning(f"⚠️ DEPLOYMENT: Could not extract response, returning full conversation_history")
-                return conv_history
-            
-            # Only return result_summary if absolutely nothing else is available
-            result_summary = execution_result.get('result_summary', '')
-            if result_summary:
-                logger.error(f"❌ DEPLOYMENT: All extraction methods failed, returning result_summary (this should not happen): {result_summary}")
-            return result_summary
+            # No valid response found - return error instead of fallback to conversation_history
+            logger.error(f"❌ DEPLOYMENT: No valid agent response found. All messages have empty content.")
+            logger.error(f"❌ DEPLOYMENT: This indicates the agent returned an empty response, which is an error condition.")
+            return "Error: The agent returned an empty response. Please check the agent configuration and LLM API keys."
 
         except Exception as e:
             logger.error(f"❌ DEPLOYMENT: Error extracting End node output: {e}", exc_info=True)
-            # Fallback to last assistant/chat message
+            # Try to get last chat message as fallback
             fallback = self._get_last_chat_message(execution_result)
-            if fallback:
+            if fallback and fallback.strip():
+                logger.warning(f"⚠️ DEPLOYMENT: Using last chat message as fallback after exception")
                 return fallback
-            # Try conversation_history
-            conv_history = execution_result.get('conversation_history', '')
-            if conv_history:
-                return conv_history
-            # Only use result_summary as absolute last resort
-            result_summary = execution_result.get('result_summary', '')
-            if result_summary:
-                logger.error(f"❌ DEPLOYMENT: Exception fallback returning result_summary (should not happen): {result_summary}")
-            return result_summary or 'An error occurred while processing the response.'
+            # Return proper error message instead of conversation_history
+            return f"Error: Failed to extract agent response. {str(e)}"
 
     def _get_last_chat_message(self, execution_result: Dict[str, Any]) -> str:
         """
