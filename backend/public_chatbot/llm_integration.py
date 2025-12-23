@@ -73,9 +73,24 @@ class PublicLLMService:
             if GEMINI_AVAILABLE:
                 system_gemini_key = getattr(settings, 'GOOGLE_API_KEY', None) or os.getenv('GOOGLE_API_KEY')
                 if system_gemini_key:
-                    genai.configure(api_key=system_gemini_key)
-                    self.gemini_client = genai
-                    logger.info("✅ GEMINI: System-level client initialized")
+                    # Check which genai package is being used
+                    try:
+                        # Try new google.genai package (recommended) - uses Client instead of configure
+                        import google.genai as genai_new
+                        self.gemini_client = genai_new.Client(api_key=system_gemini_key)
+                        self.genai_module = genai_new
+                        logger.info("✅ GEMINI: System-level client initialized with google.genai.Client")
+                    except (ImportError, AttributeError):
+                        # Fallback to deprecated google.generativeai package
+                        try:
+                            import google.generativeai as genai_old
+                            genai_old.configure(api_key=system_gemini_key)
+                            self.gemini_client = genai_old
+                            self.genai_module = genai_old
+                            logger.info("✅ GEMINI: System-level client initialized with google.generativeai (deprecated)")
+                        except Exception as e:
+                            logger.error(f"❌ GEMINI: Failed to initialize with either package: {e}")
+                            self.gemini_client = None
                 else:
                     logger.warning("⚠️ GEMINI: No system API key found")
             
@@ -309,21 +324,53 @@ class PublicLLMService:
             # Use gemini-pro model as default
             model_name = 'gemini-pro' if 'gemini' not in model else model
             
-            generation_model = self.gemini_client.GenerativeModel(model_name)
-            
-            # Configure generation
-            generation_config = {
-                'max_output_tokens': max_tokens,
-                'temperature': temperature,
-            }
+            # Handle both new google.genai and old google.generativeai APIs
+            if hasattr(self.gemini_client, 'get_model'):
+                # New google.genai API - use get_model method
+                generation_model = self.gemini_client.get_model(model_name)
+            elif hasattr(self.gemini_client, 'GenerativeModel'):
+                # Old google.generativeai API - use GenerativeModel class
+                generation_model = self.gemini_client.GenerativeModel(model_name)
+            else:
+                raise Exception("Unsupported Gemini client API")
             
             # For Gemini, prepend system prompt to user prompt
             enhanced_prompt = f"{system_prompt}\n\n{prompt}"
             
-            response = generation_model.generate_content(
-                enhanced_prompt,
-                generation_config=generation_config,
-            )
+            # Handle both new and old Gemini APIs
+            if hasattr(generation_model, 'generate_content'):
+                # Old google.generativeai API
+                generation_config = {
+                    'max_output_tokens': max_tokens,
+                    'temperature': temperature,
+                }
+                response = generation_model.generate_content(
+                    enhanced_prompt,
+                    generation_config=generation_config,
+                )
+            elif hasattr(self.gemini_client, 'models') and hasattr(self.gemini_client.models, 'generate_content'):
+                # New google.genai API - use client.models.generate_content method
+                try:
+                    from google.genai import types
+                    response = self.gemini_client.models.generate_content(
+                        model=model_name,
+                        contents=enhanced_prompt,
+                        config=types.GenerateContentConfig(
+                            max_output_tokens=max_tokens,
+                            temperature=temperature,
+                        )
+                    )
+                except (AttributeError, ImportError) as e:
+                    logger.warning(f"⚠️ GEMINI: Failed to use new API format, trying alternative: {e}")
+                    # Alternative: try direct model call
+                    response = self.gemini_client.models.generate_content(
+                        model=model_name,
+                        contents=enhanced_prompt,
+                        max_output_tokens=max_tokens,
+                        temperature=temperature,
+                    )
+            else:
+                raise Exception("Unsupported Gemini API for content generation")
             
             end_time = datetime.now()
             response_time = int((end_time - start_time).total_seconds() * 1000)
