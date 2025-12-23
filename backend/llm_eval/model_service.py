@@ -8,7 +8,19 @@ class ModelService:
     
     @staticmethod
     def get_openai_models(api_key: str) -> List[Dict[str, Any]]:
-        """Fetch available OpenAI models - includes ALL GPT models (GPT-3.5, GPT-4, GPT-4o, GPT-5, future models)."""
+        """
+        Fetch available OpenAI models.
+
+        Behaviour notes:
+        - We call the OpenAI `/v1/models` endpoint directly and **do not** silently
+          fall back to a hard‑coded subset of models.
+        - This ensures the frontend can see the **full list of GPT models** that
+          your account is allowed to use (e.g. `gpt-4.1`, `gpt-4o-mini`, future GPT‑5
+          variants), instead of always being limited to a small default set.
+        - If the API call fails (network issue, invalid key, permissions), we now
+          return an empty list so upstream callers can surface a clear error and
+          treat the key as invalid rather than pretending a partial list is “ok”.
+        """
         try:
             headers = {
                 'Authorization': f'Bearer {api_key}',
@@ -46,14 +58,13 @@ class ModelService:
             
             return sorted(chat_models, key=lambda x: x['id'])
         except Exception as e:
+            # IMPORTANT: do not hide failures behind a tiny hard‑coded list.
+            # Returning [] allows DynamicModelsService.test_api_key(...) to
+            # accurately detect that something is wrong with this API key or
+            # network environment, so the UI can show a clear warning instead
+            # of only exposing four fallback models.
             print(f"Error fetching OpenAI models: {e}")
-            # Return default models if API call fails
-            return [
-                {'id': 'gpt-3.5-turbo', 'name': 'gpt-3.5-turbo', 'displayName': 'GPT-3.5 Turbo', 'object': 'model'},
-                {'id': 'gpt-4', 'name': 'gpt-4', 'displayName': 'GPT-4', 'object': 'model'},
-                {'id': 'gpt-4o', 'name': 'gpt-4o', 'displayName': 'GPT-4 Omni', 'object': 'model'},
-                {'id': 'gpt-4-turbo', 'name': 'gpt-4-turbo', 'displayName': 'GPT-4 Turbo', 'object': 'model'},
-            ]
+            return []
     
     @staticmethod
     def get_claude_models() -> List[Dict[str, str]]:

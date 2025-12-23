@@ -207,10 +207,12 @@
                     {#each session.conversation_history as msg}
                       <div class="flex {msg.role === 'user' ? 'justify-end' : 'justify-start'}">
                         <div class="max-w-3xl {msg.role === 'user' ? 'bg-oxford-blue text-white' : 'bg-gray-100 text-gray-900'} rounded-lg px-4 py-2">
-                          <div class="text-xs font-semibold mb-1 opacity-75">
+                          <div class="text-xs font-semibold mb-1 opacity-75 {msg.role === 'user' ? 'text-white' : ''}">
                             {msg.role === 'user' ? 'User' : 'Assistant'}
                           </div>
-                          <div class="text-sm whitespace-pre-wrap">{msg.content}</div>
+                          <div class="text-sm whitespace-pre-wrap {msg.role === 'user' ? 'text-white' : ''}">
+                            {msg.content}
+                          </div>
                           {#if msg.timestamp}
                             <div class="text-xs opacity-60 mt-1">
                               {formatDate(msg.timestamp)}

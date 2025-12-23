@@ -1,12 +1,17 @@
 // LLM Configuration Service - Template Independent Agent LLM Management
-import { 
-  type LLMProvider, 
-  type LLMModel, 
+import {
+  type LLMProvider,
+  type LLMModel,
   type AgentLLMConfig,
   DEFAULT_LLM_PROVIDERS,
   DEFAULT_LLM_MODELS,
-  DEFAULT_AGENT_LLM_CONFIGS
+  DEFAULT_AGENT_LLM_CONFIGS,
+  getProviderIcon
 } from '$lib/types/llm-config';
+import dynamicModelsService, {
+  type ModelInfo,
+  type ProviderInfo
+} from '$lib/services/dynamicModelsService';
 
 class LLMConfigurationService {
   private baseUrl = '/api';
@@ -20,13 +25,36 @@ class LLMConfigurationService {
    */
   async getProviders(): Promise<LLMProvider[]> {
     try {
-      console.log('📋 LLM CONFIG: Fetching LLM providers');
-      
-      // For now, return default providers - extend to API when backend is ready
-      const providers = DEFAULT_LLM_PROVIDERS;
-      
-      console.log(`✅ LLM CONFIG: Loaded ${providers.length} providers`);
-      return providers;
+      console.log('📋 LLM CONFIG: Fetching LLM providers (dynamic)');
+
+      // Prefer dynamic, API-key-aware providers from backend
+      const dynamicProviders: ProviderInfo[] = await dynamicModelsService.getProviders();
+
+      if (dynamicProviders && dynamicProviders.length > 0) {
+        const mappedProviders: LLMProvider[] = dynamicProviders.map((provider) => {
+          // Try to enrich from defaults if we have a matching entry
+          const defaultDef = DEFAULT_LLM_PROVIDERS.find((p: LLMProvider) => p.id === provider.id);
+
+          return {
+            id: provider.id,
+            name: provider.name,
+            description: provider.description,
+            icon: defaultDef?.icon || getProviderIcon(provider.id),
+            // Cast is safe because backend only returns known providers today
+            type: (provider.id as any) ?? 'custom',
+            baseUrl: defaultDef?.baseUrl,
+            apiKeyRequired: true,
+            supportedFeatures: defaultDef?.supportedFeatures || ['chat', 'completion']
+          };
+        });
+
+        console.log(`✅ LLM CONFIG: Loaded ${mappedProviders.length} providers from dynamicModelsService`);
+        return mappedProviders;
+      }
+
+      // Fallback: static defaults (no API key awareness)
+      console.warn('⚠️ LLM CONFIG: dynamicModelsService returned no providers, falling back to DEFAULT_LLM_PROVIDERS');
+      return DEFAULT_LLM_PROVIDERS;
       
     } catch (error) {
       console.error('❌ LLM CONFIG: Failed to load providers:', error);
@@ -40,21 +68,48 @@ class LLMConfigurationService {
    */
   async getModels(providerId?: string): Promise<LLMModel[]> {
     try {
-      console.log('📋 LLM CONFIG: Fetching LLM models', { providerId });
-      
-      let models = DEFAULT_LLM_MODELS;
-      
+      console.log('📋 LLM CONFIG: Fetching LLM models (dynamic only)', { providerId });
+
+      // Prefer dynamic, API-key aware models from backend
+      const dynamicModels: ModelInfo[] = await dynamicModelsService.getModels({
+        providerId,
+        useCache: true,
+        forceRefresh: false
+      });
+
+      const models: LLMModel[] = (dynamicModels || []).map((model) => {
+        const costPer1k = model.cost_per_1k_tokens ?? 0.01;
+        const context = model.context_length ?? 8192;
+
+        return {
+          id: model.id,
+          name: model.display_name || model.name,
+          providerId: model.provider,
+          description: model.display_name || model.name,
+          maxTokens: context,
+          supportsStreaming: true,
+          supportsFunctionCalling: (model.capabilities || []).includes('function-calling'),
+          costPerToken: costPer1k / 1000,
+          contextWindow: context,
+          capabilities: model.capabilities || []
+        };
+      });
+
       // Filter by provider if specified
       if (providerId) {
-        models = models.filter(model => model.providerId === providerId);
+        models = models.filter((model) => model.providerId === providerId);
       }
-      
-      console.log(`✅ LLM CONFIG: Loaded ${models.length} models`);
+
+      console.log(`✅ LLM CONFIG: Loaded ${models.length} models for provider ${providerId || 'ALL'} (dynamic)`);
       return models;
       
     } catch (error) {
       console.error('❌ LLM CONFIG: Failed to load models:', error);
-      return DEFAULT_LLM_MODELS;
+      // If dynamic loading fails we return an empty list so the UI
+      // can clearly surface that no models are available for this
+      // project/API key instead of silently falling back to a tiny
+      // hard-coded default list.
+      return [];
     }
   }
 
