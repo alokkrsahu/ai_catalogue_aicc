@@ -303,12 +303,12 @@ class PublicKnowledgeDocumentAdmin(admin.ModelAdmin):
     
     def sync_status_display(self, obj):
         if obj.synced_to_chromadb and obj.last_synced:
-            return format_html('<span style="color: green;">✅ SYNCED {}</span>', 
+            return format_html('<span style="color: green;">✅ SYNCED {}</span>',
                              obj.last_synced.strftime('%m/%d %H:%M'))
         elif obj.sync_error:
-            return format_html('<span style="color: red;">❌ ERROR</span>')
+            return format_html('{}', '<span style="color: red;">❌ ERROR</span>')
         else:
-            return format_html('<span style="color: orange;">⏳ PENDING</span>')
+            return format_html('{}', '<span style="color: orange;">⏳ PENDING</span>')
     
     sync_status_display.short_description = 'ChromaDB Sync'
     
