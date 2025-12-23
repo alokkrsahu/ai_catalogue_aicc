@@ -293,11 +293,11 @@ class PublicKnowledgeDocumentAdmin(admin.ModelAdmin):
     
     def approval_status_display(self, obj):
         if obj.is_approved and obj.security_reviewed:
-            return format_html('<span style="color: green;">✅ APPROVED</span>')
+            return format_html('{}', '<span style="color: green;">✅ APPROVED</span>')
         elif obj.is_approved:
-            return format_html('<span style="color: orange;">⏳ PENDING SECURITY</span>')
+            return format_html('{}', '<span style="color: orange;">⏳ PENDING SECURITY</span>')
         else:
-            return format_html('<span style="color: red;">❌ NOT APPROVED</span>')
+            return format_html('{}', '<span style="color: red;">❌ NOT APPROVED</span>')
     
     approval_status_display.short_description = 'Approval'
     
