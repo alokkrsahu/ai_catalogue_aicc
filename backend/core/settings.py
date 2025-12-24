@@ -117,7 +117,7 @@ cors_origins = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:5173,http://l
 CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins.split(',') if origin.strip()]
 
 # For development, allow all origins if specified (temporarily True for debugging)
-CORS_ALLOW_ALL_ORIGINS = True  # Temporarily allow all origins to debug CORS issues
+CORS_ALLOW_ALL_ORIGINS = False  # Changed to False - use specific origin validation instead
 
 # Allow null origin for public chatbot (file:// protocol support)
 CORS_ALLOWED_ORIGIN_REGEXES = [
