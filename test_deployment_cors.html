@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CORS Test - Workflow Deployment</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f7;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #0b3b66;
+            margin-bottom: 10px;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+        }
+        .input-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #333;
+        }
+        input, textarea {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+        textarea {
+            resize: vertical;
+            min-height: 100px;
+        }
+        button {
+            background: #0b3b66;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            margin-right: 10px;
+        }
+        button:hover {
+            background: #094161;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .response-box {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 8px;
+            display: none;
+        }
+        .success {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        .error {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        .info {
+            background: #d1ecf1;
+            border: 1px solid #bee5eb;
+            color: #0c5460;
+        }
+        pre {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin-top: 10px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        .instructions {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .instructions h3 {
+            margin-top: 0;
+            color: #856404;
+        }
+        .instructions ol {
+            margin-left: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧪 Workflow Deployment CORS Test</h1>
+        <p class="subtitle">Test the Django-based CORS implementation for deployment endpoints</p>
+
+        <div class="instructions">
+            <h3>📋 Setup Instructions:</h3>
+            <ol>
+                <li><strong>Add allowed origin in Deploy page:</strong>
+                    <ul>
+                        <li>Go to your project's "Deploy" section</li>
+                        <li>Add origin: <code id="currentOrigin">http://localhost:5500</code></li>
+                        <li>Set rate limit (e.g., 10 requests/minute)</li>
+                        <li>Save the deployment configuration</li>
+                    </ul>
+                </li>
+                <li><strong>Restart Docker containers:</strong>
+                    <pre>docker compose restart nginx backend</pre>
+                </li>
+                <li><strong>Serve this HTML file:</strong>
+                    <ul>
+                        <li>Using Python: <code>python -m http.server 5500</code></li>
+                        <li>Or using VS Code Live Server on port 5500</li>
+                    </ul>
+                </li>
+                <li><strong>Enter your project ID below and test!</strong></li>
+            </ol>
+        </div>
+
+        <div class="input-group">
+            <label for="projectId">Project ID (UUID):</label>
+            <input
+                type="text"
+                id="projectId"
+                placeholder="e.g., 82cb6db6-f23e-48b8-a14b-23ded1ec961a"
+            />
+        </div>
+
+        <div class="input-group">
+            <label for="apiUrl">API Base URL:</label>
+            <input
+                type="text"
+                id="apiUrl"
+                value="https://aicc.uksouth.cloudapp.azure.com"
+                placeholder="https://aicc.uksouth.cloudapp.azure.com"
+            />
+        </div>
+
+        <div class="input-group">
+            <label for="message">Test Message:</label>
+            <textarea
+                id="message"
+                placeholder="Enter your test query..."
+            >What can you help me with?</textarea>
+        </div>
+
+        <button onclick="testCORS()" id="testBtn">🚀 Test CORS</button>
+        <button onclick="clearResponse()">🗑️ Clear</button>
+
+        <div id="responseBox" class="response-box"></div>
+    </div>
+
+    <script>
+        // Display current origin
+        document.getElementById('currentOrigin').textContent = window.location.origin;
+
+        // Generate session ID
+        const sessionId = 'test_' + Math.random().toString(36).substring(2, 15);
+
+        async function testCORS() {
+            const projectId = document.getElementById('projectId').value.trim();
+            const apiUrl = document.getElementById('apiUrl').value.trim();
+            const message = document.getElementById('message').value.trim();
+            const responseBox = document.getElementById('responseBox');
+            const testBtn = document.getElementById('testBtn');
+
+            if (!projectId) {
+                showResponse('error', 'Please enter a project ID');
+                return;
+            }
+
+            if (!message) {
+                showResponse('error', 'Please enter a test message');
+                return;
+            }
+
+            const endpoint = `${apiUrl}/api/workflow-deploy/${projectId}/`;
+
+            testBtn.disabled = true;
+            showResponse('info', `🔄 Testing CORS from ${window.location.origin}...\n\nEndpoint: ${endpoint}`);
+
+            try {
+                console.log('🚀 Sending request to:', endpoint);
+                console.log('📤 Request origin:', window.location.origin);
+                console.log('📝 Message:', message);
+                console.log('🆔 Session ID:', sessionId);
+
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        user_query: message,
+                        session_id: sessionId
+                    })
+                });
+
+                console.log('✅ Response status:', response.status);
+                console.log('📥 Response headers:', [...response.headers.entries()]);
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showResponse('success',
+                        `✅ CORS SUCCESS!\n\n` +
+                        `Status: ${response.status}\n` +
+                        `Origin: ${window.location.origin}\n` +
+                        `CORS Headers:\n` +
+                        `  - Access-Control-Allow-Origin: ${response.headers.get('Access-Control-Allow-Origin')}\n` +
+                        `  - Access-Control-Allow-Credentials: ${response.headers.get('Access-Control-Allow-Credentials')}\n\n` +
+                        `Response:\n${JSON.stringify(data, null, 2)}`
+                    );
+                } else {
+                    showResponse('error',
+                        `❌ Request Failed\n\n` +
+                        `Status: ${response.status}\n` +
+                        `Error: ${data.error || 'Unknown error'}\n\n` +
+                        `Full Response:\n${JSON.stringify(data, null, 2)}`
+                    );
+                }
+            } catch (error) {
+                console.error('❌ CORS Error:', error);
+                showResponse('error',
+                    `❌ CORS ERROR\n\n` +
+                    `This typically means:\n` +
+                    `1. Origin ${window.location.origin} is not in allowed origins\n` +
+                    `2. Deployment is not active\n` +
+                    `3. Nginx hasn't been restarted\n\n` +
+                    `Error Details:\n${error.message}\n\n` +
+                    `Check browser console for more details.`
+                );
+            } finally {
+                testBtn.disabled = false;
+            }
+        }
+
+        function showResponse(type, message) {
+            const responseBox = document.getElementById('responseBox');
+            responseBox.className = `response-box ${type}`;
+            responseBox.innerHTML = `<pre>${message}</pre>`;
+            responseBox.style.display = 'block';
+        }
+
+        function clearResponse() {
+            const responseBox = document.getElementById('responseBox');
+            responseBox.style.display = 'none';
+        }
+    </script>
+</body>
+</html>
