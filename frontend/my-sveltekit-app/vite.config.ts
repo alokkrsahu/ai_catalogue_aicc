@@ -51,6 +51,13 @@ export default defineConfig({
       'svelte/transition',
       'axios'
     ],
+    exclude: [
+      '@sveltejs/kit',
+      '@sveltejs/kit/hooks',
+      '@sveltejs/kit/node',
+      '@sveltejs/kit/node/polyfills',
+      '@sveltejs/kit/vite'
+    ],
     esbuildOptions: {
       target: 'esnext'
     }
