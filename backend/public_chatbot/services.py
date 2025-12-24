@@ -705,14 +705,33 @@ class ChatbotSecurityService:
             )
             
             # Reset daily count if it's a new day
-            if usage.last_reset_date < timezone.now().date():
+            current_date = timezone.now().date()
+            if usage.last_reset_date < current_date:
                 usage.daily_request_count = 0
-                usage.last_reset_date = timezone.now().date()
+                usage.last_reset_date = current_date
                 usage.save()
             
-            # Check if blocked
-            if usage.is_blocked and usage.blocked_until and usage.blocked_until > timezone.now():
-                return True
+            # Check if blocked - ensure blocked_until is a datetime for comparison
+            if usage.is_blocked and usage.blocked_until:
+                from datetime import datetime, date
+                current_time = timezone.now()
+                blocked_until = usage.blocked_until
+                
+                # Handle case where blocked_until might be a date instead of datetime
+                if isinstance(blocked_until, date) and not isinstance(blocked_until, datetime):
+                    # Convert date to datetime at end of day and make timezone-aware
+                    from datetime import time as dt_time
+                    blocked_until_dt = datetime.combine(blocked_until, dt_time.max)
+                    if timezone.is_naive(blocked_until_dt):
+                        blocked_until_dt = timezone.make_aware(blocked_until_dt)
+                    # Update the model field
+                    usage.blocked_until = blocked_until_dt
+                    usage.save()
+                    blocked_until = blocked_until_dt
+                
+                # Now safe to compare datetime with datetime
+                if isinstance(blocked_until, datetime) and blocked_until > current_time:
+                    return True
             
             # Check daily limit (100 requests per day per IP)
             if usage.daily_request_count >= 100:
