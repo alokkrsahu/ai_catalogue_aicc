@@ -207,14 +207,14 @@
                     {#each session.conversation_history as msg}
                       <div class="flex {msg.role === 'user' ? 'justify-end' : 'justify-start'}">
                         <div class="max-w-3xl {msg.role === 'user' ? 'bg-oxford-blue text-white' : 'bg-gray-100 text-gray-900'} rounded-lg px-4 py-2">
-                          <div class="text-xs font-semibold mb-1 opacity-75 {msg.role === 'user' ? 'text-white' : ''}">
+                          <div class="text-xs font-semibold mb-1 opacity-75 {msg.role === 'user' ? 'text-white' : 'text-gray-700'}">
                             {msg.role === 'user' ? 'User' : 'Assistant'}
                           </div>
-                          <div class="text-sm whitespace-pre-wrap {msg.role === 'user' ? 'text-white' : ''}">
+                          <div class="text-sm whitespace-pre-wrap {msg.role === 'user' ? 'text-white' : 'text-gray-900'}">
                             {msg.content}
                           </div>
                           {#if msg.timestamp}
-                            <div class="text-xs opacity-60 mt-1">
+                            <div class="text-xs opacity-60 mt-1 {msg.role === 'user' ? 'text-white' : 'text-gray-600'}">
                               {formatDate(msg.timestamp)}
                             </div>
                           {/if}
@@ -287,6 +287,17 @@
 <style>
   .activity-tracker-container {
     @apply p-6;
+  }
+  
+  /* Ensure user messages have white text on blue background */
+  .bg-oxford-blue.text-white,
+  .bg-oxford-blue.text-white * {
+    color: #ffffff !important;
+  }
+  
+  /* User message text elements - force white color */
+  .bg-oxford-blue .text-white {
+    color: #ffffff !important;
   }
 </style>
 
