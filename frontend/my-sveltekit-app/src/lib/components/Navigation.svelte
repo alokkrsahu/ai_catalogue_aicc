@@ -88,9 +88,9 @@
       <div class="flex items-center">
         <div class="flex-shrink-0">
           <a href="/" class="flex items-center space-x-3">
-            <img src="/logo.svg" alt="AI and ML Competency Centre Logo" class="h-12 w-auto" />
-            <span class="logo-text text-xl hidden sm:block">AI and ML Competency Centre</span>
-            <span class="logo-text text-lg block sm:hidden">AIMLCC</span>
+            <img src="/logo.svg" alt="AI Competency Centre Logo" class="h-12 w-auto" />
+            <span class="logo-text text-xl hidden sm:block">AI Competency Centre</span>
+            <span class="logo-text text-lg block sm:hidden">AICC</span>
           </a>
         </div>
         <div class="hidden md:block">
@@ -307,7 +307,7 @@
         <div class="flex items-center px-5">
           <div class="flex-shrink-0">
             <!-- Logo in mobile menu -->
-            <img src="/logo.svg" alt="AI and ML Competency Centre Logo" class="h-12 w-auto" />
+            <img src="/logo.svg" alt="AI Competency Centre Logo" class="h-12 w-auto" />
           </div>
           <div class="ml-3">
             <div class="text-base font-medium leading-none text-white">
