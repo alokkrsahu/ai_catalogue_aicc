@@ -104,10 +104,27 @@ class HumanInputHandler:
         logger.info(f"▶️ HUMAN INPUT: Resuming workflow {execution_id} with human input")
         
         # Load paused execution
-        execution_record = await sync_to_async(WorkflowExecution.objects.get)(
-            execution_id=execution_id,
-            human_input_required=True
-        )
+        # First try with human_input_required=True (standard case)
+        try:
+            execution_record = await sync_to_async(WorkflowExecution.objects.get)(
+                execution_id=execution_id,
+                human_input_required=True
+            )
+            logger.info(f"✅ HUMAN INPUT: Found execution {execution_id} with human_input_required=True")
+        except WorkflowExecution.DoesNotExist:
+            # Fallback: try without the flag (for deployment context edge cases)
+            logger.warning(f"⚠️ HUMAN INPUT: Execution {execution_id} not found with human_input_required=True, trying without flag")
+            try:
+                execution_record = await sync_to_async(WorkflowExecution.objects.get)(
+                    execution_id=execution_id
+                )
+                logger.info(f"✅ HUMAN INPUT: Found execution {execution_id} without human_input_required flag")
+                # Verify it's in a valid state for resuming
+                if execution_record.status not in [WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.PENDING]:
+                    raise ValueError(f"Execution {execution_id} is in {execution_record.status} state, cannot resume")
+            except WorkflowExecution.DoesNotExist:
+                logger.error(f"❌ HUMAN INPUT: Execution {execution_id} not found at all")
+                raise
         
         # Record human input interaction
         await sync_to_async(HumanInputInteraction.objects.create)(
@@ -143,7 +160,10 @@ class HumanInputHandler:
         workflow = await sync_to_async(lambda: execution_record.workflow)()
         
         # Add human input to conversation history
+        # Format: "AgentName: human_input" for proper conversation flow
         updated_conversation = execution_record.conversation_history + f"\n{execution_record.awaiting_human_input_agent}: {human_input}"
+        
+        logger.info(f"📝 HUMAN INPUT: Added user input to conversation history: {execution_record.awaiting_human_input_agent}: {human_input[:100]}...")
         
         # CRITICAL FIX: Add human input message to messages array for proper conversation history display
         messages = execution_record.messages_data or []
@@ -376,8 +396,11 @@ class HumanInputHandler:
                         'message': 'Reflection workflow completed successfully',
                         'execution_id': execution_record.execution_id,
                         'updated_conversation': updated_conversation,
+                        'conversation_history': updated_conversation,
                         'workflow_completed': True,
-                        'final_response': final_response
+                        'final_response': final_response,
+                        'messages': execution_record.messages_data or [],  # Include messages for deployment executor
+                        'response': final_response
                     }
             else:
                 # This is a regular human input workflow - continue with remaining nodes after UserProxyAgent

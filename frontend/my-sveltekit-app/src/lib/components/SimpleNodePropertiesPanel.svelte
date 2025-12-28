@@ -69,6 +69,10 @@
       if (!nodeConfig.hasOwnProperty('code_execution_enabled')) {
         nodeConfig.code_execution_enabled = false;
       }
+      // Initialize input_mode (default to 'user' for backward compatibility)
+      if (!nodeConfig.hasOwnProperty('input_mode')) {
+        nodeConfig.input_mode = 'user';
+      }
     }
     
     if (node.type === 'DelegateAgent') {
@@ -347,6 +351,43 @@
             <span class="text-sm font-medium text-gray-700">Require Human Input</span>
           </label>
         </div>
+        
+        <!-- Input Mode Selection -->
+        {#if nodeConfig.require_human_input}
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-2">Input Mode</label>
+            <div class="space-y-2">
+              <label class="flex items-center space-x-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="input_mode_{node.id}"
+                  value="user"
+                  checked={nodeConfig.input_mode === 'user' || !nodeConfig.input_mode}
+                  on:change={() => {
+                    nodeConfig.input_mode = 'user';
+                    updateNodeData();
+                  }}
+                  class="w-4 h-4 text-oxford-blue border-gray-300 focus:ring-oxford-blue"
+                />
+                <span class="text-sm text-gray-700">User Input</span>
+              </label>
+              <label class="flex items-center space-x-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="input_mode_{node.id}"
+                  value="admin"
+                  checked={nodeConfig.input_mode === 'admin'}
+                  on:change={() => {
+                    nodeConfig.input_mode = 'admin';
+                    updateNodeData();
+                  }}
+                  class="w-4 h-4 text-oxford-blue border-gray-300 focus:ring-oxford-blue"
+                />
+                <span class="text-sm text-gray-700">Admin Input</span>
+              </label>
+            </div>
+          </div>
+        {/if}
         
         <div>
           <label class="flex items-center space-x-2">

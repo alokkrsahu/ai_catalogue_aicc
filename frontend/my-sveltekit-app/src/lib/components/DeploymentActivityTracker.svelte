@@ -289,14 +289,18 @@
     @apply p-6;
   }
   
-  /* Ensure user messages have white text on blue background */
-  .bg-oxford-blue.text-white,
-  .bg-oxford-blue.text-white * {
+  /* Ensure user messages have white text on blue background - with high specificity */
+  .activity-tracker-container .bg-oxford-blue,
+  .activity-tracker-container .bg-oxford-blue *,
+  .activity-tracker-container .bg-oxford-blue.text-white,
+  .activity-tracker-container .bg-oxford-blue.text-white * {
     color: #ffffff !important;
   }
   
-  /* User message text elements - force white color */
-  .bg-oxford-blue .text-white {
+  /* User message text elements - force white color for all nested elements */
+  .activity-tracker-container div.bg-oxford-blue div,
+  .activity-tracker-container div.bg-oxford-blue span,
+  .activity-tracker-container div.bg-oxford-blue p {
     color: #ffffff !important;
   }
 </style>

@@ -96,6 +96,12 @@
       if (['AssistantAgent', 'UserProxyAgent', 'DelegateAgent'].includes(node.type) && !nodeConfig.hasOwnProperty('query_refinement_enabled')) {
         nodeConfig.query_refinement_enabled = false;
       }
+      
+      // Initialize input_mode for UserProxyAgent (default to 'user' for backward compatibility)
+      if (node.type === 'UserProxyAgent' && !nodeConfig.hasOwnProperty('input_mode')) {
+        nodeConfig.input_mode = 'user';
+        console.log('👤 INPUT MODE: Initialized default input_mode for UserProxyAgent');
+      }
 
       // Initialize content_filters as array if not present
       if (['AssistantAgent', 'UserProxyAgent', 'DelegateAgent'].includes(node.type)) {
@@ -982,6 +988,45 @@
             <span class="text-sm font-medium text-gray-700">Require Human Input</span>
           </label>
         </div>
+        
+        <!-- Input Mode Selection -->
+        {#if nodeConfig.require_human_input}
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-2">Input Mode</label>
+            <div class="space-y-2">
+              <label class="flex items-center space-x-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="input_mode_{node.id}"
+                  value="user"
+                  checked={nodeConfig.input_mode === 'user' || !nodeConfig.input_mode}
+                  on:change={() => {
+                    nodeConfig.input_mode = 'user';
+                    updateNodeData();
+                  }}
+                  class="w-4 h-4 text-oxford-blue border-gray-300 focus:ring-oxford-blue"
+                />
+                <span class="text-sm text-gray-700">User Input</span>
+                <span class="text-xs text-gray-500 ml-2">(Collect input from end users in deployment)</span>
+              </label>
+              <label class="flex items-center space-x-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="input_mode_{node.id}"
+                  value="admin"
+                  checked={nodeConfig.input_mode === 'admin'}
+                  on:change={() => {
+                    nodeConfig.input_mode = 'admin';
+                    updateNodeData();
+                  }}
+                  class="w-4 h-4 text-oxford-blue border-gray-300 focus:ring-oxford-blue"
+                />
+                <span class="text-sm text-gray-700">Admin Input</span>
+                <span class="text-xs text-gray-500 ml-2">(Collect input from admin in admin UI)</span>
+              </label>
+            </div>
+          </div>
+        {/if}
         
         <div>
           <label class="flex items-center space-x-2">

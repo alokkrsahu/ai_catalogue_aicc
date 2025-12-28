@@ -925,8 +925,9 @@
       case 'UserProxyAgent':
         return {
           name: `User Proxy ${count}`,
-          description: 'Handles user interaction and code execution',
-          require_human_input: true
+          description: 'USER INPUT REQUIRED',
+          require_human_input: true,
+          input_mode: 'user'
         };
       case 'AssistantAgent':
         return {

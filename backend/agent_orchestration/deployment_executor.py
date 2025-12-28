@@ -30,7 +30,8 @@ class WorkflowDeploymentExecutor:
         deployment: WorkflowDeployment,
         conversation_history: str,
         session_id: Optional[str] = None,
-        execution_id: Optional[str] = None
+        execution_id: Optional[str] = None,
+        current_user_query: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Execute a deployed workflow with full conversation history
@@ -40,6 +41,7 @@ class WorkflowDeploymentExecutor:
             conversation_history: Full conversation history as formatted string
             session_id: Optional session ID for conversation tracking
             execution_id: Optional execution ID for linking to DeploymentExecution
+            current_user_query: Current user query for UserProxyAgent nodes in deployment context
             
         Returns:
             Dict containing execution results
@@ -87,7 +89,29 @@ class WorkflowDeploymentExecutor:
                 # Use a system user or the deployment creator for execution context
                 executed_by = await sync_to_async(lambda: deployment.created_by)()
                 
-                execution_result = await self.orchestrator.execute_workflow(workflow, executed_by)
+                # Pass deployment context with current user query for UserProxyAgent handling
+                deployment_context = {
+                    'is_deployment': True,
+                    'current_user_query': current_user_query or '',
+                    'session_id': session_id
+                }
+                
+                execution_result = await self.orchestrator.execute_workflow(
+                    workflow, 
+                    executed_by,
+                    deployment_context=deployment_context
+                )
+                
+                # Log execution result status for debugging
+                logger.info(f"🔍 DEPLOYMENT: Execution result status: {execution_result.get('status')}")
+                logger.debug(f"🔍 DEPLOYMENT: Execution result keys: {list(execution_result.keys())}")
+                
+                # Check if workflow execution is awaiting human input (UserProxyAgent in deployment)
+                if execution_result.get('status') == 'awaiting_human_input':
+                    logger.info(f"👤 DEPLOYMENT: Workflow execution paused for human input - UserProxyAgent requires user response")
+                    logger.info(f"👤 DEPLOYMENT: Returning awaiting_human_input status with title: {execution_result.get('title', 'N/A')}")
+                    # Return the awaiting_human_input status directly - deployment views will handle it
+                    return execution_result
                 
                 # Extract End node messages as response
                 end_node_output = self._extract_end_node_output(execution_result, graph_json)
@@ -99,9 +123,18 @@ class WorkflowDeploymentExecutor:
                 # Get execution_id from execution_result or use provided one
                 result_execution_id = execution_result.get('execution_id')
                 
+                # Ensure we have a valid response
+                if not end_node_output and execution_result.get('status') == 'success':
+                    logger.warning(f"⚠️ DEPLOYMENT: No response extracted, but execution status is success - using fallback")
+                    # Try to get from conversation history as last resort
+                    conv_history = execution_result.get('conversation_history', '')
+                    if conv_history:
+                        # Extract last assistant response from conversation history
+                        end_node_output = self._extract_last_assistant_from_history(conv_history)
+                
                 return {
                     'status': 'success',
-                    'response': end_node_output,
+                    'response': end_node_output or '',
                     'execution_time_ms': execution_time_ms,
                     'workflow_name': await sync_to_async(lambda: workflow.name)(),
                     'execution_id': result_execution_id,

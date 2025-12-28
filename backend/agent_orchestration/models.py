@@ -227,6 +227,32 @@ class DeploymentSession(models.Model):
         help_text='Last time a message was added to this session'
     )
     
+    # Human input tracking for UserProxyAgent in deployment context
+    awaiting_human_input = models.BooleanField(
+        default=False,
+        help_text='Whether this session is awaiting human input from UserProxyAgent'
+    )
+    paused_execution_id = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text='WorkflowExecution ID of the paused execution'
+    )
+    human_input_prompt = models.TextField(
+        blank=True,
+        help_text='Last conversation message to display when requesting human input'
+    )
+    human_input_agent_name = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text='Name of the UserProxyAgent awaiting input'
+    )
+    human_input_agent_id = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text='Node ID of the UserProxyAgent awaiting input'
+    )
+    
     class Meta:
         ordering = ['-last_activity']
         unique_together = ['deployment', 'session_id']

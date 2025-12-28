@@ -84,8 +84,27 @@ def get_pending_human_inputs(request):
                 f"📋 PENDING_INPUTS: Execution IDs: {[ex.execution_id[:8] for ex in pending_executions]}"
             )
         
+        # Filter out deployment executions with user input mode (these should only show in client UI)
+        from .models import DeploymentSession
         pending_inputs_data = []
         for execution in pending_executions:
+            # Check if this execution is in deployment context with user input mode
+            human_input_context = execution.human_input_context or {}
+            input_mode = human_input_context.get('input_mode', 'user')
+            is_deployment = human_input_context.get('is_deployment', False)
+            
+            # Also check DeploymentSession to be sure
+            deployment_session_exists = DeploymentSession.objects.filter(
+                paused_execution_id=execution.execution_id
+            ).exists()
+            
+            # Skip if it's user input mode in deployment context (should only show in client UI)
+            if (input_mode == 'user' and (is_deployment or deployment_session_exists)):
+                logger.debug(
+                    f"⏭️ PENDING_INPUTS: Skipping execution {execution.execution_id[:8]} - "
+                    f"user input mode in deployment context (input_mode={input_mode}, is_deployment={is_deployment}, session_exists={deployment_session_exists})"
+                )
+                continue
             logger.debug(
                 f"📝 PENDING_INPUTS: Processing execution {execution.execution_id[:8]} - "
                 f"workflow={execution.workflow.name}, agent={execution.awaiting_human_input_agent}"

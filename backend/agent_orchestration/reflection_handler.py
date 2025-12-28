@@ -9,7 +9,7 @@ import logging
 import asyncio
 import time
 import traceback
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
@@ -102,11 +102,14 @@ Please provide your improved response:
         logger.info(f"🎯 SELF-REFLECTION: Completed {len(self_reflection_connections)} self-reflection iterations for {agent_name}")
         return current_response
 
-    async def handle_cross_agent_reflection(self, source_node, source_response, reflection_edge, graph_json, execution_record, conversation_history):
+    async def handle_cross_agent_reflection(self, source_node, source_response, reflection_edge, graph_json, execution_record, conversation_history, deployment_context: Optional[Dict[str, Any]] = None):
         """
         Handle cross-agent reflection where one agent sends a message to another agent for reflection/feedback
 
         Flow: Source Agent → Target Agent (reflection) → Source Agent (processes reflection) → Continue workflow
+        
+        Args:
+            deployment_context: Optional deployment context to check input_mode for UserProxyAgent
         """
         source_id = source_node.get('id')
         source_name = source_node.get('data', {}).get('name', 'Source Agent')
@@ -160,7 +163,11 @@ Please provide your feedback, suggestions, or response:
                 # Check if UserProxy requires human input
                 target_data = target_node.get('data', {})
                 if target_data.get('require_human_input', True):
-                    logger.info(f"👤 CROSS-AGENT-REFLECTION: UserProxy {target_name} requires human input - pausing for human input")
+                    # Get input mode (default to 'user' for backward compatibility)
+                    input_mode = target_data.get('input_mode', 'user')
+                    is_deployment = deployment_context is not None and deployment_context.get('is_deployment', False)
+                    
+                    logger.info(f"👤 CROSS-AGENT-REFLECTION: UserProxy {target_name} requires human input - input_mode={input_mode}, is_deployment={is_deployment}")
                     logger.info(f"🔍 CROSS-AGENT-REFLECTION: Original source response length: {len(original_source_response)} chars")
                     logger.info(f"🔍 CROSS-AGENT-REFLECTION: Original source response content: {original_source_response[:500]}...")
 
@@ -184,7 +191,10 @@ Please provide your feedback, suggestions, or response:
                         'source_message': original_source_response,
                         'iteration': iteration + 1,
                         'max_iterations': max_iterations,
-                        'prompt': f"Please review this message from {source_name} and provide feedback:"
+                        'prompt': f"Please review this message from {source_name} and provide feedback:",
+                        # Store input_mode and deployment context for filtering
+                        'input_mode': input_mode,
+                        'is_deployment': is_deployment
                     }
 
                     # Pause workflow for human input
@@ -192,8 +202,13 @@ Please provide your feedback, suggestions, or response:
                         execution_record, target_node, human_input_context, current_conversation
                     )
 
-                    # Return special indicator that we're waiting for human input in reflection
-                    return 'AWAITING_REFLECTION_INPUT', current_conversation
+                    # Check if this is user input mode in deployment context
+                    if input_mode == 'user' and is_deployment:
+                        # Return special indicator for deployment context
+                        return 'AWAITING_DEPLOYMENT_INPUT', current_conversation
+                    else:
+                        # Return special indicator that we're waiting for human input in reflection (admin UI)
+                        return 'AWAITING_REFLECTION_INPUT', current_conversation
                 else:
                     # UserProxy without human input - generate automatic response
                     target_response = f"Feedback from {target_name}: This looks good, please proceed."

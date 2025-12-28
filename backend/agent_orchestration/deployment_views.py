@@ -813,7 +813,8 @@ def public_chat_endpoint(request, project_id):
                     deployment,
                     full_conversation,
                     session_id,
-                    execution_id
+                    execution_id,
+                    current_user_query=user_query  # Pass current user query for UserProxyAgent handling
                 )
             )
         except Exception as e:
@@ -873,6 +874,21 @@ def public_chat_endpoint(request, project_id):
                     'session_id': session_id
                 }
             })
+        elif execution_result.get('status') == 'awaiting_human_input':
+            # UserProxyAgent requires human input - return special response
+            return JsonResponse({
+                'status': 'awaiting_human_input',
+                'human_input_required': True,
+                'title': execution_result.get('title', 'USER INPUT REQUIRED'),
+                'last_conversation_message': execution_result.get('last_conversation_message', ''),
+                'agent_name': execution_result.get('agent_name', ''),
+                'execution_id': execution_result.get('execution_id', ''),
+                'session_id': session_id,
+                'metadata': {
+                    'request_id': request_id,
+                    'workflow_name': execution_result.get('workflow_name', '')
+                }
+            })
         else:
             return JsonResponse({
                 'status': 'error',
@@ -896,6 +912,313 @@ def public_chat_endpoint(request, project_id):
         return JsonResponse({
             'status': 'error',
             'error': 'An error occurred while processing your request',
+            'request_id': request_id
+        }, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST", "OPTIONS"])
+@never_cache
+def submit_deployment_human_input(request, project_id):
+    """
+    Submit human input for a paused deployment workflow execution.
+    
+    POST /api/workflow-deploy/{project_id}/submit-input/
+    Body: { "session_id": "...", "user_input": "..." }
+    """
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = JsonResponse({'status': 'ok'})
+        return response
+    
+    origin = request.META.get('HTTP_ORIGIN', '')
+    request_id = f"submit_input_{timezone.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    start_time = timezone.now()
+    
+    try:
+        # Get project and deployment
+        try:
+            project = IntelliDocProject.objects.get(project_id=project_id)
+        except IntelliDocProject.DoesNotExist:
+            return JsonResponse({
+                'status': 'error',
+                'error': 'Project not found',
+                'request_id': request_id
+            }, status=404)
+        
+        deployment = WorkflowDeployment.objects.filter(
+            project=project,
+            is_active=True
+        ).first()
+        
+        if not deployment:
+            return JsonResponse({
+                'status': 'error',
+                'error': 'No active deployment found for this project',
+                'request_id': request_id
+            }, status=404)
+        
+        # Parse request body
+        try:
+            data = json.loads(request.body) if request.body else {}
+        except json.JSONDecodeError:
+            return JsonResponse({
+                'status': 'error',
+                'error': 'Invalid JSON format',
+                'request_id': request_id
+            }, status=400)
+        
+        session_id = data.get('session_id', '').strip()
+        user_input = data.get('user_input', '').strip()
+        
+        if not session_id:
+            return JsonResponse({
+                'status': 'error',
+                'error': 'Session ID is required',
+                'request_id': request_id
+            }, status=400)
+        
+        if not user_input:
+            return JsonResponse({
+                'status': 'error',
+                'error': 'User input is required',
+                'request_id': request_id
+            }, status=400)
+        
+        # Get deployment session
+        try:
+            deployment_session = DeploymentSession.objects.get(
+                deployment=deployment,
+                session_id=session_id
+            )
+        except DeploymentSession.DoesNotExist:
+            return JsonResponse({
+                'status': 'error',
+                'error': 'Session not found',
+                'request_id': request_id
+            }, status=404)
+        
+        # Check if session is awaiting human input
+        if not deployment_session.awaiting_human_input:
+            return JsonResponse({
+                'status': 'error',
+                'error': 'Session is not awaiting human input',
+                'request_id': request_id
+            }, status=400)
+        
+        # Get the paused execution
+        if not deployment_session.paused_execution_id:
+            return JsonResponse({
+                'status': 'error',
+                'error': 'No paused execution found for this session',
+                'request_id': request_id
+            }, status=400)
+        
+        # Resume workflow execution asynchronously (non-blocking)
+        import threading
+        from .conversation_orchestrator import ConversationOrchestrator
+        
+        # Create a thread-safe result container
+        result_container = {'result': None, 'error': None, 'completed': False}
+        
+        def resume_workflow_async():
+            """Resume workflow in background thread"""
+            from django.db import close_old_connections
+            close_old_connections()
+            
+            try:
+                from users.models import WorkflowExecution
+                # Get fresh session and execution records in the background thread
+                session = DeploymentSession.objects.get(
+                    deployment=deployment,
+                    session_id=session_id
+                )
+                
+                if not session.paused_execution_id:
+                    raise ValueError(f"No paused execution ID found in session {session_id}")
+                
+                logger.info(f"🔍 DEPLOYMENT: Looking for execution_id: {session.paused_execution_id}")
+                
+                try:
+                    execution_record = WorkflowExecution.objects.get(
+                        execution_id=session.paused_execution_id
+                    )
+                    logger.info(f"✅ DEPLOYMENT: Found execution record {execution_record.execution_id[:8]}")
+                    
+                    # Verify execution is in a valid state for resuming
+                    from users.models import WorkflowExecutionStatus
+                    if execution_record.status not in [WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.PENDING]:
+                        logger.error(f"❌ DEPLOYMENT: Execution {execution_record.execution_id[:8]} is in {execution_record.status} state, cannot resume")
+                        raise ValueError(f"Execution {execution_record.execution_id} is in {execution_record.status} state, cannot resume")
+                    
+                except WorkflowExecution.DoesNotExist:
+                    logger.error(f"❌ DEPLOYMENT: WorkflowExecution {session.paused_execution_id} not found")
+                    logger.error(f"❌ DEPLOYMENT: Session paused_execution_id: {session.paused_execution_id}")
+                    logger.error(f"❌ DEPLOYMENT: Session awaiting_human_input: {session.awaiting_human_input}")
+                    
+                    # Try to find the execution by checking recent executions for this workflow
+                    workflow = deployment.workflow
+                    if workflow:
+                        recent_execution = WorkflowExecution.objects.filter(
+                            workflow=workflow
+                        ).order_by('-start_time').first()
+                        
+                        if recent_execution:
+                            # Verify execution is in a valid state for resuming
+                            from users.models import WorkflowExecutionStatus
+                            if recent_execution.status not in [WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.PENDING]:
+                                logger.error(f"❌ DEPLOYMENT: Recent execution {recent_execution.execution_id[:8]} is in {recent_execution.status} state, cannot resume")
+                                raise ValueError(f"Execution {recent_execution.execution_id} is in {recent_execution.status} state, cannot resume")
+                            
+                            logger.warning(f"⚠️ DEPLOYMENT: Using recent execution {recent_execution.execution_id[:8]} instead")
+                            execution_record = recent_execution
+                            # Update session with correct execution_id
+                            session.paused_execution_id = execution_record.execution_id
+                            session.save()
+                        else:
+                            raise ValueError(f"WorkflowExecution {session.paused_execution_id} not found and no recent executions available")
+                    else:
+                        raise ValueError(f"WorkflowExecution {session.paused_execution_id} not found and no workflow available")
+                
+                # Add user input to conversation history immediately (before resuming workflow)
+                # This ensures it appears in the chat UI right away
+                session.conversation_history.append({
+                    'role': 'user',
+                    'content': user_input,
+                    'timestamp': timezone.now().isoformat()
+                })
+                session.message_count = len(session.conversation_history)
+                session.last_activity = timezone.now()
+                session.save()
+                logger.info(f"📝 DEPLOYMENT: Added user input to session conversation history: {user_input[:100]}...")
+                
+                # Resume workflow with user input
+                orchestrator = ConversationOrchestrator()
+                result = asyncio.run(
+                    orchestrator.resume_workflow_with_human_input(
+                        execution_record.execution_id,
+                        user_input,
+                        deployment.created_by
+                    )
+                )
+                
+                result_container['result'] = result
+                result_container['completed'] = True
+                
+                # Clear pause state from session
+                session.awaiting_human_input = False
+                session.paused_execution_id = None
+                session.human_input_prompt = ''
+                session.human_input_agent_name = ''
+                session.human_input_agent_id = ''
+                session.save()
+                
+                logger.info(f"✅ DEPLOYMENT: Resumed workflow execution {execution_record.execution_id[:8]} with user input")
+                
+            except Exception as e:
+                logger.error(f"❌ DEPLOYMENT: Failed to resume workflow: {e}", exc_info=True)
+                result_container['error'] = str(e)
+                result_container['completed'] = True
+        
+        # Start background thread
+        resume_thread = threading.Thread(
+            target=resume_workflow_async,
+            daemon=True,
+            name=f"deploy-resume-{deployment_session.paused_execution_id[:8]}"
+        )
+        resume_thread.start()
+        
+        # Wait for completion (with timeout)
+        import time
+        timeout = 60  # 60 seconds timeout
+        elapsed = 0
+        while not result_container['completed'] and elapsed < timeout:
+            time.sleep(0.1)
+            elapsed += 0.1
+        
+        if not result_container['completed']:
+            # Timeout - return response indicating processing is ongoing
+            return JsonResponse({
+                'status': 'processing',
+                'message': 'Workflow is being processed. Please check back shortly.',
+                'session_id': session_id,
+                'request_id': request_id
+            })
+        
+        if result_container['error']:
+            return JsonResponse({
+                'status': 'error',
+                'error': result_container['error'],
+                'request_id': request_id
+            }, status=500)
+        
+        # Extract response from result
+        result = result_container['result']
+        
+        # Check if workflow is still awaiting human input (another UserProxyAgent)
+        if result.get('status') == 'awaiting_human_input':
+            # Another UserProxyAgent requires input - return the same format
+            return JsonResponse({
+                'status': 'awaiting_human_input',
+                'human_input_required': True,
+                'title': result.get('title', 'USER INPUT REQUIRED'),
+                'last_conversation_message': result.get('last_conversation_message', ''),
+                'agent_name': result.get('agent_name', ''),
+                'execution_id': result.get('execution_id', ''),
+                'session_id': session_id,
+                'metadata': {
+                    'request_id': request_id
+                }
+            })
+        elif result.get('status') == 'success':
+            # Extract response from execution result
+            from .deployment_executor import WorkflowDeploymentExecutor
+            executor = WorkflowDeploymentExecutor()
+            
+            # Get workflow graph for response extraction
+            workflow = deployment.workflow
+            if workflow:
+                graph_json = workflow.graph_json
+                assistant_response = executor._extract_end_node_output(result, graph_json)
+            else:
+                # Fallback: try to get from result directly
+                assistant_response = result.get('response', '') or result.get('conversation_history', '')
+            
+            # User input was already added to conversation history when submitted
+            # Just add the assistant response now
+            if assistant_response:
+                deployment_session.conversation_history.append({
+                    'role': 'assistant',
+                    'content': assistant_response,
+                    'timestamp': timezone.now().isoformat()
+                })
+            deployment_session.message_count = len(deployment_session.conversation_history)
+            deployment_session.last_activity = timezone.now()
+            deployment_session.save()
+            
+            execution_time_ms = int((timezone.now() - start_time).total_seconds() * 1000)
+            
+            return JsonResponse({
+                'status': 'success',
+                'response': assistant_response,
+                'metadata': {
+                    'request_id': request_id,
+                    'execution_time_ms': execution_time_ms,
+                    'session_id': session_id
+                }
+            })
+        else:
+            return JsonResponse({
+                'status': 'error',
+                'error': result.get('error', 'Workflow execution failed'),
+                'request_id': request_id
+            }, status=500)
+        
+    except Exception as e:
+        logger.error(f"❌ DEPLOYMENT: Error in submit-input endpoint: {e}", exc_info=True)
+        return JsonResponse({
+            'status': 'error',
+            'error': 'An error occurred while processing your input',
             'request_id': request_id
         }, status=500)
 
@@ -954,6 +1277,17 @@ def embed_chatbot_html(request, project_id):
     .chat-input button {{ background:#0b3b66; color:#fff; border:none; border-radius:10px; padding:0 14px; font-size:13px; cursor:pointer; display:flex; align-items:center; gap:6px; }}
     .chat-input button:disabled {{ opacity:0.6; cursor:not-allowed; }}
     .status {{ font-size:11px; color:#6b7280; padding:4px 12px 8px; }}
+    .human-input-modal {{ display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index:1000; justify-content:center; align-items:center; }}
+    .human-input-modal.active {{ display:flex; }}
+    .human-input-box {{ background:#fff; border-radius:12px; padding:24px; max-width:500px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.3); }}
+    .human-input-title {{ font-size:18px; font-weight:600; color:#0b3b66; margin-bottom:12px; }}
+    .human-input-message {{ background:#f9fafb; border:1px solid #e5e7eb; border-radius:8px; padding:12px; margin-bottom:16px; font-size:14px; color:#374151; line-height:1.5; }}
+    .human-input-textarea {{ width:100%; min-height:80px; border:1px solid #d1d5db; border-radius:8px; padding:10px; font-size:14px; resize:vertical; font-family:inherit; }}
+    .human-input-buttons {{ display:flex; gap:8px; justify-content:flex-end; margin-top:16px; }}
+    .human-input-buttons button {{ padding:8px 16px; border-radius:8px; font-size:14px; cursor:pointer; border:none; }}
+    .human-input-buttons .submit-btn {{ background:#0b3b66; color:#fff; }}
+    .human-input-buttons .submit-btn:disabled {{ opacity:0.6; cursor:not-allowed; }}
+    .human-input-buttons .cancel-btn {{ background:#f3f4f6; color:#374151; }}
   </style>
 </head>
 <body>
@@ -974,17 +1308,39 @@ def embed_chatbot_html(request, project_id):
   </div>
 </div>
 
+<!-- Human Input Modal -->
+<div id="humanInputModal" class="human-input-modal">
+  <div class="human-input-box">
+    <div class="human-input-title" id="humanInputTitle">USER INPUT REQUIRED</div>
+    <div class="human-input-message" id="humanInputMessage"></div>
+    <textarea id="humanInputTextarea" class="human-input-textarea" placeholder="Enter your response..."></textarea>
+    <div class="human-input-buttons">
+      <button class="cancel-btn" id="humanInputCancel">Cancel</button>
+      <button class="submit-btn" id="humanInputSubmit">Submit</button>
+    </div>
+  </div>
+</div>
+
 <script>
   const ENDPOINT_URL = {json.dumps(endpoint_url)};
+  const SUBMIT_INPUT_URL = ENDPOINT_URL.replace(/\/$/, '') + '/submit-input/';
   const INITIAL_GREETING = {json.dumps(initial_greeting)};
 
   const messages = [];
   const sessionId = 'sess_' + Math.random().toString(36).slice(2);
+  let currentExecutionId = null;
+  let awaitingHumanInput = false;
 
   const messagesEl = document.getElementById('messages');
   const inputEl = document.getElementById('input');
   const sendBtn = document.getElementById('sendBtn');
   const statusEl = document.getElementById('status');
+  const humanInputModal = document.getElementById('humanInputModal');
+  const humanInputTitle = document.getElementById('humanInputTitle');
+  const humanInputMessage = document.getElementById('humanInputMessage');
+  const humanInputTextarea = document.getElementById('humanInputTextarea');
+  const humanInputSubmit = document.getElementById('humanInputSubmit');
+  const humanInputCancel = document.getElementById('humanInputCancel');
 
   function appendMessage(role, text) {{
     const msg = document.createElement('div');
@@ -997,9 +1353,94 @@ def embed_chatbot_html(request, project_id):
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }}
 
+  function showHumanInputModal(title, message) {{
+    humanInputTitle.textContent = title || 'USER INPUT REQUIRED';
+    humanInputMessage.textContent = message || 'Please provide your input to continue.';
+    humanInputTextarea.value = '';
+    humanInputModal.classList.add('active');
+    humanInputTextarea.focus();
+    awaitingHumanInput = true;
+    inputEl.disabled = true;
+    sendBtn.disabled = true;
+  }}
+
+  function hideHumanInputModal() {{
+    humanInputModal.classList.remove('active');
+    awaitingHumanInput = false;
+    inputEl.disabled = false;
+    sendBtn.disabled = false;
+  }}
+
+  async function submitHumanInput() {{
+    const userInput = humanInputTextarea.value.trim();
+    if (!userInput) {{
+      alert('Please enter your response');
+      return;
+    }}
+
+    humanInputSubmit.disabled = true;
+    statusEl.textContent = 'Submitting your response...';
+
+    try {{
+      const resp = await fetch(SUBMIT_INPUT_URL, {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{
+          session_id: sessionId,
+          user_input: userInput
+        }})
+      }});
+
+      if (!resp.ok) {{
+        const err = await resp.json().catch(() => ({{}}));
+        throw new Error(err.error || 'HTTP ' + resp.status);
+      }}
+
+      const data = await resp.json();
+      
+      // Add user input to conversation
+      appendMessage('user', userInput);
+      messages.push({{ role: 'user', content: userInput }});
+      
+      hideHumanInputModal();
+
+      if (data.status === 'awaiting_human_input') {{
+        // Another UserProxyAgent requires input
+        showHumanInputModal(data.title, data.last_conversation_message);
+        currentExecutionId = data.execution_id;
+      }} else if (data.status === 'success') {{
+        const reply = data.response || '(No response)';
+        appendMessage('assistant', reply);
+        messages.push({{ role: 'assistant', content: reply }});
+        statusEl.textContent = '';
+        currentExecutionId = null;
+      }} else if (data.status === 'processing') {{
+        statusEl.textContent = 'Workflow is processing. Please wait...';
+        // Poll for completion or show message
+        setTimeout(() => {{
+          statusEl.textContent = 'Processing complete. Check the conversation.';
+        }}, 2000);
+      }} else {{
+        appendMessage('assistant', 'Error: ' + (data.error || 'Unexpected error'));
+        statusEl.textContent = 'Error from workflow endpoint';
+      }}
+    }} catch (e) {{
+      console.error('Submit input error:', e);
+      appendMessage('assistant', 'Sorry, there was a problem submitting your input.');
+      statusEl.textContent = e.message || 'Network error';
+    }} finally {{
+      humanInputSubmit.disabled = false;
+    }}
+  }}
+
   async function sendMessage() {{
     const text = inputEl.value.trim();
     if (!text) return;
+
+    if (awaitingHumanInput) {{
+      alert('Please respond to the human input request first');
+      return;
+    }}
 
     appendMessage('user', text);
     messages.push({{ role: 'user', content: text }});
@@ -1024,7 +1465,13 @@ def embed_chatbot_html(request, project_id):
       }}
 
       const data = await resp.json();
-      if (data.status === 'success') {{
+      
+      if (data.status === 'awaiting_human_input') {{
+        // UserProxyAgent requires human input
+        showHumanInputModal(data.title, data.last_conversation_message);
+        currentExecutionId = data.execution_id;
+        statusEl.textContent = 'Waiting for your input...';
+      }} else if (data.status === 'success') {{
         const reply = data.response || '(No response)';
         appendMessage('assistant', reply);
         messages.push({{ role: 'assistant', content: reply }});
@@ -1038,15 +1485,29 @@ def embed_chatbot_html(request, project_id):
       appendMessage('assistant', 'Sorry, there was a problem talking to the workflow.');
       statusEl.textContent = e.message || 'Network error';
     }} finally {{
-      sendBtn.disabled = false;
+      if (!awaitingHumanInput) {{
+        sendBtn.disabled = false;
+      }}
     }}
   }}
 
   sendBtn.addEventListener('click', sendMessage);
   inputEl.addEventListener('keydown', (e) => {{
-    if (e.key === 'Enter' && !e.shiftKey) {{
+    if (e.key === 'Enter' && !e.shiftKey && !awaitingHumanInput) {{
       e.preventDefault();
       sendMessage();
+    }}
+  }});
+
+  humanInputSubmit.addEventListener('click', submitHumanInput);
+  humanInputCancel.addEventListener('click', () => {{
+    hideHumanInputModal();
+    statusEl.textContent = 'Input cancelled';
+  }});
+  humanInputTextarea.addEventListener('keydown', (e) => {{
+    if (e.key === 'Enter' && e.ctrlKey) {{
+      e.preventDefault();
+      submitHumanInput();
     }}
   }});
 

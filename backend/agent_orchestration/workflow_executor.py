@@ -67,10 +67,15 @@ class WorkflowExecutor:
         self.human_input_handler = human_input_handler
         self.reflection_handler = reflection_handler
     
-    async def execute_workflow(self, workflow: AgentWorkflow, executed_by) -> Dict[str, Any]:
+    async def execute_workflow(self, workflow: AgentWorkflow, executed_by, deployment_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Execute the complete workflow with REAL LLM calls and conversation chaining
         Returns execution results as dictionary instead of database records
+        
+        Args:
+            workflow: The AgentWorkflow instance to execute
+            executed_by: User who initiated the execution
+            deployment_context: Optional deployment context with user query for UserProxyAgent handling
         """
         # Get workflow data using sync_to_async to avoid async context issues
         workflow_id = await sync_to_async(lambda: workflow.workflow_id)()
@@ -78,7 +83,11 @@ class WorkflowExecutor:
         workflow_name = await sync_to_async(lambda: workflow.name)()
         project_id = await sync_to_async(lambda: workflow.project.project_id)()
         
-        logger.info(f"🚀 ORCHESTRATOR: Starting REAL workflow execution for {workflow_id}")
+        is_deployment = deployment_context is not None and deployment_context.get('is_deployment', False)
+        if is_deployment:
+            logger.info(f"🚀 DEPLOYMENT: Starting workflow execution for {workflow_id} (deployment mode)")
+        else:
+            logger.info(f"🚀 ORCHESTRATOR: Starting REAL workflow execution for {workflow_id}")
         
         start_time = timezone.now()
         execution_id = f"exec_{int(time.time() * 1000)}" # Added milliseconds for uniqueness
@@ -347,13 +356,97 @@ class WorkflowExecutor:
                     # PHASE 2: USERPROXYAGENT HUMAN INPUT DETECTION AND DOCAWARE PROCESSING
                     # ============================================================================
                     if node_type == 'UserProxyAgent' and node_data.get('require_human_input', True):
-                        logger.info(f"👤 HUMAN INPUT: UserProxyAgent {node_name} requires human input")
+                        # Get input mode (default to 'user' for backward compatibility)
+                        input_mode = node_data.get('input_mode', 'user')
                         
-                        # PAUSE WORKFLOW - NEW IMPLEMENTATION
-                        human_input_data = await self.human_input_handler.pause_for_human_input(
-                            workflow, node, executed_nodes, conversation_history, execution_record
-                        )
-                        return human_input_data  # Return paused state
+                        # Admin Input Mode: Always use internal pause mechanism (admin UI)
+                        if input_mode == 'admin':
+                            logger.info(f"👤 ADMIN INPUT: UserProxyAgent {node_name} requires admin input (input_mode=admin)")
+                            
+                            # PAUSE WORKFLOW - Use internal pause mechanism
+                            human_input_data = await self.human_input_handler.pause_for_human_input(
+                                workflow, node, executed_nodes, conversation_history, execution_record
+                            )
+                            
+                            # If in deployment context, also store in deployment session for admin to provide input
+                            if is_deployment and deployment_context:
+                                session_id = deployment_context.get('session_id')
+                                if session_id:
+                                    last_message = self._extract_last_conversation_message(messages, conversation_history)
+                                    await self._store_deployment_pause_state(
+                                        session_id, execution_record, node_id, node_name, last_message
+                                    )
+                                    logger.info(f"💾 DEPLOYMENT: Stored admin input pause state in session {session_id[:8]}")
+                            
+                            return human_input_data  # Return paused state
+                        
+                        # User Input Mode: Check context
+                        elif input_mode == 'user':
+                            # In deployment context: Use deployment pause mechanism (client-side)
+                            if is_deployment and deployment_context:
+                                logger.info(f"👤 DEPLOYMENT: UserProxyAgent {node_name} requires user input in deployment context")
+                                
+                                # Extract the last conversation message to show to the user
+                                last_message = self._extract_last_conversation_message(messages, conversation_history)
+                                
+                                # Get the description from UserProxyAgent node data (default to "USER INPUT REQUIRED")
+                                agent_description = node_data.get('description', 'USER INPUT REQUIRED')
+                                if not agent_description or not agent_description.strip():
+                                    agent_description = 'USER INPUT REQUIRED'
+                                
+                                # Find input sources (connected agents that feed into this UserProxyAgent)
+                                # This is needed to properly update the execution record
+                                input_sources = self.workflow_parser.find_multiple_inputs_to_node(node_id, graph_json)
+                                aggregated_context = self.workflow_parser.aggregate_multiple_inputs(input_sources, executed_nodes)
+                                
+                                # Update execution record to indicate human input required
+                                # This is critical for resume_workflow_with_human_input to find the execution
+                                # Store input_mode in context so we can filter deployment executions from admin UI
+                                aggregated_context['input_mode'] = input_mode
+                                aggregated_context['is_deployment'] = True
+                                await sync_to_async(self.human_input_handler.update_execution_for_human_input)(
+                                    execution_record, node_id, node_name, aggregated_context
+                                )
+                                
+                                # Store execution state in deployment session (non-blocking)
+                                session_id = deployment_context.get('session_id')
+                                if session_id:
+                                    await self._store_deployment_pause_state(
+                                        session_id, execution_record, node_id, node_name, last_message
+                                    )
+                                
+                                # Return special response indicating human input is required
+                                return {
+                                    'status': 'awaiting_human_input',
+                                    'execution_id': execution_record.execution_id,
+                                    'agent_name': node_name,
+                                    'agent_id': node_id,
+                                    'human_input_required': True,
+                                    'title': agent_description.strip(),
+                                    'last_conversation_message': last_message,
+                                    'message': f'UserProxyAgent {node_name} requires your input',
+                                    'conversation_history': conversation_history
+                                }
+                            else:
+                                # In admin UI context: Use internal pause mechanism (for testing)
+                                logger.info(f"👤 USER INPUT: UserProxyAgent {node_name} requires user input in admin UI")
+                                
+                                # PAUSE WORKFLOW - Use internal pause mechanism
+                                human_input_data = await self.human_input_handler.pause_for_human_input(
+                                    workflow, node, executed_nodes, conversation_history, execution_record
+                                )
+                                return human_input_data  # Return paused state
+                        else:
+                            # Unknown input_mode, default to user input behavior
+                            logger.warning(f"⚠️ USERPROXY: Unknown input_mode '{input_mode}', defaulting to user input behavior")
+                            # Fall through to regular pause
+                            logger.info(f"👤 HUMAN INPUT: UserProxyAgent {node_name} requires human input")
+                            
+                            # PAUSE WORKFLOW - NEW IMPLEMENTATION
+                            human_input_data = await self.human_input_handler.pause_for_human_input(
+                                workflow, node, executed_nodes, conversation_history, execution_record
+                            )
+                            return human_input_data  # Return paused state
                     
                     # Handle agent nodes with real LLM calls
                     agent_config = {
@@ -561,17 +654,65 @@ class WorkflowExecutor:
                                     logger.info(f"🔄 CROSS-AGENT-REFLECTION: Processing cross-agent reflection from {node_name}")
                                     
                                     reflection_result, updated_conversation = await self.reflection_handler.handle_cross_agent_reflection(
-                                        node, original_agent_response, reflection_edge, graph_json, execution_record, conversation_history
+                                        node, original_agent_response, reflection_edge, graph_json, execution_record, conversation_history, deployment_context
                                     )
+                                    
+                                    logger.info(f"🔍 CROSS-AGENT-REFLECTION: Reflection result type: {type(reflection_result)}, value: {reflection_result}")
                                     
                                     # Check if we're waiting for human input in reflection
                                     if reflection_result == 'AWAITING_REFLECTION_INPUT':
-                                        logger.info(f"👤 CROSS-AGENT-REFLECTION: Pausing workflow - awaiting human input for reflection")
+                                        logger.info(f"👤 CROSS-AGENT-REFLECTION: Pausing workflow - awaiting human input for reflection (admin UI)")
                                         return {
                                             'status': 'paused_for_reflection_input',
                                             'conversation_history': updated_conversation,
                                             'message': f'Workflow paused - {execution_record.awaiting_human_input_agent} needs to provide reflection feedback',
                                             'execution_id': execution_record.execution_id
+                                        }
+                                    elif reflection_result == 'AWAITING_DEPLOYMENT_INPUT':
+                                        # User input mode in deployment context - return deployment pause status
+                                        logger.info(f"👤 CROSS-AGENT-REFLECTION: Pausing workflow - awaiting user input for reflection in deployment")
+                                        
+                                        # Get target node info for response
+                                        target_node_id = execution_record.human_input_agent_id
+                                        target_node_name = execution_record.awaiting_human_input_agent
+                                        
+                                        # Find target node to get description
+                                        target_node = None
+                                        for n in graph_json.get('nodes', []):
+                                            if n.get('id') == target_node_id:
+                                                target_node = n
+                                                break
+                                        
+                                        target_data = target_node.get('data', {}) if target_node else {}
+                                        agent_description = target_data.get('description', 'USER INPUT REQUIRED')
+                                        if not agent_description or not agent_description.strip():
+                                            agent_description = 'USER INPUT REQUIRED'
+                                        
+                                        # Extract last message
+                                        last_message = self._extract_last_conversation_message(messages, updated_conversation)
+                                        
+                                        # Store execution state in deployment session
+                                        session_id = deployment_context.get('session_id') if deployment_context else None
+                                        if session_id:
+                                            await self._store_deployment_pause_state(
+                                                session_id, execution_record, target_node_id, target_node_name, last_message
+                                            )
+                                        
+                                        logger.info(f"✅ CROSS-AGENT-REFLECTION: Returning awaiting_human_input status - stopping execution")
+                                        logger.info(f"✅ CROSS-AGENT-REFLECTION: Title: {agent_description.strip()}, Last message: {last_message[:100] if last_message else 'N/A'}...")
+                                        
+                                        # CRITICAL: Return immediately to stop execution - do not continue processing
+                                        return {
+                                            'status': 'awaiting_human_input',
+                                            'execution_id': execution_record.execution_id,
+                                            'agent_name': target_node_name,
+                                            'agent_id': target_node_id,
+                                            'human_input_required': True,
+                                            'title': agent_description.strip(),
+                                            'last_conversation_message': last_message,
+                                            'message': f'UserProxyAgent {target_node_name} requires your input (reflection)',
+                                            'conversation_history': updated_conversation,
+                                            'messages': messages  # Include messages so far for debugging
                                         }
                                     else:
                                         # Reflection completed successfully
@@ -778,11 +919,25 @@ class WorkflowExecutor:
                 'result_summary': f"Execution failed: {str(e)}"
             }
     
-    async def continue_workflow_execution(self, workflow, execution_record, execution_sequence, start_position, executed_nodes):
+    async def continue_workflow_execution(self, workflow, execution_record, execution_sequence, start_position, executed_nodes, deployment_context: Optional[Dict[str, Any]] = None):
         """
         Continue workflow execution from a specific position (used after reflection completion)
+        
+        Args:
+            workflow: The workflow being executed
+            execution_record: The execution record to continue
+            execution_sequence: The execution sequence
+            start_position: Position to start from
+            executed_nodes: Dictionary of executed nodes
+            deployment_context: Optional deployment context for UserProxyAgent handling
         """
         logger.info(f"▶️ CONTINUE WORKFLOW: Resuming from position {start_position} with {len(execution_sequence) - start_position} remaining nodes")
+        
+        # Check if this is a deployment context by checking DeploymentSession
+        if not deployment_context:
+            deployment_context = await self._get_deployment_context_from_execution(execution_record)
+        
+        is_deployment = deployment_context is not None and deployment_context.get('is_deployment', False)
         
         # Get workflow data
         workflow_id = await sync_to_async(lambda: workflow.workflow_id)()
@@ -880,13 +1035,97 @@ class WorkflowExecutor:
                             # CRITICAL FIX: Check if this UserProxyAgent requires human input
                             # If it does, pause for human input instead of executing as regular agent
                             if node_data.get('require_human_input', True):
-                                logger.info(f"👤 CONTINUE WORKFLOW: UserProxyAgent {node_name} requires human input - pausing workflow")
+                                # Get input mode (default to 'user' for backward compatibility)
+                                input_mode = node_data.get('input_mode', 'user')
                                 
-                                # PAUSE WORKFLOW - Same as in execute_workflow
-                                human_input_data = await self.human_input_handler.pause_for_human_input(
-                                    workflow, node, executed_nodes, conversation_history, execution_record
-                                )
-                                return human_input_data  # Return paused state
+                                # Admin Input Mode: Always use internal pause mechanism (admin UI)
+                                if input_mode == 'admin':
+                                    logger.info(f"👤 ADMIN INPUT: UserProxyAgent {node_name} requires admin input (continue, input_mode=admin)")
+                                    
+                                    # PAUSE WORKFLOW - Use internal pause mechanism
+                                    human_input_data = await self.human_input_handler.pause_for_human_input(
+                                        workflow, node, executed_nodes, conversation_history, execution_record
+                                    )
+                                    
+                                    # If in deployment context, also store in deployment session for admin to provide input
+                                    if is_deployment and deployment_context:
+                                        session_id = deployment_context.get('session_id')
+                                        if session_id:
+                                            last_message = self._extract_last_conversation_message(messages, conversation_history)
+                                            await self._store_deployment_pause_state(
+                                                session_id, execution_record, node_id, node_name, last_message
+                                            )
+                                            logger.info(f"💾 DEPLOYMENT: Stored admin input pause state in session {session_id[:8]}")
+                                    
+                                    return human_input_data  # Return paused state
+                                
+                                # User Input Mode: Check context
+                                elif input_mode == 'user':
+                                    # In deployment context: Use deployment pause mechanism (client-side)
+                                    if is_deployment and deployment_context:
+                                        logger.info(f"👤 DEPLOYMENT: UserProxyAgent {node_name} requires user input in deployment context (continue)")
+                                        
+                                        # Extract the last conversation message
+                                        last_message = self._extract_last_conversation_message(messages, conversation_history)
+                                        
+                                        # Get the description from UserProxyAgent node data (default to "USER INPUT REQUIRED")
+                                        agent_description = node_data.get('description', 'USER INPUT REQUIRED')
+                                        if not agent_description or not agent_description.strip():
+                                            agent_description = 'USER INPUT REQUIRED'
+                                        
+                                        # Find input sources (connected agents that feed into this UserProxyAgent)
+                                        # This is needed to properly update the execution record
+                                        input_sources = self.workflow_parser.find_multiple_inputs_to_node(node_id, graph_json)
+                                        aggregated_context = self.workflow_parser.aggregate_multiple_inputs(input_sources, executed_nodes)
+                                        
+                                        # Update execution record to indicate human input required
+                                        # This is critical for resume_workflow_with_human_input to find the execution
+                                        # Store input_mode in context so we can filter deployment executions from admin UI
+                                        aggregated_context['input_mode'] = input_mode
+                                        aggregated_context['is_deployment'] = True
+                                        await sync_to_async(self.human_input_handler.update_execution_for_human_input)(
+                                            execution_record, node_id, node_name, aggregated_context
+                                        )
+                                        
+                                        # Store execution state in deployment session (non-blocking)
+                                        session_id = deployment_context.get('session_id')
+                                        if session_id:
+                                            await self._store_deployment_pause_state(
+                                                session_id, execution_record, node_id, node_name, last_message
+                                            )
+                                        
+                                        # Return special response indicating human input is required
+                                        return {
+                                            'status': 'awaiting_human_input',
+                                            'execution_id': execution_record.execution_id,
+                                            'agent_name': node_name,
+                                            'agent_id': node_id,
+                                            'human_input_required': True,
+                                            'title': agent_description.strip(),
+                                            'last_conversation_message': last_message,
+                                            'message': f'UserProxyAgent {node_name} requires your input',
+                                            'conversation_history': conversation_history
+                                        }
+                                    else:
+                                        # In admin UI context: Use internal pause mechanism (for testing)
+                                        logger.info(f"👤 USER INPUT: UserProxyAgent {node_name} requires user input in admin UI (continue)")
+                                        
+                                        # PAUSE WORKFLOW - Use internal pause mechanism
+                                        human_input_data = await self.human_input_handler.pause_for_human_input(
+                                            workflow, node, executed_nodes, conversation_history, execution_record
+                                        )
+                                        return human_input_data  # Return paused state
+                                else:
+                                    # Unknown input_mode, default to user input behavior
+                                    logger.warning(f"⚠️ USERPROXY: Unknown input_mode '{input_mode}', defaulting to user input behavior")
+                                    # Fall through to regular pause
+                                    logger.info(f"👤 CONTINUE WORKFLOW: UserProxyAgent {node_name} requires human input - pausing workflow")
+                                    
+                                    # PAUSE WORKFLOW - Same as in execute_workflow
+                                    human_input_data = await self.human_input_handler.pause_for_human_input(
+                                        workflow, node, executed_nodes, conversation_history, execution_record
+                                    )
+                                    return human_input_data  # Return paused state
                             else:
                                 logger.info(f"✅ CONTINUE WORKFLOW: Processing UserProxyAgent {node_name} - not the one that was just processed, and doesn't require human input")
                     
@@ -999,12 +1238,12 @@ class WorkflowExecutor:
                             logger.info(f"🔄 CONTINUE WORKFLOW REFLECTION: Processing cross-agent reflection from {node_name}")
                             
                             reflection_result, updated_conversation = await self.reflection_handler.handle_cross_agent_reflection(
-                                node, original_agent_response, reflection_edge, graph_json, execution_record, conversation_history
+                                node, original_agent_response, reflection_edge, graph_json, execution_record, conversation_history, deployment_context
                             )
                             
                             # Check if we're waiting for human input in reflection
                             if reflection_result == 'AWAITING_REFLECTION_INPUT':
-                                logger.info(f"👤 CONTINUE WORKFLOW REFLECTION: Pausing workflow - awaiting human input for reflection")
+                                logger.info(f"👤 CONTINUE WORKFLOW REFLECTION: Pausing workflow - awaiting human input for reflection (admin UI)")
                                 # Save current state before returning
                                 execution_record.executed_nodes = executed_nodes
                                 execution_record.messages_data = message_manager.get_messages()
@@ -1015,6 +1254,47 @@ class WorkflowExecutor:
                                     'conversation_history': updated_conversation,
                                     'message': f'Workflow paused - {execution_record.awaiting_human_input_agent} needs to provide reflection feedback',
                                     'execution_id': execution_record.execution_id
+                                }
+                            elif reflection_result == 'AWAITING_DEPLOYMENT_INPUT':
+                                # User input mode in deployment context - return deployment pause status
+                                logger.info(f"👤 CONTINUE WORKFLOW REFLECTION: Pausing workflow - awaiting user input for reflection in deployment")
+                                
+                                # Get target node info for response
+                                target_node_id = execution_record.human_input_agent_id
+                                target_node_name = execution_record.awaiting_human_input_agent
+                                
+                                # Find target node to get description
+                                target_node = None
+                                for n in graph_json.get('nodes', []):
+                                    if n.get('id') == target_node_id:
+                                        target_node = n
+                                        break
+                                
+                                target_data = target_node.get('data', {}) if target_node else {}
+                                agent_description = target_data.get('description', 'USER INPUT REQUIRED')
+                                if not agent_description or not agent_description.strip():
+                                    agent_description = 'USER INPUT REQUIRED'
+                                
+                                # Extract last message
+                                last_message = self._extract_last_conversation_message(message_manager.get_messages(), updated_conversation)
+                                
+                                # Store execution state in deployment session
+                                session_id = deployment_context.get('session_id') if deployment_context else None
+                                if session_id:
+                                    await self._store_deployment_pause_state(
+                                        session_id, execution_record, target_node_id, target_node_name, last_message
+                                    )
+                                
+                                return {
+                                    'status': 'awaiting_human_input',
+                                    'execution_id': execution_record.execution_id,
+                                    'agent_name': target_node_name,
+                                    'agent_id': target_node_id,
+                                    'human_input_required': True,
+                                    'title': agent_description.strip(),
+                                    'last_conversation_message': last_message,
+                                    'message': f'UserProxyAgent {target_node_name} requires your input (reflection)',
+                                    'conversation_history': updated_conversation
                                 }
                             else:
                                 # Reflection completed successfully (no human input required)
@@ -1081,9 +1361,12 @@ class WorkflowExecutor:
                 'message': 'Workflow execution continued and completed successfully',
                 'execution_id': execution_record.execution_id,
                 'updated_conversation': conversation_history,
+                'conversation_history': conversation_history,
                 'workflow_completed': True,
                 'total_agents': len(agents_involved),
-                'final_response': agent_response_text if agents_involved else "Workflow completed"
+                'final_response': agent_response_text if agents_involved else "Workflow completed",
+                'messages': message_manager.get_messages(),  # Include messages for deployment executor
+                'response': agent_response_text if agents_involved else "Workflow completed"
             }
             
         except Exception as e:
@@ -1460,3 +1743,265 @@ class WorkflowExecutor:
             'last_executed_at': workflow.last_executed_at.isoformat() if workflow.last_executed_at else None,
             'recent_executions': execution_history
         }
+    
+    def _extract_last_conversation_message(self, messages: List[Dict[str, Any]], conversation_history: str) -> str:
+        """
+        Extract the last conversation message to display when requesting human input.
+        Shows the most recent meaningful message (prefers user queries, then assistant responses).
+        Prioritizes messages_data over conversation_history string.
+        
+        Args:
+            messages: List of message dictionaries from messages_data
+            conversation_history: Conversation history as string
+            
+        Returns:
+            Last conversation message content
+        """
+        # First, try to get from messages_data (more reliable)
+        if messages:
+            # Look for the last meaningful message (user input or assistant response)
+            # Prefer user input if available, otherwise assistant response
+            user_message = None
+            assistant_message = None
+            
+            for msg in reversed(messages):
+                if isinstance(msg, dict):
+                    agent_type = msg.get('agent_type', '')
+                    message_type = msg.get('message_type', '')
+                    content = msg.get('content', '') or msg.get('message', '')
+                    
+                    if not content or not content.strip():
+                        continue
+                    
+                    # Skip StartNode and EndNode
+                    if agent_type in ['StartNode', 'EndNode']:
+                        continue
+                    
+                    # Collect user input messages
+                    if message_type in ['user_input', 'human_input'] or agent_type == 'UserProxyAgent':
+                        if not user_message:
+                            user_message = content.strip()
+                    
+                    # Collect assistant/agent messages (not user input)
+                    elif message_type not in ['user_input', 'human_input']:
+                        if not assistant_message:
+                            assistant_message = content.strip()
+            
+            # Prefer user message if available (most recent context)
+            if user_message:
+                logger.info(f"📝 DEPLOYMENT: Extracted last user message: {user_message[:100]}...")
+                return user_message
+            
+            # Fallback to assistant message
+            if assistant_message:
+                logger.info(f"📝 DEPLOYMENT: Extracted last assistant message: {assistant_message[:100]}...")
+                return assistant_message
+        
+        # Fallback: extract from conversation_history string
+        if conversation_history:
+            lines = conversation_history.strip().split('\n')
+            user_line = None
+            assistant_line = None
+            
+            # Look for the last user and assistant messages
+            for line in reversed(lines):
+                line = line.strip()
+                if not line:
+                    continue
+                
+                if ':' in line:
+                    parts = line.split(':', 1)
+                    if len(parts) == 2:
+                        role = parts[0].strip().lower()
+                        content = parts[1].strip()
+                        
+                        if content:
+                            # Prefer user messages
+                            if role == 'user' and not user_line:
+                                user_line = content
+                            # Then assistant messages
+                            elif ('assistant' in role or 'ai' in role) and not assistant_line:
+                                assistant_line = content
+            
+            # Return user message if available, otherwise assistant
+            if user_line:
+                logger.info(f"📝 DEPLOYMENT: Extracted last user message from conversation_history: {user_line[:100]}...")
+                return user_line
+            
+            if assistant_line:
+                logger.info(f"📝 DEPLOYMENT: Extracted last assistant message from conversation_history: {assistant_line[:100]}...")
+                return assistant_line
+        
+        # Default fallback
+        logger.warning(f"⚠️ DEPLOYMENT: Could not extract last conversation message")
+        return "Please provide your input to continue."
+    
+    async def _store_deployment_pause_state(
+        self, 
+        session_id: str, 
+        execution_record: Any, 
+        node_id: str, 
+        node_name: str, 
+        last_message: str
+    ):
+        """
+        Store paused execution state in DeploymentSession (non-blocking).
+        Also stores session_id in execution record metadata for later retrieval.
+        
+        Args:
+            session_id: Deployment session ID
+            execution_record: WorkflowExecution record
+            node_id: UserProxyAgent node ID
+            node_name: UserProxyAgent name
+            last_message: Last conversation message to display
+        """
+        try:
+            from .models import DeploymentSession
+            
+            # Get deployment session
+            deployment_session = await sync_to_async(
+                DeploymentSession.objects.filter(session_id=session_id).first
+            )()
+            
+            if deployment_session:
+                # Ensure execution record is saved and has an execution_id
+                if not execution_record.execution_id:
+                    logger.error(f"❌ DEPLOYMENT: Execution record has no execution_id!")
+                    return
+                
+                # Refresh execution record to ensure it's saved
+                await sync_to_async(execution_record.refresh_from_db)()
+                
+                # Verify execution exists in database
+                from users.models import WorkflowExecution
+                execution_exists = await sync_to_async(
+                    WorkflowExecution.objects.filter(execution_id=execution_record.execution_id).exists
+                )()
+                
+                if not execution_exists:
+                    logger.error(f"❌ DEPLOYMENT: WorkflowExecution {execution_record.execution_id} does not exist in database!")
+                    return
+                
+                # Update session with pause state
+                deployment_session.awaiting_human_input = True
+                deployment_session.paused_execution_id = execution_record.execution_id
+                deployment_session.human_input_prompt = last_message
+                deployment_session.human_input_agent_name = node_name
+                deployment_session.human_input_agent_id = node_id
+                
+                # Add the last conversation message to conversation history so it appears in the chat UI
+                # This is the message the user sees when the human input modal appears
+                if last_message and last_message.strip():
+                    conversation_history = deployment_session.conversation_history or []
+                    conversation_history.append({
+                        'role': 'assistant',
+                        'content': last_message,
+                        'timestamp': timezone.now().isoformat()
+                    })
+                    deployment_session.conversation_history = conversation_history
+                    deployment_session.message_count = len(conversation_history)
+                    logger.info(f"📝 DEPLOYMENT: Added last conversation message to session history: {last_message[:100]}...")
+                
+                await sync_to_async(deployment_session.save)()
+                
+                # Store session_id in execution record metadata for later retrieval
+                execution_metadata = execution_record.messages_data or []
+                # Check if metadata already exists in last message or create new entry
+                if execution_metadata and isinstance(execution_metadata[-1], dict):
+                    execution_metadata[-1]['deployment_session_id'] = session_id
+                else:
+                    # Add metadata entry
+                    execution_metadata.append({
+                        'deployment_session_id': session_id,
+                        'timestamp': timezone.now().isoformat()
+                    })
+                execution_record.messages_data = execution_metadata
+                await sync_to_async(execution_record.save)(update_fields=['messages_data'])
+                
+                logger.info(f"💾 DEPLOYMENT: Stored pause state in session {session_id[:8]} for UserProxyAgent {node_name} (execution_id: {execution_record.execution_id[:8]})")
+            else:
+                logger.warning(f"⚠️ DEPLOYMENT: Could not find DeploymentSession for session_id {session_id}")
+        except Exception as e:
+            logger.error(f"❌ DEPLOYMENT: Failed to store pause state: {e}", exc_info=True)
+    
+    async def _get_deployment_context_from_execution(self, execution_record: Any) -> Optional[Dict[str, Any]]:
+        """
+        Check if an execution is part of a deployment by checking DeploymentSession.
+        First checks execution record metadata for session_id, then checks DeploymentSession.
+        
+        Args:
+            execution_record: WorkflowExecution record
+            
+        Returns:
+            Deployment context dict if found, None otherwise
+        """
+        try:
+            from .models import DeploymentSession
+            
+            # First, try to get session_id from execution record metadata
+            session_id = None
+            messages_data = execution_record.messages_data or []
+            if messages_data:
+                # Check last message for deployment_session_id
+                if isinstance(messages_data[-1], dict) and 'deployment_session_id' in messages_data[-1]:
+                    session_id = messages_data[-1]['deployment_session_id']
+                    logger.info(f"📝 DEPLOYMENT: Found session_id {session_id[:8]} in execution metadata")
+            
+            # Check if there's a DeploymentSession with this execution_id (paused state)
+            deployment_session = await sync_to_async(
+                DeploymentSession.objects.filter(
+                    paused_execution_id=execution_record.execution_id
+                ).first
+            )()
+            
+            if deployment_session:
+                return {
+                    'is_deployment': True,
+                    'session_id': deployment_session.session_id,
+                    'current_user_query': ''  # Will be provided when resuming
+                }
+            
+            # If we have session_id from metadata, try to get that session
+            if session_id:
+                deployment_session = await sync_to_async(
+                    DeploymentSession.objects.filter(session_id=session_id).first
+                )()
+                if deployment_session:
+                    return {
+                        'is_deployment': True,
+                        'session_id': deployment_session.session_id,
+                        'current_user_query': ''
+                    }
+            
+            # Fallback: Check if there's an active deployment for this project
+            workflow = await sync_to_async(lambda: execution_record.workflow)()
+            project = await sync_to_async(lambda: workflow.project)()
+            
+            from .models import WorkflowDeployment
+            deployment = await sync_to_async(
+                WorkflowDeployment.objects.filter(
+                    project=project,
+                    is_active=True
+                ).first
+            )()
+            
+            if deployment:
+                # Try to find a session that might be related (by checking recent sessions)
+                recent_session = await sync_to_async(
+                    DeploymentSession.objects.filter(
+                        deployment=deployment,
+                        is_active=True
+                    ).order_by('-last_activity').first
+                )()
+                
+                if recent_session:
+                    return {
+                        'is_deployment': True,
+                        'session_id': recent_session.session_id,
+                        'current_user_query': ''
+                    }
+            
+            return None
+        except Exception as e:
+            logger.error(f"❌ DEPLOYMENT: Failed to get deployment context: {e}", exc_info=True)
+            return None

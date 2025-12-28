@@ -83,18 +83,19 @@ class ConversationOrchestrator:
     # MAIN API METHODS - Primary interfaces used by the application
     # ============================================================================
     
-    async def execute_workflow(self, workflow: AgentWorkflow, executed_by) -> Dict[str, Any]:
+    async def execute_workflow(self, workflow: AgentWorkflow, executed_by, deployment_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Execute the complete workflow with REAL LLM calls and conversation chaining
         
         Args:
             workflow: The AgentWorkflow instance to execute
             executed_by: User who initiated the execution
+            deployment_context: Optional deployment context with user query for UserProxyAgent handling
             
         Returns:
             Dict containing execution results, conversation history, and metadata
         """
-        return await self.workflow_executor.execute_workflow(workflow, executed_by)
+        return await self.workflow_executor.execute_workflow(workflow, executed_by, deployment_context=deployment_context)
     
     async def resume_workflow_with_human_input(self, execution_id: str, human_input: str, user):
         """
