@@ -7,7 +7,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from django.db import transaction
+from django.db import transaction, connection
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
 from users.models import IntelliDocProject, ProjectDocument, AgentWorkflow, SimulationRun, AgentMessage
@@ -765,6 +765,10 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
         
         logger.warning(f"🗑️ UNIVERSAL: Admin {request.user.email} deleting project {project_name} ({project_id}) with {documents_count} documents")
         
+        # Store project info before deletion (in case we need it for manual deletion)
+        project_id_to_delete = project.project_id
+        project_name_to_delete = project.name
+        
         try:
             with transaction.atomic():
                 # Delete all associated files from storage
@@ -785,6 +789,72 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                 except Exception as e:
                     logger.error(f"❌ UNIVERSAL: Failed to delete vector collection: {e}")
                 
+                # Delete agent_orchestration deployment-related records BEFORE workflows
+                # This prevents foreign key constraint violations
+                try:
+                    with connection.cursor() as cursor:
+                        # Delete DeploymentExecution records (references WorkflowExecution)
+                        cursor.execute("""
+                            DELETE FROM agent_orchestration_deploymentexecution 
+                            WHERE workflow_execution_id IN (
+                                SELECT id FROM users_workflowexecution 
+                                WHERE workflow_id IN (
+                                    SELECT id FROM users_agentworkflow 
+                                    WHERE project_id = %s
+                                )
+                            )
+                        """, [project.id])
+                        deployment_executions_count = cursor.rowcount
+                        if deployment_executions_count > 0:
+                            logger.info(f"🗑️ UNIVERSAL: Deleted {deployment_executions_count} deployment executions")
+                        
+                        # Delete DeploymentSession records (references WorkflowDeployment)
+                        cursor.execute("""
+                            DELETE FROM agent_orchestration_deploymentsession 
+                            WHERE deployment_id IN (
+                                SELECT id FROM agent_orchestration_workflowdeployment 
+                                WHERE project_id = %s
+                            )
+                        """, [project.id])
+                        deployment_sessions_count = cursor.rowcount
+                        if deployment_sessions_count > 0:
+                            logger.info(f"🗑️ UNIVERSAL: Deleted {deployment_sessions_count} deployment sessions")
+                        
+                        # Delete WorkflowDeploymentRequest records (references WorkflowDeployment)
+                        cursor.execute("""
+                            DELETE FROM agent_orchestration_workflowdeploymentrequest 
+                            WHERE deployment_id IN (
+                                SELECT id FROM agent_orchestration_workflowdeployment 
+                                WHERE project_id = %s
+                            )
+                        """, [project.id])
+                        deployment_requests_count = cursor.rowcount
+                        if deployment_requests_count > 0:
+                            logger.info(f"🗑️ UNIVERSAL: Deleted {deployment_requests_count} deployment requests")
+                        
+                        # Delete WorkflowAllowedOrigin records (references WorkflowDeployment)
+                        cursor.execute("""
+                            DELETE FROM agent_orchestration_workflowallowedorigin 
+                            WHERE deployment_id IN (
+                                SELECT id FROM agent_orchestration_workflowdeployment 
+                                WHERE project_id = %s
+                            )
+                        """, [project.id])
+                        allowed_origins_count = cursor.rowcount
+                        if allowed_origins_count > 0:
+                            logger.info(f"🗑️ UNIVERSAL: Deleted {allowed_origins_count} allowed origins")
+                        
+                        # Delete WorkflowDeployment records (references AgentWorkflow)
+                        cursor.execute("""
+                            DELETE FROM agent_orchestration_workflowdeployment 
+                            WHERE project_id = %s
+                        """, [project.id])
+                        workflow_deployments_count = cursor.rowcount
+                        if workflow_deployments_count > 0:
+                            logger.info(f"🗑️ UNIVERSAL: Deleted {workflow_deployments_count} workflow deployments")
+                except Exception as deployment_error:
+                    logger.warning(f"⚠️ UNIVERSAL: Error deleting deployment records (may not exist): {deployment_error}")
+                
                 # Delete all agent workflows (this will cascade delete evaluations, execution history, etc.)
                 workflows_count = project.agent_workflows.count()
                 if workflows_count > 0:
@@ -797,8 +867,47 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                     project.api_keys.all().delete()
                     logger.info(f"🗑️ UNIVERSAL: Deleted {api_keys_count} API keys")
                 
+                # Delete MCP server credentials if they exist (table may not exist if migrations haven't been run)
+                # Check if table exists first using raw SQL to avoid transaction abort
+                mcp_table_exists = False
+                try:
+                    with connection.cursor() as cursor:
+                        cursor.execute("""
+                            SELECT EXISTS (
+                                SELECT FROM information_schema.tables 
+                                WHERE table_schema = 'public' 
+                                AND table_name = 'users_mcpservercredential'
+                            );
+                        """)
+                        mcp_table_exists = cursor.fetchone()[0]
+                except Exception as check_error:
+                    logger.warning(f"⚠️ UNIVERSAL: Could not check MCP credentials table existence: {check_error}")
+                
+                if mcp_table_exists:
+                    try:
+                        mcp_credentials_count = project.mcp_server_credentials.count()
+                        if mcp_credentials_count > 0:
+                            project.mcp_server_credentials.all().delete()
+                            logger.info(f"🗑️ UNIVERSAL: Deleted {mcp_credentials_count} MCP server credentials")
+                    except Exception as mcp_error:
+                        logger.warning(f"⚠️ UNIVERSAL: Error deleting MCP credentials (table exists but query failed): {mcp_error}")
+                else:
+                    logger.info(f"ℹ️ UNIVERSAL: MCP server credentials table does not exist, skipping deletion (migrations may not have been run)")
+                
                 # Delete the project itself (will cascade delete documents, permissions, etc.)
-                project.delete()
+                # Try to delete normally first
+                try:
+                    project.delete()
+                except Exception as delete_error:
+                    # Check if error is due to missing MCP credentials table
+                    error_str = str(delete_error).lower()
+                    if 'mcpservercredential' in error_str and ('does not exist' in error_str or 'relation' in error_str):
+                        # Re-raise to exit the atomic block, then handle manually in outer exception handler
+                        raise
+                    else:
+                        # Re-raise if it's a different error
+                        logger.error(f"❌ UNIVERSAL: Unexpected error during project deletion: {delete_error}")
+                        raise
                 
                 logger.info(f"✅ UNIVERSAL: Successfully deleted project {project_name} ({project_id})")
                 
@@ -817,15 +926,259 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
         except Exception as e:
             import traceback
             error_traceback = traceback.format_exc()
-            logger.error(f"❌ UNIVERSAL: Failed to delete project {project_name}: {e}")
-            logger.error(f"❌ UNIVERSAL: Delete error traceback:\n{error_traceback}")
-            return Response({
-                'error': 'Deletion failed',
-                'detail': str(e),
-                'project_id': str(project_id),
-                'project_name': project_name,
-                'api_version': 'universal_v1'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            error_str = str(e).lower()
+            
+            # Check if error is due to missing MCP credentials table
+            if 'mcpservercredential' in error_str and ('does not exist' in error_str or 'relation' in error_str):
+                logger.warning(f"⚠️ UNIVERSAL: MCP server credentials table not found during cascade delete, attempting manual deletion")
+                # The atomic block will rollback automatically, now do manual deletion in a new transaction
+                try:
+                    # Store project info before attempting manual deletion
+                    project_id_to_delete = project_id
+                    project_name_to_delete = project_name
+                    
+                    # Re-fetch the project in the new transaction (since the old one rolled back)
+                    try:
+                        project_to_delete = IntelliDocProject.objects.get(project_id=project_id_to_delete)
+                    except IntelliDocProject.DoesNotExist:
+                        logger.info(f"ℹ️ UNIVERSAL: Project {project_name_to_delete} ({project_id_to_delete}) already deleted")
+                        return Response({
+                            'message': f'Project "{project_name_to_delete}" was already deleted',
+                            'project_id': str(project_id_to_delete),
+                            'project_name': project_name_to_delete,
+                            'api_version': 'universal_v1'
+                        }, status=status.HTTP_200_OK)
+                    
+                    with transaction.atomic():
+                        # Delete all related objects first (workflows, API keys, etc.)
+                        # IMPORTANT: Delete workflow dependencies in correct order to avoid foreign key violations
+                        
+                        with connection.cursor() as cursor:
+                            # STEP 0: Delete agent_orchestration deployment-related records FIRST
+                            # These must be deleted before WorkflowExecution and AgentWorkflow
+                            
+                            # 0.1. Delete DeploymentExecution records (references WorkflowExecution and DeploymentSession)
+                            cursor.execute("""
+                                DELETE FROM agent_orchestration_deploymentexecution 
+                                WHERE workflow_execution_id IN (
+                                    SELECT id FROM users_workflowexecution 
+                                    WHERE workflow_id IN (
+                                        SELECT id FROM users_agentworkflow 
+                                        WHERE project_id = (SELECT id FROM users_intellidocproject WHERE project_id = %s)
+                                    )
+                                )
+                            """, [project_id_to_delete])
+                            deployment_executions_count = cursor.rowcount
+                            if deployment_executions_count > 0:
+                                logger.info(f"🗑️ UNIVERSAL: Manually deleted {deployment_executions_count} deployment executions (raw SQL)")
+                            
+                            # 0.2. Delete DeploymentSession records (references WorkflowDeployment)
+                            cursor.execute("""
+                                DELETE FROM agent_orchestration_deploymentsession 
+                                WHERE deployment_id IN (
+                                    SELECT id FROM agent_orchestration_workflowdeployment 
+                                    WHERE project_id = (SELECT id FROM users_intellidocproject WHERE project_id = %s)
+                                )
+                            """, [project_id_to_delete])
+                            deployment_sessions_count = cursor.rowcount
+                            if deployment_sessions_count > 0:
+                                logger.info(f"🗑️ UNIVERSAL: Manually deleted {deployment_sessions_count} deployment sessions (raw SQL)")
+                            
+                            # 0.3. Delete WorkflowDeploymentRequest records (references WorkflowDeployment)
+                            cursor.execute("""
+                                DELETE FROM agent_orchestration_workflowdeploymentrequest 
+                                WHERE deployment_id IN (
+                                    SELECT id FROM agent_orchestration_workflowdeployment 
+                                    WHERE project_id = (SELECT id FROM users_intellidocproject WHERE project_id = %s)
+                                )
+                            """, [project_id_to_delete])
+                            deployment_requests_count = cursor.rowcount
+                            if deployment_requests_count > 0:
+                                logger.info(f"🗑️ UNIVERSAL: Manually deleted {deployment_requests_count} deployment requests (raw SQL)")
+                            
+                            # 0.4. Delete WorkflowAllowedOrigin records (references WorkflowDeployment)
+                            cursor.execute("""
+                                DELETE FROM agent_orchestration_workflowallowedorigin 
+                                WHERE deployment_id IN (
+                                    SELECT id FROM agent_orchestration_workflowdeployment 
+                                    WHERE project_id = (SELECT id FROM users_intellidocproject WHERE project_id = %s)
+                                )
+                            """, [project_id_to_delete])
+                            allowed_origins_count = cursor.rowcount
+                            if allowed_origins_count > 0:
+                                logger.info(f"🗑️ UNIVERSAL: Manually deleted {allowed_origins_count} allowed origins (raw SQL)")
+                            
+                            # 0.5. Delete WorkflowDeployment records (references AgentWorkflow)
+                            cursor.execute("""
+                                DELETE FROM agent_orchestration_workflowdeployment 
+                                WHERE project_id = (SELECT id FROM users_intellidocproject WHERE project_id = %s)
+                            """, [project_id_to_delete])
+                            workflow_deployments_count = cursor.rowcount
+                            if workflow_deployments_count > 0:
+                                logger.info(f"🗑️ UNIVERSAL: Manually deleted {workflow_deployments_count} workflow deployments (raw SQL)")
+                            
+                            # 1. Delete WorkflowExecutionMessage records (depends on WorkflowExecution)
+                            cursor.execute("""
+                                DELETE FROM users_workflowexecutionmessage 
+                                WHERE execution_id IN (
+                                    SELECT id FROM users_workflowexecution 
+                                    WHERE workflow_id IN (
+                                        SELECT id FROM users_agentworkflow 
+                                        WHERE project_id = (SELECT id FROM users_intellidocproject WHERE project_id = %s)
+                                    )
+                                )
+                            """, [project_id_to_delete])
+                            messages_count = cursor.rowcount
+                            if messages_count > 0:
+                                logger.info(f"🗑️ UNIVERSAL: Manually deleted {messages_count} workflow execution messages (raw SQL)")
+                            
+                            # 2. Delete HumanInputInteraction records (depends on WorkflowExecution)
+                            cursor.execute("""
+                                DELETE FROM users_humaninputinteraction 
+                                WHERE execution_id IN (
+                                    SELECT id FROM users_workflowexecution 
+                                    WHERE workflow_id IN (
+                                        SELECT id FROM users_agentworkflow 
+                                        WHERE project_id = (SELECT id FROM users_intellidocproject WHERE project_id = %s)
+                                    )
+                                )
+                            """, [project_id_to_delete])
+                            human_inputs_count = cursor.rowcount
+                            if human_inputs_count > 0:
+                                logger.info(f"🗑️ UNIVERSAL: Manually deleted {human_inputs_count} human input interactions (raw SQL)")
+                            
+                            # 3. Delete WorkflowExecution records (depends on AgentWorkflow)
+                            cursor.execute("""
+                                DELETE FROM users_workflowexecution 
+                                WHERE workflow_id IN (
+                                    SELECT id FROM users_agentworkflow 
+                                    WHERE project_id = (SELECT id FROM users_intellidocproject WHERE project_id = %s)
+                                )
+                            """, [project_id_to_delete])
+                            executions_count = cursor.rowcount
+                            if executions_count > 0:
+                                logger.info(f"🗑️ UNIVERSAL: Manually deleted {executions_count} workflow executions (raw SQL)")
+                            
+                            # 4. Delete WorkflowEvaluationResult records (depends on WorkflowEvaluation)
+                            cursor.execute("""
+                                DELETE FROM users_workflowevaluationresult 
+                                WHERE evaluation_id IN (
+                                    SELECT id FROM users_workflowevaluation 
+                                    WHERE workflow_id IN (
+                                        SELECT id FROM users_agentworkflow 
+                                        WHERE project_id = (SELECT id FROM users_intellidocproject WHERE project_id = %s)
+                                    )
+                                )
+                            """, [project_id_to_delete])
+                            eval_results_count = cursor.rowcount
+                            if eval_results_count > 0:
+                                logger.info(f"🗑️ UNIVERSAL: Manually deleted {eval_results_count} workflow evaluation results (raw SQL)")
+                            
+                            # 5. Delete WorkflowEvaluation records (depends on AgentWorkflow)
+                            cursor.execute("""
+                                DELETE FROM users_workflowevaluation 
+                                WHERE workflow_id IN (
+                                    SELECT id FROM users_agentworkflow 
+                                    WHERE project_id = (SELECT id FROM users_intellidocproject WHERE project_id = %s)
+                                )
+                            """, [project_id_to_delete])
+                            evaluations_count = cursor.rowcount
+                            if evaluations_count > 0:
+                                logger.info(f"🗑️ UNIVERSAL: Manually deleted {evaluations_count} workflow evaluations (raw SQL)")
+                            
+                            # 6. Delete SimulationRun records (depends on AgentWorkflow)
+                            cursor.execute("""
+                                DELETE FROM users_simulationrun 
+                                WHERE workflow_id IN (
+                                    SELECT id FROM users_agentworkflow 
+                                    WHERE project_id = (SELECT id FROM users_intellidocproject WHERE project_id = %s)
+                                )
+                            """, [project_id_to_delete])
+                            simulation_runs_count = cursor.rowcount
+                            if simulation_runs_count > 0:
+                                logger.info(f"🗑️ UNIVERSAL: Manually deleted {simulation_runs_count} simulation runs (raw SQL)")
+                            
+                            # 7. Finally, delete workflows themselves
+                            cursor.execute("""
+                                SELECT COUNT(*) FROM users_agentworkflow 
+                                WHERE project_id = (SELECT id FROM users_intellidocproject WHERE project_id = %s)
+                            """, [project_id_to_delete])
+                            workflows_count = cursor.fetchone()[0]
+                            
+                            if workflows_count > 0:
+                                cursor.execute("""
+                                    DELETE FROM users_agentworkflow 
+                                    WHERE project_id = (SELECT id FROM users_intellidocproject WHERE project_id = %s)
+                                """, [project_id_to_delete])
+                                logger.info(f"🗑️ UNIVERSAL: Manually deleted {workflows_count} agent workflows (raw SQL)")
+                        
+                        # Delete user permissions
+                        with connection.cursor() as cursor:
+                            cursor.execute("""
+                                DELETE FROM users_userprojectpermission 
+                                WHERE project_id = (SELECT id FROM users_intellidocproject WHERE project_id = %s)
+                            """, [project_id_to_delete])
+                            logger.info(f"🗑️ UNIVERSAL: Deleted user project permissions")
+                        
+                        # Delete group permissions
+                        with connection.cursor() as cursor:
+                            cursor.execute("""
+                                DELETE FROM users_groupprojectpermission 
+                                WHERE project_id = (SELECT id FROM users_intellidocproject WHERE project_id = %s)
+                            """, [project_id_to_delete])
+                            logger.info(f"🗑️ UNIVERSAL: Deleted group project permissions")
+                        
+                        # Delete API keys
+                        api_keys_count = project_to_delete.api_keys.count()
+                        if api_keys_count > 0:
+                            project_to_delete.api_keys.all().delete()
+                            logger.info(f"🗑️ UNIVERSAL: Manually deleted {api_keys_count} API keys")
+                        
+                        # Delete documents
+                        documents_count = project_to_delete.documents.count()
+                        if documents_count > 0:
+                            project_to_delete.documents.all().delete()
+                            logger.info(f"🗑️ UNIVERSAL: Manually deleted {documents_count} documents")
+                        
+                        # Now delete the project itself using raw SQL to bypass ORM cascade
+                        with connection.cursor() as cursor:
+                            cursor.execute("DELETE FROM users_intellidocproject WHERE project_id = %s", [project_id_to_delete])
+                        logger.info(f"🗑️ UNIVERSAL: Manually deleted project {project_name_to_delete} ({project_id_to_delete})")
+                    
+                    return Response({
+                        'message': f'Project "{project_name_to_delete}" deleted successfully (manual deletion due to missing MCP table)',
+                        'project_id': str(project_id_to_delete),
+                        'project_name': project_name_to_delete,
+                        'deleted_documents': documents_count,
+                        'deleted_files': 0,  # Files were deleted in the previous transaction
+                        'deleted_workflows': workflows_count if 'workflows_count' in locals() else 0,
+                        'deleted_by': request.user.email,
+                        'deleted_at': timezone.now().isoformat(),
+                        'api_version': 'universal_v1',
+                        'note': 'Manual deletion due to missing MCP server credentials table'
+                    }, status=status.HTTP_200_OK)
+                except Exception as manual_error:
+                    logger.error(f"❌ UNIVERSAL: Failed to manually delete project {project_name}: {manual_error}")
+                    import traceback
+                    logger.error(f"❌ UNIVERSAL: Manual deletion error traceback:\n{traceback.format_exc()}")
+                    return Response({
+                        'error': 'Deletion failed',
+                        'detail': f'Failed to delete project: {str(manual_error)}',
+                        'project_id': str(project_id),
+                        'project_name': project_name,
+                        'api_version': 'universal_v1'
+                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            else:
+                # Re-raise if it's a different error
+                logger.error(f"❌ UNIVERSAL: Failed to delete project {project_name}: {e}")
+                logger.error(f"❌ UNIVERSAL: Delete error traceback:\n{error_traceback}")
+                return Response({
+                    'error': 'Deletion failed',
+                    'detail': str(e),
+                    'project_id': str(project_id),
+                    'project_name': project_name,
+                    'api_version': 'universal_v1'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=False, methods=['get'])
     def health(self, request):
