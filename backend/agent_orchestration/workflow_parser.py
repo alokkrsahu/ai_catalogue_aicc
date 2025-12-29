@@ -31,10 +31,10 @@ class WorkflowParser:
 
         logger.info(f"🔗 ORCHESTRATOR: Parsing workflow with {len(nodes)} nodes and {len(edges)} edges")
 
-        # Identify nodes that are exclusively targets of reflection edges
-        # CRITICAL: UserProxyAgent nodes that require human input should ALWAYS be included,
-        # even if they only have reflection edges, because they pause the workflow
-        reflection_only_targets = set()
+        # Identify nodes that should be excluded from main execution sequence:
+        # 1. Nodes that are exclusively targets of reflection edges (except UserProxyAgent with human input)
+        # 2. Nodes that are exclusively targets of delegate edges (DelegateAgent nodes)
+        excluded_targets = set()
         all_targets = {edge['target'] for edge in edges}
         for target_id in all_targets:
             incoming_edges = [edge for edge in edges if edge['target'] == target_id]
@@ -47,32 +47,37 @@ class WorkflowParser:
                 target_name = target_node.get('data', {}).get('name', target_id)
                 target_type = target_node.get('type', 'Unknown')
                 target_data = target_node.get('data', {})
+                edge_types = [edge.get('type', 'sequential') for edge in incoming_edges]
+                
+                # Check if ALL incoming edges are delegate type
+                all_delegate = all(edge.get('type') == 'delegate' for edge in incoming_edges)
                 
                 # Check if ALL incoming edges are reflection type
                 all_reflection = all(edge.get('type') == 'reflection' for edge in incoming_edges)
-                edge_types = [edge.get('type', 'sequential') for edge in incoming_edges]
                 
+                # CRITICAL: DelegateAgent nodes connected via delegate edges should be excluded
+                # They are discovered and executed internally by GroupChatManager
+                if all_delegate and target_type == 'DelegateAgent':
+                    logger.info(f"🔍 DELEGATE CHECK: Node {target_name} ({target_type}) has {len(incoming_edges)} delegate-only edges: {edge_types} - EXCLUDING from main sequence (will be handled by GroupChatManager)")
+                    excluded_targets.add(target_id)
                 # CRITICAL FIX: UserProxyAgent nodes that require human input should be included
                 # even if they only have reflection edges, because they pause the workflow
-                is_user_proxy_with_input = (target_type == 'UserProxyAgent' and 
-                                          target_data.get('require_human_input', True))
-                
-                if all_reflection and not is_user_proxy_with_input:
+                elif all_reflection and not (target_type == 'UserProxyAgent' and target_data.get('require_human_input', True)):
                     # This is a reflection-only target that doesn't require human input - exclude it
                     logger.info(f"🔍 REFLECTION CHECK: Node {target_name} ({target_type}) has {len(incoming_edges)} reflection-only edges: {edge_types} - EXCLUDING from main sequence")
-                    reflection_only_targets.add(target_id)
-                elif all_reflection and is_user_proxy_with_input:
+                    excluded_targets.add(target_id)
+                elif all_reflection and target_type == 'UserProxyAgent' and target_data.get('require_human_input', True):
                     # This is a UserProxyAgent with reflection edges that requires human input - INCLUDE it
                     logger.info(f"✅ INCLUDE USERPROXY: Node {target_name} ({target_type}) has reflection edges but requires human input - INCLUDING in main sequence")
                 else:
                     # Node has mixed edge types - include it in main sequence
                     logger.info(f"✅ INCLUDE NODE: Node {target_name} ({target_type}) has mixed edge types: {edge_types} - including in main sequence")
 
-        if reflection_only_targets:
-            logger.info(f"🔗 ORCHESTRATOR: Excluding reflection-only target nodes from topological sort: {reflection_only_targets}")
+        if excluded_targets:
+            logger.info(f"🔗 ORCHESTRATOR: Excluding delegate/reflection-only target nodes from topological sort: {excluded_targets}")
 
-        # Filter out nodes that are exclusively reflection targets
-        nodes_for_sorting = [node for node in nodes if node['id'] not in reflection_only_targets]
+        # Filter out nodes that are exclusively delegate or reflection targets
+        nodes_for_sorting = [node for node in nodes if node['id'] not in excluded_targets]
         
         # Create node lookup for fast access
         node_map = {node['id']: node for node in nodes_for_sorting}
@@ -90,6 +95,11 @@ class WorkflowParser:
             source = edge['source']
             target = edge['target']
             edge_type = edge.get('type', 'sequential')
+            
+            # Skip delegate edges - they don't create dependencies in the main execution sequence
+            # Delegate agents are handled internally by GroupChatManager
+            if edge_type == 'delegate':
+                continue
             
             # Only process edges where both nodes are in the main execution sequence
             if source not in node_map or target not in node_map:

@@ -127,7 +127,7 @@ Navigate through different pages to access various features and capabilities.'''
                     'AssistantAgent',
                     'GroupChatManager',
                     'EndNode',
-                    'FunctionTool',
+                    'MCPServer',
                     'DocumentAnalyzerAgent',
                     'HierarchicalProcessorAgent',
                     'CategoryClassifierAgent',

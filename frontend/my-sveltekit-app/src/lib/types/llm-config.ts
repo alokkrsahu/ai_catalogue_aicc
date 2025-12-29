@@ -294,7 +294,7 @@ export const DEFAULT_AGENT_LLM_CONFIGS: Record<string, Partial<AgentLLMConfig>> 
     frequencyPenalty: 0.0,
     presencePenalty: 0.0
   },
-  'FunctionTool': {
+  'MCPServer': {
     providerId: 'openai',
     modelId: 'gpt-3.5-turbo',
     temperature: 0.1,
@@ -385,9 +385,9 @@ export const AGENT_TYPE_LLM_RECOMMENDATIONS: Record<string, {
     optimization_focus: 'conversation orchestration',
     typical_use_cases: ['multi-agent coordination', 'conversation flow management', 'decision making']
   },
-  'FunctionTool': {
+  'MCPServer': {
     recommended_providers: ['google', 'openai'],
-    optimization_focus: 'function calling and tool use',
-    typical_use_cases: ['API integration', 'tool execution', 'data processing']
+    optimization_focus: 'MCP server integration and external service access',
+    typical_use_cases: ['Google Drive integration', 'SharePoint integration', 'external service access', 'document retrieval']
   }
 };

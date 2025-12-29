@@ -15,6 +15,7 @@ from asgiref.sync import sync_to_async
 
 from users.models import WorkflowExecution, WorkflowExecutionMessage, WorkflowExecutionStatus, AgentWorkflow
 from llm_eval.providers.base import LLMResponse
+from mcp_servers.manager import get_mcp_server_manager
 
 logger = logging.getLogger('conversation_orchestrator')
 
@@ -311,6 +312,14 @@ class WorkflowExecutor:
                 node_name = node_data.get('name', f'Node_{node.get("id", "unknown")}')
                 node_id = node.get('id')
                 
+                # Add validation for GroupChatManager to ensure correct name extraction
+                if node_type == 'GroupChatManager':
+                    # Ensure we have a valid name
+                    if not node_name or node_name.startswith('Node_'):
+                        # Fallback to a more descriptive name
+                        node_name = node_data.get('label', 'Group Chat Manager')
+                    logger.info(f"🔍 DEBUG: GroupChatManager node_name before execution: {node_name}")
+                
                 logger.info(f"🎯 ORCHESTRATOR: Executing node {node_name} (type: {node_type}) [SEQUENTIAL]")
                 
                 if node_type == 'StartNode':
@@ -469,10 +478,12 @@ class WorkflowExecutor:
                         
                         try:
                             if len(input_sources) > 1:
-                                # Use enhanced multi-input version
+                                # Use enhanced multi-input version (supports both round-robin and intelligent delegation)
                                 logger.info(f"📥 ORCHESTRATOR: GroupChatManager {node_name} has {len(input_sources)} input sources - using multi-input mode")
+                                # Get project for API keys
+                                project = await sync_to_async(lambda: workflow.project)()
                                 chat_result = await self.chat_manager.execute_group_chat_manager_with_multiple_inputs(
-                                    node, llm_provider, input_sources, executed_nodes, execution_sequence, graph_json, str(project_id)
+                                    node, llm_provider, input_sources, executed_nodes, execution_sequence, graph_json, str(project_id), project
                                 )
                             else:
                                 # Use traditional single-input version for backward compatibility
@@ -488,6 +499,27 @@ class WorkflowExecutor:
                             delegate_conversations = chat_result['delegate_conversations']
                             delegate_status = chat_result['delegate_status']
                             total_iterations = chat_result['total_iterations']
+                            
+                            # CRITICAL FIX: Validate and re-assert node_name for GroupChatManager before logging
+                            # This prevents any accidental modification during delegate message parsing
+                            if node_type == 'GroupChatManager':
+                                # Validate node_name is not a delegate name
+                                original_node_name = node_name
+                                if 'delegate' in node_name.lower() and node_name.lower() != 'group chat manager':
+                                    logger.warning(f"⚠️ ORCHESTRATOR: Suspicious node_name '{node_name}' for GroupChatManager, using node data")
+                                    node_name = node_data.get('name', node_data.get('label', 'Group Chat Manager'))
+                                
+                                # Final validation
+                                if not node_name or len(node_name.strip()) == 0:
+                                    node_name = node_data.get('label', 'Group Chat Manager')
+                                
+                                # Re-assert from node data to prevent any accidental modification
+                                node_name = node_data.get('name', node_data.get('label', 'Group Chat Manager'))
+                                
+                                if original_node_name != node_name:
+                                    logger.warning(f"⚠️ ORCHESTRATOR: GroupChatManager node_name changed from '{original_node_name}' to '{node_name}', corrected")
+                                
+                                logger.info(f"✅ ORCHESTRATOR: Logging GroupChatManager message with agent_name: '{node_name}'")
                             
                             # CRITICAL FIX: Log GroupChatManager message with delegate details in metadata
                             messages.append({
@@ -512,10 +544,157 @@ class WorkflowExecutor:
                             })
                             message_sequence += 1  # Increment for chronological ordering
                             
+                            # Log individual delegate messages for better visibility in conversation history
+                            logger.info(f"📝 DELEGATE LOGGING: Logging individual delegate messages from {len(delegate_conversations)} conversation entries")
+                            
+                            # Get delegation mode from node config
+                            manager_data = node.get('data', {})
+                            delegation_mode = manager_data.get('delegation_mode', 'round_robin')
+                            
+                            # Check if this is intelligent delegation (has delegation_metrics or subquery_assignments)
+                            is_intelligent_delegation = 'delegation_metrics' in chat_result or 'subquery_assignments' in chat_result
+                            
+                            if is_intelligent_delegation:
+                                # Intelligent delegation: Use flat delegate_responses list if available
+                                delegate_responses_flat = chat_result.get('delegate_responses_flat', [])
+                                
+                                if delegate_responses_flat:
+                                    # Log from flat list (preferred method)
+                                    logger.info(f"📝 DELEGATE LOGGING (INTELLIGENT): Logging {len(delegate_responses_flat)} delegate responses from flat list")
+                                    for delegate_response in delegate_responses_flat:
+                                        delegate_name = delegate_response.get('delegate_name', 'Unknown Delegate')
+                                        response_text = delegate_response.get('response', '')
+                                        subquery_id = delegate_response.get('subquery_id', 'unknown')
+                                        
+                                        messages.append({
+                                            'sequence': message_sequence,
+                                            'agent_name': delegate_name,
+                                            'agent_type': 'DelegateAgent',
+                                            'content': response_text,
+                                            'message_type': 'delegate_response',
+                                            'timestamp': timezone.now().isoformat(),
+                                            'response_time_ms': 0,
+                                            'token_count': None,
+                                            'metadata': {
+                                                'parent_manager': node_name,
+                                                'delegation_mode': 'intelligent',
+                                                'subquery_id': subquery_id,
+                                                'status': delegate_response.get('status', 'completed'),
+                                                'llm_provider': agent_config.get('llm_provider', 'unknown'),
+                                                'llm_model': agent_config.get('llm_model', 'unknown')
+                                            }
+                                        })
+                                        message_sequence += 1
+                                        logger.info(f"📝 DELEGATE LOGGING (INTELLIGENT): Logged message from {delegate_name} (Subquery: {subquery_id})")
+                                else:
+                                    # Fallback: Parse from delegate_conversations (may be truncated)
+                                    # Format: "[Subquery {sq_id[:8]}] {delegate_name}: {response[:200]}..."
+                                    logger.info(f"📝 DELEGATE LOGGING (INTELLIGENT): Parsing {len(delegate_conversations)} conversation entries (fallback - may be truncated)")
+                                    
+                                    subquery_assignments = chat_result.get('subquery_assignments', {})
+                                    import re
+                                    
+                                    for conv_entry in delegate_conversations:
+                                        if isinstance(conv_entry, str) and ':' in conv_entry:
+                                            # Extract subquery ID, delegate name, and response
+                                            subquery_match = re.search(r'\[Subquery ([^\]]+)\]', conv_entry)
+                                            if subquery_match:
+                                                sq_id_short = subquery_match.group(1)
+                                                # Find full subquery ID from assignments
+                                                full_sq_id = None
+                                                for sq_id in subquery_assignments.keys():
+                                                    if sq_id[:8] == sq_id_short:
+                                                        full_sq_id = sq_id
+                                                        break
+                                                
+                                                # Extract delegate name and response
+                                                parts = conv_entry.split(':', 1)
+                                                if len(parts) == 2:
+                                                    delegate_name = parts[0].replace(f'[Subquery {sq_id_short}]', '').strip()
+                                                    response_text = parts[1].strip()
+                                                    # Remove "..." if truncated
+                                                    if response_text.endswith('...'):
+                                                        response_text = response_text[:-3].strip()
+                                                    
+                                                    # Log individual delegate message
+                                                    messages.append({
+                                                        'sequence': message_sequence,
+                                                        'agent_name': delegate_name,
+                                                        'agent_type': 'DelegateAgent',
+                                                        'content': response_text,
+                                                        'message_type': 'delegate_response',
+                                                        'timestamp': timezone.now().isoformat(),
+                                                        'response_time_ms': 0,
+                                                        'token_count': None,
+                                                        'metadata': {
+                                                            'parent_manager': node_name,
+                                                            'delegation_mode': 'intelligent',
+                                                            'subquery_id': full_sq_id or sq_id_short,
+                                                            'truncated': response_text.endswith('...') if response_text else False,
+                                                            'llm_provider': agent_config.get('llm_provider', 'unknown'),
+                                                            'llm_model': agent_config.get('llm_model', 'unknown')
+                                                        }
+                                                    })
+                                                    message_sequence += 1
+                                                    logger.info(f"📝 DELEGATE LOGGING (INTELLIGENT): Logged message from {delegate_name} (Subquery: {full_sq_id or sq_id_short})")
+                            else:
+                                # Round Robin mode: Parse delegate_conversations array
+                                # Format: "[Round X] DelegateName: response text"
+                                for conv_entry in delegate_conversations:
+                                    if isinstance(conv_entry, str) and ':' in conv_entry:
+                                        # Extract delegate name and response
+                                        parts = conv_entry.split(':', 1)
+                                        if len(parts) == 2:
+                                            round_info = parts[0].strip()  # "[Round X] DelegateName"
+                                            response_text = parts[1].strip()
+                                            
+                                            # Extract delegate name from round info
+                                            delegate_name = round_info.replace('[Round', '').replace(']', '').strip()
+                                            # Remove round number if present
+                                            if delegate_name and delegate_name.split()[0].isdigit():
+                                                delegate_name = ' '.join(delegate_name.split()[1:])
+                                            
+                                            # Extract round number
+                                            round_number = 1
+                                            import re
+                                            round_match = re.search(r'Round (\d+)', round_info)
+                                            if round_match:
+                                                round_number = int(round_match.group(1))
+                                            
+                                            # Log individual delegate message
+                                            messages.append({
+                                                'sequence': message_sequence,
+                                                'agent_name': delegate_name,
+                                                'agent_type': 'DelegateAgent',
+                                                'content': response_text,
+                                                'message_type': 'delegate_response',
+                                                'timestamp': timezone.now().isoformat(),
+                                                'response_time_ms': 0,
+                                                'token_count': None,
+                                                'metadata': {
+                                                    'parent_manager': node_name,
+                                                    'round': round_number,
+                                                    'delegation_mode': 'round_robin',
+                                                    'llm_provider': agent_config.get('llm_provider', 'unknown'),
+                                                    'llm_model': agent_config.get('llm_model', 'unknown')
+                                                }
+                                            })
+                                            message_sequence += 1
+                                            logger.info(f"📝 DELEGATE LOGGING (ROUND ROBIN): Logged message from {delegate_name} (Round {round_number})")
+                            
+                            # After delegate message parsing, verify node_name hasn't changed for GroupChatManager
+                            if node_type == 'GroupChatManager':
+                                logger.info(f"🔍 DEBUG: GroupChatManager node_name after delegate parsing: {node_name}")
+                                # Re-assert node_name from node data to prevent any accidental modification
+                                validated_name = node_data.get('name', node_data.get('label', 'Group Chat Manager'))
+                                if validated_name != node_name:
+                                    logger.warning(f"⚠️ ORCHESTRATOR: GroupChatManager node_name was '{node_name}', correcting to '{validated_name}'")
+                                    node_name = validated_name
+                            
                             # Save messages to execution record
                             execution_record.messages_data = messages
                             await sync_to_async(execution_record.save)()
-                            logger.info(f"💾 ORCHESTRATOR: Saved GroupChatManager {node_name} message with {len(delegate_conversations)} delegate conversations in metadata")
+                            logger.info(f"💾 ORCHESTRATOR: Saved GroupChatManager {node_name} message with {len(delegate_conversations)} delegate conversations and {len([m for m in messages if m.get('agent_type') == 'DelegateAgent'])} individual delegate messages")
                             
                             # CRITICAL FIX: Update conversation history with agent response
                             conversation_history += f"\n{node_name}: {agent_response_text}"
@@ -743,6 +922,136 @@ class WorkflowExecutor:
                         except Exception as agent_error:
                             logger.error(f"❌ ORCHESTRATOR: Agent {node_name} failed: {agent_error}")
                             raise agent_error
+                
+                elif node_type == 'MCPServer':
+                    # Handle MCP Server node
+                    server_type = node_data.get('server_type')
+                    selected_tools = node_data.get('selected_tools', [])
+                    server_config = node_data.get('server_config', {})
+                    
+                    if not server_type:
+                        error_msg = f"MCP Server node {node_name} missing required 'server_type' field"
+                        logger.error(f"❌ ORCHESTRATOR: {error_msg}")
+                        raise ValueError(error_msg)
+                    
+                    logger.info(f"🔧 MCP SERVER: Executing {node_name} (server_type: {server_type})")
+                    
+                    try:
+                        # Get MCP server manager
+                        mcp_manager = get_mcp_server_manager()
+                        
+                        # Get input from previous nodes
+                        input_sources = self.workflow_parser.find_multiple_inputs_to_node(node_id, graph_json)
+                        aggregated_context = self.workflow_parser.aggregate_multiple_inputs(input_sources, executed_nodes)
+                        
+                        # For MCP Server nodes, we expect the input to contain tool execution requests
+                        # The input should be in format: {"tool": "tool_name", "arguments": {...}}
+                        # If not in that format, we'll try to extract tool calls from the text
+                        import json
+                        tool_request = None
+                        
+                        # Get primary input from aggregated context
+                        primary_input = aggregated_context.get('primary_input', '') if isinstance(aggregated_context, dict) else str(aggregated_context)
+                        
+                        # Try to parse as JSON first (tool request format)
+                        if isinstance(primary_input, str):
+                            try:
+                                parsed = json.loads(primary_input)
+                                if isinstance(parsed, dict) and 'tool' in parsed:
+                                    tool_request = parsed
+                            except (json.JSONDecodeError, ValueError):
+                                pass
+                        
+                        # If not a tool request, try to create one from available tools
+                        if not tool_request:
+                            available_tools = await mcp_manager.get_available_tools(workflow.project, server_type)
+                            if available_tools and len(available_tools) > 0:
+                                # Filter by selected_tools if specified
+                                if selected_tools and len(selected_tools) > 0:
+                                    available_tools = [t for t in available_tools if t.get('name') in selected_tools]
+                                
+                                if available_tools:
+                                    # Use first available tool with primary input as query/search term
+                                    first_tool = available_tools[0]
+                                    tool_params = first_tool.get('parameters', {}).get('properties', {})
+                                    
+                                    # Build arguments based on tool parameters
+                                    tool_arguments = {}
+                                    if 'query' in tool_params:
+                                        tool_arguments['query'] = str(primary_input)[:500] if primary_input else ''
+                                    elif 'file_id' in tool_params:
+                                        # Try to extract file ID from input
+                                        tool_arguments['file_id'] = str(primary_input).strip()
+                                    else:
+                                        # Generic argument - use primary input
+                                        tool_arguments = {'input': str(primary_input)[:500] if primary_input else ''}
+                                    
+                                    tool_request = {
+                                        'tool': first_tool['name'],
+                                        'arguments': tool_arguments
+                                    }
+                        
+                        if not tool_request or 'tool' not in tool_request:
+                            error_msg = f"No valid tool request found for MCP Server {node_name}"
+                            logger.warning(f"⚠️ MCP SERVER: {error_msg}")
+                            node_output = f"MCP Server {node_name}: {error_msg}"
+                        else:
+                            # Execute the tool
+                            tool_name = tool_request['tool']
+                            tool_arguments = tool_request.get('arguments', {})
+                            
+                            logger.info(f"🔧 MCP SERVER: Executing tool {tool_name} on {server_type}")
+                            tool_result = await mcp_manager.execute_tool(
+                                workflow.project,
+                                server_type,
+                                tool_name,
+                                tool_arguments
+                            )
+                            
+                            if tool_result.get('success'):
+                                result_data = tool_result.get('result', {})
+                                # Format result for output
+                                if isinstance(result_data, dict):
+                                    node_output = json.dumps(result_data, indent=2)
+                                else:
+                                    node_output = str(result_data)
+                                logger.info(f"✅ MCP SERVER: Tool {tool_name} executed successfully")
+                            else:
+                                error_msg = tool_result.get('error', 'Unknown error')
+                                node_output = f"MCP Server {node_name} error: {error_msg}"
+                                logger.error(f"❌ MCP SERVER: Tool {tool_name} failed: {error_msg}")
+                        
+                        # Store node output
+                        executed_nodes[node_id] = node_output
+                        conversation_history += f"\n{node_name} (MCP Server): {node_output}"
+                        
+                        # Add message
+                        messages.append({
+                            'sequence': message_sequence,
+                            'agent_name': node_name,
+                            'agent_type': 'MCPServer',
+                            'content': node_output,
+                            'message_type': 'mcp_server_response',
+                            'timestamp': timezone.now().isoformat(),
+                            'response_time_ms': 0,
+                            'metadata': {
+                                'server_type': server_type,
+                                'tool': tool_request.get('tool') if tool_request else None
+                            }
+                        })
+                        message_sequence += 1
+                        
+                        # Save execution state
+                        execution_record.executed_nodes = executed_nodes
+                        execution_record.conversation_history = conversation_history
+                        await sync_to_async(execution_record.save)(update_fields=['executed_nodes', 'conversation_history'])
+                        
+                    except Exception as mcp_error:
+                        logger.error(f"❌ MCP SERVER: Node {node_name} failed: {mcp_error}")
+                        error_output = f"MCP Server {node_name} error: {str(mcp_error)}"
+                        executed_nodes[node_id] = error_output
+                        conversation_history += f"\n{node_name} (MCP Server): {error_output}"
+                        raise mcp_error
                     
                 elif node_type == 'EndNode':
                     # Handle end node

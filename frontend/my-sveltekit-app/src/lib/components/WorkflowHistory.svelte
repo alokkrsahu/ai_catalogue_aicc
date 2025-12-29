@@ -1,9 +1,9 @@
-<!-- WorkflowHistory.svelte - PHASE 4: Real-Time AutoGen Execution History -->
+<!-- WorkflowHistory.svelte - PHASE 4: Real-Time Workflow Execution History -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { cleanUniversalApi } from '$lib/services/cleanUniversalApi';
   import { toasts } from '$lib/stores/toast';
-  import { autoGenWebSocket, type AgentMessage, type ExecutionStatus } from '$lib/services/autoGenWebSocket';
+  import { workflowWebSocket, type AgentMessage, type ExecutionStatus } from '$lib/services/workflowWebSocket';
   
   export let project: any;
   export let projectId: string;
@@ -16,7 +16,7 @@
   let loading = true;
   let loadingMessages = false;
   
-  // PHASE 4: Real-time AutoGen state
+  // PHASE 4: Real-time workflow state
   let liveMessages: AgentMessage[] = [];
   let executionStatus: ExecutionStatus = {
     status: 'idle',
@@ -25,7 +25,7 @@
     timestamp: new Date().toISOString()
   };
   let connectionStatus: 'disconnected' | 'connecting' | 'connected' | 'error' = 'disconnected';
-  let autoGenCapabilities: any = null;
+  let workflowCapabilities: any = null;
   
   // Filters
   let statusFilter = 'all';
@@ -38,16 +38,16 @@
   
   onMount(() => {
     loadSimulationHistory();
-    setupAutoGenConnection();
+    setupWorkflowConnection();
   });
   
   onDestroy(() => {
-    autoGenWebSocket.disconnect();
+    workflowWebSocket.disconnect();
   });
   
-  async function setupAutoGenConnection() {
+  async function setupWorkflowConnection() {
     try {
-      console.log('🤖 WORKFLOW HISTORY: AutoGen WebSocket temporarily disabled');
+      console.log('🤖 WORKFLOW HISTORY: Workflow WebSocket temporarily disabled');
       
       // 🔧 TEMPORARILY DISABLED: WebSocket connections until Django Channels is set up
       // This prevents the connection refused errors you're seeing
@@ -64,10 +64,10 @@
       console.log('✅ WORKFLOW HISTORY: Using polling mode instead of WebSocket');
       
       // TODO: Uncomment when Django Channels WebSocket is set up:
-      // await autoGenWebSocket.connect(projectId);
+      // await workflowWebSocket.connect(projectId);
       
     } catch (error) {
-      console.error('❌ WORKFLOW HISTORY: AutoGen connection failed:', error);
+      console.error('❌ WORKFLOW HISTORY: Workflow connection failed:', error);
     }
   }
   
@@ -117,8 +117,8 @@
   }
   
   function setupRealtimeConnection() {
-    // PHASE 4: Now handled by AutoGen WebSocket service
-    console.log('🔌 WORKFLOW HISTORY: Real-time connection handled by AutoGen WebSocket');
+    // PHASE 4: Now handled by Workflow WebSocket service
+    console.log('🔌 WORKFLOW HISTORY: Real-time connection handled by Workflow WebSocket');
   }
   
   function scrollToBottom() {
@@ -347,7 +347,7 @@
               {#if connectionStatus === 'connected'}
                 <span class="flex items-center space-x-1 text-green-600">
                   <div class="w-2 h-2 bg-green-600 rounded-full animate-pulse"></div>
-                  <span>AutoGen Live</span>
+                  <span>Workflow Live</span>
                 </span>
               {:else if connectionStatus === 'connecting'}
                 <span class="flex items-center space-x-1 text-yellow-600">

@@ -5,6 +5,18 @@
   import { dynamicModelsService, type ModelInfo, type ProviderStatus } from '$lib/services/dynamicModelsService';
   import { docAwareService, type SearchMethod, type SearchMethodParameter } from '$lib/services/docAwareService';
   import type { BulkModelData } from '$lib/stores/llmModelsStore';
+  import { 
+    getMCPServerCredentials, 
+    setMCPServerCredentials, 
+    testMCPServerConnection, 
+    getMCPServerTools 
+  } from '$lib/services/mcpServerService';
+  import { 
+    generateSystemPrompt, 
+    previewGeneratedPrompt,
+    type PromptGenerationRequest,
+    type PromptGenerationResponse 
+  } from '$lib/services/promptGenerationService';
   
   export let node: any;
   export let capabilities: any;
@@ -42,6 +54,36 @@
   let testingSearch = false;
   let testSearchResults: any = null;
   
+  // 🔧 MCP Server state
+  let mcpGoogleDriveCredentials = {
+    client_id: '',
+    client_secret: '',
+    refresh_token: ''
+  };
+  let mcpSharePointCredentials = {
+    tenant_id: '',
+    client_id: '',
+    client_secret: '',
+    site_url: ''
+  };
+  let mcpCredentialName = '';
+  let loadingMCPCredentials = false;
+  let savingMCPCredentials = false;
+  let testingMCPConnection = false;
+  let mcpConnectionTestResult: any = null;
+  let mcpAvailableTools: any[] = [];
+  let loadingMCPTools = false;
+  let mcpCredentialStatus: any = null;
+  
+  // 🤖 Prompt Generation state
+  let generatingPrompt = false;
+  let generatedPromptPreview: string | null = null;
+  let promptGenerationError: string | null = null;
+  let showPromptPreview = false;
+  let autoGenerateEnabled = false;
+  let descriptionDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let promptGenerationMetadata: any = null;
+  
   // Initialize defaults for new nodes
   function initializeNodeDefaults() {
     // Initialize default LLM configuration if not present
@@ -59,6 +101,19 @@
           nodeConfig.llm_model = 'claude-3-5-sonnet-20241022';
         }
         console.log('🤖 LLM CONFIG: Initialized default config for', node.type, nodeConfig.llm_provider, nodeConfig.llm_model);
+      }
+      
+      // Set Group Chat Manager defaults
+      if (node.type === 'GroupChatManager') {
+        if (!nodeConfig.max_rounds) {
+          nodeConfig.max_rounds = 10; // Default for Round Robin, Intelligent will override to 1
+        }
+        if (!nodeConfig.termination_strategy) {
+          nodeConfig.termination_strategy = 'all_delegates_complete';
+        }
+        if (!nodeConfig.hasOwnProperty('max_subqueries')) {
+          nodeConfig.max_subqueries = null; // Default: no limit
+        }
       }
     } else if (node.type === 'UserProxyAgent') {
       // UserProxyAgent only gets LLM configuration if DocAware is enabled
@@ -425,10 +480,40 @@
     const hasDescChanged = nodeDescription !== currentDesc;
     const hasConfigChanged = JSON.stringify(nodeConfig) !== JSON.stringify(currentConfig);
     
-    // Only update if this is a different node or we're not currently editing
-    if (isDifferentNode || (hasConfigChanged && !document.activeElement?.closest('.node-properties-panel'))) {
-      console.log('🔄 NODE SYNC: Detected changes', {
-        isDifferentNode,
+    // CRITICAL FIX: Always update when node changes, regardless of focus state
+    // This prevents stale data from previous nodes appearing in the current node's property panel
+    if (isDifferentNode) {
+      // Force immediate update for different nodes - don't check focus state
+      console.log('🔄 NODE SYNC: Different node detected, forcing immediate state update', {
+        from: currentNodeId?.slice(-4),
+        to: node.id.slice(-4),
+        oldName: nodeName,
+        newName: currentName
+      });
+      
+      // Clear prompt generation state when node changes
+      generatedPromptPreview = null;
+      showPromptPreview = false;
+      promptGenerationError = null;
+      promptGenerationMetadata = null;
+      
+      // Update current node ID
+      currentNodeId = node.id;
+      
+      // CRITICAL: Force update nodeName and nodeDescription immediately
+      // This prevents the previous node's name from appearing in the new node's property panel
+      nodeName = currentName;
+      nodeDescription = currentDesc;
+      nodeConfig = { ...currentConfig }; // Deep clone to prevent reference issues
+      
+      console.log('✅ NODE SYNC: State forcefully updated for new node', {
+        nodeName,
+        nodeDescription: nodeDescription.substring(0, 50),
+        nodeId: node.id.slice(-4)
+      });
+    } else if (hasConfigChanged && !document.activeElement?.closest('.node-properties-panel')) {
+      // Only update config if data changed and user is not actively editing
+      console.log('🔄 NODE SYNC: Same node but data changed, updating state', {
         hasNameChanged: hasNameChanged ? `${nodeName} → ${currentName}` : false,
         hasDescChanged,
         hasConfigChanged,
@@ -436,13 +521,10 @@
         isUserEditing: !!document.activeElement?.closest('.node-properties-panel')
       });
       
-      // Update current node ID
-      currentNodeId = node.id;
-      
       // Update local state to match the node
       nodeName = currentName;
       nodeDescription = currentDesc;
-      nodeConfig = currentConfig;
+      nodeConfig = { ...currentConfig }; // Deep clone to prevent reference issues
       
       // Initialize defaults if needed
       if (isDifferentNode) {
@@ -468,7 +550,145 @@
   }
   
   // Initialize on mount and when node changes
+  // 🔧 MCP Server Methods
+  async function loadMCPCredentials() {
+    if (!projectId || !nodeConfig.server_type || loadingMCPCredentials) return;
+    
+    try {
+      loadingMCPCredentials = true;
+      const creds = await getMCPServerCredentials(projectId, nodeConfig.server_type);
+      
+      if (creds) {
+        mcpCredentialStatus = creds;
+        mcpCredentialName = creds.credential_name || '';
+        // Note: We can't decrypt credentials on frontend for security
+        // User will need to re-enter them if they want to update
+      } else {
+        mcpCredentialStatus = null;
+        mcpCredentialName = '';
+      }
+      
+      // Load available tools if credentials exist
+      if (creds?.is_validated) {
+        await loadMCPTools();
+      }
+    } catch (error: any) {
+      console.error('Error loading MCP credentials:', error);
+      mcpCredentialStatus = null;
+    } finally {
+      loadingMCPCredentials = false;
+    }
+  }
+  
+  async function loadMCPTools() {
+    if (!projectId || !nodeConfig.server_type || loadingMCPTools) return;
+    
+    try {
+      loadingMCPTools = true;
+      mcpAvailableTools = await getMCPServerTools(projectId, nodeConfig.server_type);
+    } catch (error: any) {
+      console.error('Error loading MCP tools:', error);
+      mcpAvailableTools = [];
+    } finally {
+      loadingMCPTools = false;
+    }
+  }
+  
+  async function saveMCPCredentials() {
+    if (!projectId || !nodeConfig.server_type || savingMCPCredentials) return;
+    
+    // Validate required fields
+    if (nodeConfig.server_type === 'google_drive') {
+      if (!mcpGoogleDriveCredentials.client_id || !mcpGoogleDriveCredentials.client_secret || !mcpGoogleDriveCredentials.refresh_token) {
+        toasts?.error('Please fill in all required Google Drive credentials');
+        return;
+      }
+    } else if (nodeConfig.server_type === 'sharepoint') {
+      if (!mcpSharePointCredentials.tenant_id || !mcpSharePointCredentials.client_id || !mcpSharePointCredentials.client_secret) {
+        toasts?.error('Please fill in all required SharePoint credentials');
+        return;
+      }
+      // Store site_url in server_config
+      if (!nodeConfig.server_config) nodeConfig.server_config = {};
+      nodeConfig.server_config.site_url = mcpSharePointCredentials.site_url;
+      updateNodeData();
+    }
+    
+    try {
+      savingMCPCredentials = true;
+      const credentials = nodeConfig.server_type === 'google_drive' 
+        ? mcpGoogleDriveCredentials 
+        : mcpSharePointCredentials;
+      
+      await setMCPServerCredentials(
+        projectId,
+        nodeConfig.server_type,
+        credentials,
+        mcpCredentialName,
+        nodeConfig.server_config || {}
+      );
+      
+      toasts?.success('MCP server credentials saved successfully');
+      await loadMCPCredentials();
+      mcpConnectionTestResult = null;
+    } catch (error: any) {
+      toasts?.error(`Failed to save credentials: ${error.message}`);
+    } finally {
+      savingMCPCredentials = false;
+    }
+  }
+  
+  async function testMCPConnection() {
+    if (!projectId || !nodeConfig.server_type || testingMCPConnection) return;
+    
+    // Save credentials first if not already saved
+    if (!mcpCredentialStatus) {
+      await saveMCPCredentials();
+    }
+    
+    try {
+      testingMCPConnection = true;
+      mcpConnectionTestResult = null;
+      
+      const result = await testMCPServerConnection(projectId, nodeConfig.server_type);
+      mcpConnectionTestResult = result;
+      
+      if (result.success) {
+        toasts?.success(`Connection successful! Found ${result.tools_count || 0} tools.`);
+        await loadMCPTools();
+      } else {
+        toasts?.error(`Connection failed: ${result.error || 'Unknown error'}`);
+      }
+    } catch (error: any) {
+      toasts?.error(`Connection test failed: ${error.message}`);
+      mcpConnectionTestResult = { success: false, error: error.message };
+    } finally {
+      testingMCPConnection = false;
+    }
+  }
+  
+  function handleServerTypeChange() {
+    // Reset credentials when server type changes
+    mcpGoogleDriveCredentials = { client_id: '', client_secret: '', refresh_token: '' };
+    mcpSharePointCredentials = { tenant_id: '', client_id: '', client_secret: '', site_url: '' };
+    mcpCredentialName = '';
+    mcpConnectionTestResult = null;
+    mcpAvailableTools = [];
+    mcpCredentialStatus = null;
+    
+    // Load credentials for new server type
+    if (nodeConfig.server_type) {
+      loadMCPCredentials();
+    }
+    
+    updateNodeData();
+  }
+  
   onMount(async () => {
+    // Load MCP credentials if this is an MCPServer node
+    if (node.type === 'MCPServer' && projectId && nodeConfig.server_type) {
+      await loadMCPCredentials();
+    }
     initializeNodeDefaults();
     console.log('🔧 NODE PROPERTIES: Opening panel for node:', node.id, node.type);
     
@@ -485,10 +705,61 @@
     if (['AssistantAgent', 'UserProxyAgent', 'DelegateAgent'].includes(node.type)) {
       await loadSearchMethods();
     }
+    
+    // Auto-generate Group Chat Manager prompt if delegates are connected
+    if (node.type === 'GroupChatManager') {
+      // Delay slightly to ensure workflowData is available
+      setTimeout(async () => {
+        const delegates = findConnectedDelegates();
+        if (delegates.length > 0 && (!nodeConfig.system_message || nodeConfig.system_message.trim().length === 0)) {
+          console.log('🔧 GROUP CHAT MANAGER: Auto-generating prompt on mount from', delegates.length, 'delegates');
+          await autoGenerateGroupChatManagerPrompt();
+        }
+      }, 500);
+    }
   });
   
   // Call update function when node changes
   $: if (node) {
+    // Clear prompt generation state when switching to a different node
+    if (node.id !== currentNodeId) {
+      const previousNodeId = currentNodeId;
+      currentNodeId = node.id;
+      
+      // CRITICAL FIX: Immediately clear and reset all state when switching nodes
+      // This prevents name/description/system_message from one node appearing in another node's property panel
+      generatedPromptPreview = null;
+      showPromptPreview = false;
+      promptGenerationError = null;
+      promptGenerationMetadata = null;
+      
+      // Immediately reset nodeName and nodeDescription from the new node's data
+      // This ensures the UI reflects the correct node's data, not stale data from the previous node
+      const newName = node.data.name || node.data.label || node.type;
+      const newDesc = node.data.description || '';
+      
+      // Force update nodeName and nodeDescription immediately to prevent stale data
+      if (nodeName !== newName) {
+        nodeName = newName;
+        console.log(`🔄 NODE PROPERTIES: Node changed (${previousNodeId?.slice(-4)} → ${node.id.slice(-4)}), reset nodeName: "${nodeName}"`);
+      }
+      if (nodeDescription !== newDesc) {
+        nodeDescription = newDesc;
+        console.log(`🔄 NODE PROPERTIES: Node changed, reset nodeDescription`);
+      }
+      
+      // CRITICAL FIX: Immediately reset nodeConfig (including system_message) from the new node's data
+      // This prevents system_message and other config values from the previous node appearing in the new node's property panel
+      const previousSystemMessage = nodeConfig.system_message;
+      nodeConfig = { ...node.data }; // Deep clone to prevent reference issues
+      const newSystemMessage = nodeConfig.system_message;
+      
+      if (previousSystemMessage !== newSystemMessage) {
+        console.log(`🔄 NODE PROPERTIES: Node changed, reset system_message from "${previousSystemMessage?.substring(0, 50) || 'empty'}..." to "${newSystemMessage?.substring(0, 50) || 'empty'}..."`);
+      }
+      
+      console.log('🔄 NODE PROPERTIES: Node changed, cleared all state and reset name/description/system_message');
+    }
     updateLocalStateFromNode();
   }
   
@@ -589,7 +860,188 @@
     if (nodeDescription.trim() !== (node.data.description || '')) {
       console.log('📝 DESC CHANGE: Updated description for node', node.id.slice(-4));
       updateNodeData();
+      
+      // Auto-generate prompt if enabled and agent type supports it
+      if (autoGenerateEnabled && ['AssistantAgent', 'DelegateAgent', 'GroupChatManager'].includes(node.type)) {
+        // Clear existing timer
+        if (descriptionDebounceTimer) {
+          clearTimeout(descriptionDebounceTimer);
+        }
+        
+        // Debounce auto-generation (2 seconds)
+        descriptionDebounceTimer = setTimeout(() => {
+          if (nodeDescription.trim().length >= 10) {
+            generatePromptFromDescription();
+          }
+        }, 2000);
+      }
     }
+  }
+  
+  // Find connected delegate agents for Group Chat Manager
+  function findConnectedDelegates(): Array<{ name: string; description: string }> {
+    if (node.type !== 'GroupChatManager' || !workflowData || !workflowData.nodes || !workflowData.edges) {
+      return [];
+    }
+    
+    const currentNodeId = node.id;
+    const delegates: Array<{ name: string; description: string }> = [];
+    
+    // Find all edges where this Group Chat Manager is the source and target is a DelegateAgent
+    const delegateEdges = workflowData.edges.filter(edge => 
+      edge.source === currentNodeId && 
+      edge.type === 'delegate'
+    );
+    
+    console.log('🔍 GROUP CHAT MANAGER: Found', delegateEdges.length, 'delegate connections');
+    
+    for (const edge of delegateEdges) {
+      const delegateNode = workflowData.nodes.find(n => n.id === edge.target && n.type === 'DelegateAgent');
+      if (delegateNode) {
+        const delegateName = delegateNode.data.name || 'Delegate';
+        const delegateDescription = delegateNode.data.description || 
+                                   delegateNode.data.system_message || 
+                                   `${delegateName} is a specialized delegate agent.`;
+        
+        delegates.push({
+          name: delegateName,
+          description: delegateDescription
+        });
+        
+        console.log('🔍 GROUP CHAT MANAGER: Found delegate:', delegateName, '-', delegateDescription.substring(0, 50));
+      }
+    }
+    
+    return delegates;
+  }
+  
+  // Auto-generate Group Chat Manager prompt from connected delegates
+  async function autoGenerateGroupChatManagerPrompt() {
+    if (node.type !== 'GroupChatManager') {
+      return;
+    }
+    
+    const delegates = findConnectedDelegates();
+    
+    if (delegates.length === 0) {
+      console.log('⚠️ GROUP CHAT MANAGER: No connected delegates found, skipping auto-generation');
+      return;
+    }
+    
+    try {
+      generatingPrompt = true;
+      promptGenerationError = null;
+      
+      // Build description from delegate capabilities
+      const delegateDescriptions = delegates.map(d => 
+        `${d.name}: ${d.description}`
+      ).join('; ');
+      
+      // Include Group Chat Manager's own description if available
+      const managerDescription = nodeDescription.trim() || node.data.description || '';
+      let description = '';
+      
+      if (managerDescription) {
+        description = `Group Chat Manager: ${managerDescription}. This manager coordinates ${delegates.length} specialized delegate agents: ${delegateDescriptions}. The manager should intelligently route tasks to appropriate delegates based on their capabilities and synthesize their responses into comprehensive solutions.`;
+      } else {
+        description = `Group Chat Manager coordinating ${delegates.length} specialized delegate agents: ${delegateDescriptions}. The manager should intelligently route tasks to appropriate delegates based on their capabilities and synthesize their responses into comprehensive solutions.`;
+      }
+      
+      console.log('🔧 GROUP CHAT MANAGER PROMPT GEN: Auto-generating from', delegates.length, 'delegates');
+      console.log('🔧 GROUP CHAT MANAGER PROMPT GEN: Description:', description.substring(0, 100));
+      
+      const request: PromptGenerationRequest = {
+        description: description,
+        agent_type: 'GroupChatManager',
+        doc_aware: nodeConfig.doc_aware || false,
+        project_id: projectId || undefined,
+        llm_provider: nodeConfig.llm_provider || 'openai',
+        llm_model: nodeConfig.llm_model || 'gpt-4'
+      };
+      
+      const response: PromptGenerationResponse = await generateSystemPrompt(request);
+      
+      if (response.success && response.generated_prompt) {
+        // Auto-apply the generated prompt to system_message
+        nodeConfig.system_message = response.generated_prompt;
+        updateNodeData();
+        
+        console.log('✅ GROUP CHAT MANAGER PROMPT GEN: Auto-generated and applied prompt');
+        toasts.success(`Auto-generated prompt from ${delegates.length} connected delegate${delegates.length > 1 ? 's' : ''}`);
+      } else {
+        promptGenerationError = response.error || 'Failed to generate prompt';
+        console.error('❌ GROUP CHAT MANAGER PROMPT GEN: Generation failed:', promptGenerationError);
+      }
+    } catch (error) {
+      promptGenerationError = error instanceof Error ? error.message : 'Unknown error';
+      console.error('❌ GROUP CHAT MANAGER PROMPT GEN: Exception:', error);
+    } finally {
+      generatingPrompt = false;
+    }
+  }
+  
+  async function generatePromptFromDescription() {
+    // Only generate for agents that support system messages
+    if (!['AssistantAgent', 'DelegateAgent', 'GroupChatManager'].includes(node.type)) {
+      return;
+    }
+    
+    if (!nodeDescription || nodeDescription.trim().length < 10) {
+      toasts.warning('Please provide a description (at least 10 characters)');
+      return;
+    }
+    
+    try {
+      generatingPrompt = true;
+      promptGenerationError = null;
+      generatedPromptPreview = null;
+      
+      const request: PromptGenerationRequest = {
+        description: nodeDescription.trim(),
+        agent_type: node.type,
+        doc_aware: nodeConfig.doc_aware || false,
+        project_id: projectId || undefined,
+        llm_provider: nodeConfig.llm_provider || 'openai',
+        llm_model: nodeConfig.llm_model || 'gpt-4'
+      };
+      
+      console.log('🔧 PROMPT GEN: Generating prompt for', node.type, 'with description:', nodeDescription.substring(0, 50));
+      
+      const response: PromptGenerationResponse = await generateSystemPrompt(request);
+      
+      if (response.success && response.generated_prompt) {
+        generatedPromptPreview = response.generated_prompt;
+        promptGenerationMetadata = response.metadata;
+        showPromptPreview = true;
+        toasts.success('Prompt generated successfully!');
+        console.log('✅ PROMPT GEN: Generated prompt:', response.generated_prompt.substring(0, 100));
+      } else {
+        promptGenerationError = response.error || 'Failed to generate prompt';
+        toasts.error(promptGenerationError);
+        console.error('❌ PROMPT GEN: Generation failed:', promptGenerationError);
+      }
+    } catch (error) {
+      promptGenerationError = error instanceof Error ? error.message : 'Unknown error';
+      toasts.error('Failed to generate prompt: ' + promptGenerationError);
+      console.error('❌ PROMPT GEN: Exception:', error);
+    } finally {
+      generatingPrompt = false;
+    }
+  }
+  
+  function applyGeneratedPrompt() {
+    if (generatedPromptPreview) {
+      nodeConfig.system_message = generatedPromptPreview;
+      updateNodeData();
+      toasts.success('Generated prompt applied to system message');
+      showPromptPreview = false;
+    }
+  }
+  
+  function dismissPromptPreview() {
+    showPromptPreview = false;
+    generatedPromptPreview = null;
+    promptGenerationError = null;
   }
   
   function saveNodeChanges() {
@@ -718,22 +1170,152 @@
     </div>
     
     <!-- DESCRIPTION -->
-    <div>
-      <label class="block text-sm font-medium text-gray-700 mb-2">Description</label>
-      <textarea
-        bind:value={nodeDescription}
-        on:input={handleDescriptionChange}
-        on:blur={handleDescriptionChange}
-        rows="2"
-        class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20 transition-all resize-none"
-        placeholder="Describe what this agent does..."
-      ></textarea>
-    </div>
+    {#if ['AssistantAgent', 'DelegateAgent', 'GroupChatManager'].includes(node.type)}
+      <div>
+        <div class="flex items-center justify-between mb-2">
+          <label class="block text-sm font-medium text-gray-700">
+            Description
+            {#if node.type === 'DelegateAgent'}
+              <i class="fas fa-info-circle ml-1 text-gray-400" title="Describe this delegate's capabilities and expertise. This helps the Group Chat Manager route queries intelligently."></i>
+            {/if}
+          </label>
+          <div class="flex items-center space-x-2">
+            <label class="flex items-center space-x-1 text-xs text-gray-600">
+              <input
+                type="checkbox"
+                bind:checked={autoGenerateEnabled}
+                class="form-checkbox h-3 w-3 text-oxford-blue rounded"
+              />
+              <span>Auto-generate</span>
+            </label>
+            <button
+              on:click={generatePromptFromDescription}
+              disabled={generatingPrompt || !nodeDescription || nodeDescription.trim().length < 10}
+              class="px-3 py-1 text-xs bg-oxford-blue rounded-md hover:bg-blue-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center space-x-1"
+              style="color: white;"
+            >
+              {#if generatingPrompt}
+                <i class="fas fa-spinner fa-spin" style="color: white;"></i>
+                <span style="color: white;">Generating...</span>
+              {:else}
+                <i class="fas fa-magic" style="color: white;"></i>
+                <span style="color: white;">Generate Prompt</span>
+              {/if}
+            </button>
+          </div>
+        </div>
+        <textarea
+          bind:value={nodeDescription}
+          on:input={handleDescriptionChange}
+          on:blur={handleDescriptionChange}
+          rows="2"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20 transition-all resize-none"
+          placeholder={node.type === 'DelegateAgent' 
+            ? "Describe this delegate's capabilities and expertise (e.g., 'Financial analyst specializing in quarterly reports and budget analysis')..."
+            : "Describe what this agent does (e.g., 'A research assistant that helps users find information in documents')..."}
+        ></textarea>
+        <p class="text-xs text-gray-500 mt-1">
+          {nodeDescription.length}/10,000 characters
+          {#if nodeDescription.length < 10 && nodeDescription.length > 0}
+            <span class="text-yellow-600"> (minimum 10 characters)</span>
+          {/if}
+          {#if node.type === 'DelegateAgent'}
+            {#if nodeDescription.length >= 100 && nodeDescription.length <= 300}
+              <span class="text-green-600 ml-2">
+                <i class="fas fa-check-circle"></i> Good length for capability matching
+              </span>
+            {:else if nodeDescription.length > 0 && nodeDescription.length < 100}
+              <span class="text-yellow-600 ml-2">
+                <i class="fas fa-exclamation-triangle"></i> Consider adding more detail (100-300 chars recommended)
+              </span>
+            {/if}
+          {/if}
+        </p>
+        
+        <!-- Generated Prompt Preview -->
+        {#if showPromptPreview && generatedPromptPreview}
+          <div class="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <div class="flex items-center justify-between mb-2">
+              <h4 class="text-sm font-semibold text-blue-900">Generated Prompt Preview</h4>
+              <button
+                on:click={dismissPromptPreview}
+                class="text-blue-600 hover:text-blue-800 text-xs"
+              >
+                <i class="fas fa-times"></i>
+              </button>
+            </div>
+            <div class="text-sm text-gray-700 bg-white p-2 rounded border border-blue-100 max-h-48 overflow-y-auto mb-2">
+              {generatedPromptPreview}
+            </div>
+            {#if promptGenerationMetadata}
+              <div class="text-xs text-gray-600 mb-2">
+                Generated using {promptGenerationMetadata.llm_provider} ({promptGenerationMetadata.llm_model})
+                {#if promptGenerationMetadata.fallback_used}
+                  <span class="text-yellow-600"> (template fallback)</span>
+                {/if}
+              </div>
+            {/if}
+            <div class="flex space-x-2">
+              <button
+                on:click={applyGeneratedPrompt}
+                class="px-3 py-1 text-xs bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors"
+              >
+                <i class="fas fa-check mr-1"></i> Apply to System Message
+              </button>
+              <button
+                on:click={generatePromptFromDescription}
+                disabled={generatingPrompt}
+                class="px-3 py-1 text-xs bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:bg-gray-300"
+              >
+                <i class="fas fa-redo mr-1"></i> Regenerate
+              </button>
+            </div>
+          </div>
+        {/if}
+        
+        {#if promptGenerationError}
+          <div class="mt-2 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-700">
+            <i class="fas fa-exclamation-circle mr-1"></i>
+            {promptGenerationError}
+          </div>
+        {/if}
+      </div>
+    {:else}
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-2">Description</label>
+        <textarea
+          bind:value={nodeDescription}
+          on:input={handleDescriptionChange}
+          on:blur={handleDescriptionChange}
+          rows="2"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20 transition-all resize-none"
+          placeholder="Describe what this agent does..."
+        ></textarea>
+      </div>
+    {/if}
     
     <!-- SYSTEM MESSAGE - For AI Assistant, Delegate, GroupChatManager, and Start Node -->
     {#if node.type === 'AssistantAgent' || node.type === 'DelegateAgent' || node.type === 'GroupChatManager'}
       <div>
-        <label class="block text-sm font-medium text-gray-700 mb-2">System Message</label>
+        <div class="flex items-center justify-between mb-2">
+          <label class="block text-sm font-medium text-gray-700">System Message</label>
+          {#if node.type === 'GroupChatManager'}
+            <button
+              on:click={autoGenerateGroupChatManagerPrompt}
+              disabled={generatingPrompt || !workflowData || findConnectedDelegates().length === 0}
+              class="px-2 py-1 text-xs bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center space-x-1"
+              title="Auto-generate prompt from connected delegates"
+            >
+              {#if generatingPrompt}
+                <i class="fas fa-spinner fa-spin"></i>
+                <span>Generating...</span>
+              {:else}
+                <i class="fas fa-magic"></i>
+                <span>Auto-Generate from Delegates</span>
+              {/if}
+            </button>
+          {/if}
+        </div>
         <textarea
           bind:value={nodeConfig.system_message}
           on:input={updateNodeData}
@@ -745,6 +1327,13 @@
             ? "You are a Group Chat Manager responsible for coordinating multiple specialized agents..."
             : "You are a specialized delegate agent that works with the Group Chat Manager..."}
         ></textarea>
+        {#if node.type === 'GroupChatManager' && findConnectedDelegates().length > 0}
+          <p class="text-xs text-gray-500 mt-1">
+            <i class="fas fa-info-circle mr-1"></i>
+            Connected to {findConnectedDelegates().length} delegate{findConnectedDelegates().length > 1 ? 's' : ''}. 
+            Click "Auto-Generate from Delegates" to create a prompt based on their capabilities.
+          </p>
+        {/if}
       </div>
     {:else if node.type === 'StartNode'}
       <div>
@@ -881,34 +1470,133 @@
       
       <!-- TEMPERATURE AND MAX TOKENS/MAX ROUNDS - Different layout for GroupChatManager -->
       {#if node.type === 'GroupChatManager'}
-        <!-- GROUP CHAT MANAGER: Max Rounds -->
+        <!-- Delegation Mode -->
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-2">Max Rounds</label>
-          <input
-            type="number"
-            bind:value={nodeConfig.max_rounds}
-            on:input={updateNodeData}
-            min="1"
-            max="100"
-            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
-            placeholder="10"
-          />
-        </div>
-        
-        <!-- Termination Strategy -->
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-2">Termination Strategy</label>
+          <label class="block text-sm font-medium text-gray-700 mb-2">
+            Delegation Mode
+            <i class="fas fa-info-circle ml-1 text-gray-400" title="Choose how tasks are delegated to delegate agents"></i>
+          </label>
           <select
-            bind:value={nodeConfig.termination_strategy}
+            bind:value={nodeConfig.delegation_mode}
             on:change={updateNodeData}
             class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20 bg-white"
           >
-            <option value="all_delegates_complete">All Delegates Complete</option>
-            <option value="any_delegate_complete">Any Delegate Complete</option>
-            <option value="max_iterations_reached">Max Iterations Reached</option>
-            <option value="custom_condition">Custom Condition</option>
+            <option value="round_robin">Round Robin (Default)</option>
+            <option value="intelligent">Intelligent Delegation</option>
           </select>
+          <p class="text-xs text-gray-500 mt-1">
+            {#if nodeConfig.delegation_mode === 'intelligent'}
+              <i class="fas fa-lightbulb text-yellow-500 mr-1"></i>
+              Intelligent mode splits input into subqueries and routes them to delegates based on their capabilities.
+            {:else}
+              Round robin mode processes all delegates in sequence for each round.
+            {/if}
+          </p>
         </div>
+        
+        <!-- Round Robin Configuration (only shown when round_robin mode is selected or default) -->
+        {#if !nodeConfig.delegation_mode || nodeConfig.delegation_mode === 'round_robin'}
+          <div class="p-3 bg-green-50 border border-green-200 rounded-lg space-y-3">
+            <h4 class="text-sm font-semibold text-green-900">Round Robin Settings</h4>
+            
+            <!-- Max Iterations -->
+            <div>
+              <label class="block text-xs font-medium text-gray-700 mb-1">Max Iterations</label>
+              <input
+                type="number"
+                bind:value={nodeConfig.max_iterations}
+                on:input={updateNodeData}
+                min="1"
+                max="20"
+                class="w-full px-2 py-1 border border-gray-300 rounded text-xs"
+                placeholder="2"
+              />
+              <p class="text-xs text-gray-500 mt-1">
+                Maximum number of iterations each delegate will execute in Round Robin mode. Default: 2
+              </p>
+            </div>
+          </div>
+        {/if}
+        
+        <!-- Intelligent Delegation Configuration (only shown when intelligent mode is selected) -->
+        {#if nodeConfig.delegation_mode === 'intelligent'}
+          <div class="p-3 bg-blue-50 border border-blue-200 rounded-lg space-y-3">
+            <h4 class="text-sm font-semibold text-blue-900">Intelligent Delegation Settings</h4>
+            
+            <!-- Max Subqueries -->
+            <div>
+              <label class="block text-xs font-medium text-gray-700 mb-1">
+                Max Subqueries
+                <i class="fas fa-info-circle ml-1 text-gray-400" title="Maximum number of subqueries to generate. Leave empty for no limit."></i>
+              </label>
+              <input
+                type="number"
+                min="1"
+                max="50"
+                bind:value={nodeConfig.max_subqueries}
+                on:input={updateNodeData}
+                placeholder="No limit"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20 bg-white"
+              />
+              <p class="text-xs text-gray-500 mt-1">
+                Limit the number of subqueries generated from the input. Higher priority subqueries are kept when limit is applied. Leave empty for no limit.
+              </p>
+            </div>
+            
+            <!-- Confidence Threshold -->
+            <div>
+              <label class="block text-xs font-medium text-gray-700 mb-1">
+                Confidence Threshold: {nodeConfig.delegation_confidence_threshold || 0.7}
+              </label>
+              <input
+                type="range"
+                bind:value={nodeConfig.delegation_confidence_threshold}
+                on:input={updateNodeData}
+                min="0"
+                max="1"
+                step="0.05"
+                class="w-full"
+              />
+              <p class="text-xs text-gray-500 mt-1">
+                Minimum confidence score (0.0-1.0) required to assign a subquery to a delegate. Lower values allow more flexible matching.
+              </p>
+            </div>
+            
+            <!-- Delegation Timeout -->
+            <div>
+              <label class="block text-xs font-medium text-gray-700 mb-1">Delegation Timeout (seconds)</label>
+              <input
+                type="number"
+                bind:value={nodeConfig.delegation_timeout}
+                on:input={updateNodeData}
+                min="5"
+                max="300"
+                class="w-full px-2 py-1 border border-gray-300 rounded text-xs"
+                placeholder="30"
+              />
+              <p class="text-xs text-gray-500 mt-1">
+                Maximum time to wait for a delegate response before timing out.
+              </p>
+            </div>
+            
+            <!-- Max Retries -->
+            <div>
+              <label class="block text-xs font-medium text-gray-700 mb-1">Max Retries</label>
+              <input
+                type="number"
+                bind:value={nodeConfig.max_delegation_retries}
+                on:input={updateNodeData}
+                min="0"
+                max="10"
+                class="w-full px-2 py-1 border border-gray-300 rounded text-xs"
+                placeholder="3"
+              />
+              <p class="text-xs text-gray-500 mt-1">
+                Maximum number of retry attempts for failed delegations.
+              </p>
+            </div>
+          </div>
+        {/if}
       {/if}
     {/if}
     
@@ -1917,6 +2605,310 @@
       </div>
     {/if}
     
+    <!-- MCP SERVER CONFIGURATION -->
+    {#if node.type === 'MCPServer'}
+      <div class="space-y-4 border-t border-gray-200 pt-4 mt-4">
+        <h3 class="text-sm font-semibold text-gray-800">MCP Server Configuration</h3>
+        
+        <!-- Server Type Selection -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2">Server Type</label>
+          <select
+            bind:value={nodeConfig.server_type}
+            on:change={handleServerTypeChange}
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20 bg-white"
+          >
+            <option value="google_drive">Google Drive</option>
+            <option value="sharepoint">SharePoint</option>
+          </select>
+          <p class="text-xs text-gray-500 mt-1">Select the MCP server type to connect to</p>
+        </div>
+        
+        <!-- Credential Status -->
+        {#if mcpCredentialStatus}
+          <div class="bg-green-50 border border-green-200 rounded-lg p-3">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center">
+                <i class="fas fa-check-circle text-green-600 mr-2"></i>
+                <div>
+                  <p class="text-sm text-green-800 font-medium">Credentials Configured</p>
+                  <p class="text-xs text-green-700">
+                    {mcpCredentialStatus.is_validated ? 'Validated' : 'Not validated'}
+                    {#if mcpCredentialName}
+                      - {mcpCredentialName}
+                    {/if}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        {/if}
+        
+        <!-- Credential Name -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2">Credential Name (Optional)</label>
+          <input
+            type="text"
+            bind:value={mcpCredentialName}
+            placeholder="e.g., Production Credentials"
+            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
+          />
+        </div>
+        
+        <!-- Google Drive Credentials -->
+        {#if nodeConfig.server_type === 'google_drive'}
+          <div class="space-y-3 border border-gray-200 rounded-lg p-4 bg-gray-50">
+            <h4 class="text-sm font-semibold text-gray-800 mb-3">Google Drive Credentials</h4>
+            
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">OAuth Client ID</label>
+              <input
+                type="text"
+                bind:value={mcpGoogleDriveCredentials.client_id}
+                placeholder="Enter Google OAuth Client ID"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
+              />
+            </div>
+            
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">OAuth Client Secret</label>
+              <input
+                type="password"
+                bind:value={mcpGoogleDriveCredentials.client_secret}
+                placeholder="Enter Google OAuth Client Secret"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
+              />
+            </div>
+            
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">Refresh Token</label>
+              <input
+                type="password"
+                bind:value={mcpGoogleDriveCredentials.refresh_token}
+                placeholder="Enter OAuth Refresh Token"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
+              />
+              <p class="text-xs text-gray-500 mt-1">
+                Obtain these from Google Cloud Console after setting up OAuth 2.0 credentials
+              </p>
+            </div>
+          </div>
+        {/if}
+        
+        <!-- SharePoint Credentials -->
+        {#if nodeConfig.server_type === 'sharepoint'}
+          <div class="space-y-3 border border-gray-200 rounded-lg p-4 bg-gray-50">
+            <h4 class="text-sm font-semibold text-gray-800 mb-3">SharePoint Credentials</h4>
+            
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">Tenant ID</label>
+              <input
+                type="text"
+                bind:value={mcpSharePointCredentials.tenant_id}
+                placeholder="Enter Azure AD Tenant ID"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
+              />
+            </div>
+            
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">Client ID (Application ID)</label>
+              <input
+                type="text"
+                bind:value={mcpSharePointCredentials.client_id}
+                placeholder="Enter Azure AD Application (Client) ID"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
+              />
+            </div>
+            
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">Client Secret</label>
+              <input
+                type="password"
+                bind:value={mcpSharePointCredentials.client_secret}
+                placeholder="Enter Azure AD Client Secret"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
+              />
+            </div>
+            
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-2">SharePoint Site URL</label>
+              <input
+                type="text"
+                bind:value={mcpSharePointCredentials.site_url}
+                placeholder="https://contoso.sharepoint.com/sites/MySite"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
+              />
+              <p class="text-xs text-gray-500 mt-1">
+                Full URL of the SharePoint site you want to access
+              </p>
+            </div>
+          </div>
+        {/if}
+        
+        <!-- Security Notice -->
+        <div class="bg-blue-50 border border-blue-200 rounded-lg p-3">
+          <div class="flex items-start">
+            <i class="fas fa-shield-alt text-blue-600 mt-0.5 mr-2"></i>
+            <div class="text-sm text-blue-800">
+              <p class="font-medium mb-1">Secure Storage</p>
+              <p class="text-xs">
+                All credentials are encrypted using project-specific keys and stored securely. 
+                Credentials are isolated per project and cannot be accessed by other users.
+              </p>
+            </div>
+          </div>
+        </div>
+        
+        <!-- Connection Test Result -->
+        {#if mcpConnectionTestResult}
+          <div class="p-3 rounded-lg {mcpConnectionTestResult.success ? 'bg-green-50 border border-green-200' : 'bg-red-50 border border-red-200'}">
+            <div class="flex items-center">
+              <i class="fas {mcpConnectionTestResult.success ? 'fa-check-circle' : 'fa-times-circle'} text-{mcpConnectionTestResult.success ? 'green' : 'red'}-600 mr-2"></i>
+              <div>
+                <p class="font-medium text-{mcpConnectionTestResult.success ? 'green' : 'red'}-800 text-sm">
+                  {mcpConnectionTestResult.success ? 'Connection Successful' : 'Connection Failed'}
+                </p>
+                {#if mcpConnectionTestResult.success}
+                  <p class="text-xs text-green-700 mt-1">
+                    Found {mcpConnectionTestResult.tools_count || 0} available tools
+                  </p>
+                {:else}
+                  <p class="text-xs text-red-700 mt-1">
+                    {mcpConnectionTestResult.error || 'Unknown error'}
+                  </p>
+                {/if}
+              </div>
+            </div>
+          </div>
+        {/if}
+        
+        <!-- Credential Actions -->
+        <div class="flex space-x-2">
+          <button
+            type="button"
+            on:click={saveMCPCredentials}
+            disabled={savingMCPCredentials}
+            class="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium"
+          >
+            {#if savingMCPCredentials}
+              <i class="fas fa-spinner fa-spin mr-2"></i>
+              Saving...
+            {:else}
+              <i class="fas fa-save mr-2"></i>
+              Save Credentials
+            {/if}
+          </button>
+          
+          <button
+            type="button"
+            on:click={testMCPConnection}
+            disabled={testingMCPConnection || savingMCPCredentials}
+            class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium"
+          >
+            {#if testingMCPConnection}
+              <i class="fas fa-spinner fa-spin mr-2"></i>
+              Testing...
+            {:else}
+              <i class="fas fa-plug mr-2"></i>
+              Test Connection
+            {/if}
+          </button>
+        </div>
+        
+        <!-- Server Configuration (for SharePoint site URL, etc.) -->
+        {#if nodeConfig.server_type === 'sharepoint'}
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-2">SharePoint Site URL</label>
+            <input
+              type="text"
+              bind:value={nodeConfig.server_config.site_url}
+              on:input={updateNodeData}
+              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
+              placeholder="https://contoso.sharepoint.com/sites/MySite"
+            />
+            <p class="text-xs text-gray-500 mt-1">Full URL of the SharePoint site</p>
+          </div>
+        {/if}
+        
+        <!-- Available Tools -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2">Available Tools</label>
+          {#if loadingMCPTools}
+            <div class="text-xs text-gray-500 italic">
+              <i class="fas fa-spinner fa-spin mr-1"></i>
+              Loading tools...
+            </div>
+          {:else if mcpAvailableTools.length > 0}
+            <div class="max-h-48 overflow-y-auto border border-gray-200 rounded-lg p-2 space-y-2">
+              {#each mcpAvailableTools as tool}
+                <div class="bg-white border border-gray-200 rounded p-2">
+                  <div class="flex items-center justify-between">
+                    <div class="flex-1">
+                      <p class="text-sm font-medium text-gray-800">{tool.name}</p>
+                      <p class="text-xs text-gray-600 mt-1">{tool.description}</p>
+                    </div>
+                    <label class="flex items-center ml-2">
+                      <input
+                        type="checkbox"
+                        checked={nodeConfig.selected_tools?.includes(tool.name) || false}
+                        on:change={(e) => {
+                          if (!nodeConfig.selected_tools) nodeConfig.selected_tools = [];
+                          if (e.target.checked) {
+                            if (!nodeConfig.selected_tools.includes(tool.name)) {
+                              nodeConfig.selected_tools = [...nodeConfig.selected_tools, tool.name];
+                            }
+                          } else {
+                            nodeConfig.selected_tools = nodeConfig.selected_tools.filter(t => t !== tool.name);
+                          }
+                          updateNodeData();
+                        }}
+                        class="w-4 h-4 text-purple-600 border-gray-300 rounded focus:ring-purple-600"
+                      />
+                    </label>
+                  </div>
+                </div>
+              {/each}
+            </div>
+            <p class="text-xs text-gray-500 mt-2">
+              Check the tools you want this node to expose (leave all unchecked to expose all tools)
+            </p>
+          {:else if mcpCredentialStatus?.is_validated}
+            <div class="text-xs text-gray-500 italic">
+              No tools available. Try testing the connection again.
+            </div>
+          {:else}
+            <div class="text-xs text-gray-500 italic">
+              Tools will be loaded after credentials are configured and connection is tested
+            </div>
+          {/if}
+        </div>
+        
+        <!-- Selected Tools Summary -->
+        {#if nodeConfig.selected_tools && nodeConfig.selected_tools.length > 0}
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-2">Selected Tools ({nodeConfig.selected_tools.length})</label>
+            <div class="flex flex-wrap gap-2">
+              {#each nodeConfig.selected_tools as tool}
+                <span class="inline-flex items-center px-2 py-1 rounded-full text-xs bg-purple-100 text-purple-800">
+                  {tool}
+                  <button
+                    type="button"
+                    on:click={() => {
+                      nodeConfig.selected_tools = nodeConfig.selected_tools.filter(t => t !== tool);
+                      updateNodeData();
+                    }}
+                    class="ml-1 text-purple-600 hover:text-purple-800"
+                  >
+                    <i class="fas fa-times"></i>
+                  </button>
+                </span>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </div>
+    {/if}
+    
   </div>
   
   <!-- Panel Footer -->
@@ -1960,3 +2952,4 @@
     background-color: #002147;
   }
 </style>
+

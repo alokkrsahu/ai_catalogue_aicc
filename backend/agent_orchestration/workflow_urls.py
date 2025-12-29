@@ -4,11 +4,13 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .workflow_views import AgentWorkflowViewSet
 from .docaware_views import DocAwareConfigViewSet
+from .prompt_generation_views import PromptGenerationViewSet
 from . import human_input_views
 
 # Create router for workflow endpoints
 router = DefaultRouter()
 router.register(r'docaware', DocAwareConfigViewSet, basename='docaware')
+router.register(r'generate-prompt', PromptGenerationViewSet, basename='generate-prompt')
 
 # Note: We'll register this with a custom basename in the main URLs
 # to handle the nested project/{id}/workflows/ structure

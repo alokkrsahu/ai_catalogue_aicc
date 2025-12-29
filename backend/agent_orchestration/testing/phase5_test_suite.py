@@ -1,7 +1,7 @@
 """
-Phase 5: AutoGen Integration Testing & Optimization Suite
+Phase 5: Workflow Integration Testing & Optimization Suite
 
-Comprehensive testing framework for validating the complete AutoGen integration
+Comprehensive testing framework for validating the complete workflow integration
 across all phases with performance monitoring and production optimization.
 """
 
@@ -30,20 +30,20 @@ from agent_orchestration.autogen.executor import AutoGenExecutor
 from agent_orchestration.autogen.llm_service import get_autogen_llm_service
 from agent_orchestration.rag_service import DocumentAwareAgentService
 
-logger = logging.getLogger('autogen_testing')
+logger = logging.getLogger('workflow_testing')
 
-class AutoGenIntegrationTestSuite:
-    """Comprehensive test suite for AutoGen integration"""
+class WorkflowIntegrationTestSuite:
+    """Comprehensive test suite for workflow integration"""
     
     def __init__(self):
         self.test_results = {}
         self.performance_metrics = {}
         self.test_start_time = timezone.now()
-        logger.info("🧪 AUTOGEN TESTING SUITE: Initialized comprehensive test suite")
+        logger.info("🧪 WORKFLOW TESTING SUITE: Initialized comprehensive test suite")
     
     async def run_all_tests(self) -> Dict[str, Any]:
         """Run complete test suite across all phases"""
-        logger.info("🚀 AUTOGEN TESTING SUITE: Starting comprehensive test execution")
+        logger.info("🚀 WORKFLOW TESTING SUITE: Starting comprehensive test execution")
         
         test_phases = [
             ("Phase 1: Foundation Tests", self.test_phase1_foundation),
@@ -96,19 +96,19 @@ class AutoGenIntegrationTestSuite:
         overall_results['recommendations'] = self.generate_recommendations(overall_results)
         
         total_duration = (timezone.now() - self.test_start_time).total_seconds()
-        logger.info(f"🎯 AUTOGEN TESTING SUITE: Completed all tests in {total_duration:.2f}s")
+        logger.info(f"🎯 WORKFLOW TESTING SUITE: Completed all tests in {total_duration:.2f}s")
         
         return overall_results
 
     async def test_phase1_foundation(self) -> Dict[str, Any]:
-        """Test Phase 1: AutoGen foundation and connection types"""
+        """Test Phase 1: Workflow foundation and connection types"""
         return {
             'connection_types_test': await self.test_connection_types(),
             'service_initialization_test': await self.test_service_initialization(),
         }
 
     async def test_connection_types(self) -> Dict[str, bool]:
-        """Test all AutoGen connection types"""
+        """Test all workflow connection types"""
         connection_types = ['sequential', 'broadcast', 'group_chat', 'conditional', 'reflection']
         results = {}
         
@@ -126,7 +126,7 @@ class AutoGenIntegrationTestSuite:
         return results
 
     async def test_service_initialization(self) -> Dict[str, bool]:
-        """Test AutoGen service components initialization"""
+        """Test workflow service components initialization"""
         results = {}
         
         try:
@@ -306,8 +306,8 @@ class AutoGenIntegrationTestSuite:
             if not phase_data.get('success', False):
                 error = phase_data.get('error', '')
                 
-                if 'autogen' in error.lower():
-                    recommendations.append('Install AutoGen: pip install pyautogen')
+                if 'workflow' in error.lower():
+                    recommendations.append('Check workflow configuration and dependencies')
                 
                 if 'api_key' in error.lower():
                     recommendations.append('Configure API keys for LLM providers (OpenAI, Anthropic, Google)')
@@ -332,10 +332,10 @@ class AutoGenIntegrationTestSuite:
         return list(set(recommendations))  # Remove duplicates
 
 
-class AutoGenTestCommand(BaseCommand):
-    """Django management command to run AutoGen integration tests"""
+class WorkflowTestCommand(BaseCommand):
+    """Django management command to run workflow integration tests"""
     
-    help = 'Run comprehensive AutoGen integration test suite'
+    help = 'Run comprehensive workflow integration test suite'
     
     def add_arguments(self, parser):
         parser.add_argument(
@@ -364,10 +364,10 @@ class AutoGenTestCommand(BaseCommand):
             logging.basicConfig(level=logging.INFO)
         
         # Initialize test suite
-        test_suite = AutoGenIntegrationTestSuite()
+        test_suite = WorkflowIntegrationTestSuite()
         
         # Run tests
-        self.stdout.write('🧪 Starting AutoGen Integration Test Suite...')
+        self.stdout.write('🧪 Starting Workflow Integration Test Suite...')
         
         try:
             # Run in async context

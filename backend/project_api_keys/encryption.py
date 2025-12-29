@@ -87,6 +87,63 @@ class ProjectAPIKeyEncryption:
             return decrypted == test_key
         except Exception:
             return False
+    
+    def encrypt_mcp_credentials(self, project_id: str, credentials_dict: dict) -> str:
+        """
+        Encrypt MCP server credentials (JSON dict) for specific project
+        
+        Args:
+            project_id: Project ID for key derivation
+            credentials_dict: Dictionary containing credentials (OAuth tokens, client IDs, etc.)
+            
+        Returns:
+            Base64-encoded encrypted JSON string
+        """
+        import json
+        
+        if not credentials_dict:
+            raise ValueError("Credentials dictionary cannot be empty")
+        
+        if not project_id:
+            raise ValueError("Project ID is required for encryption")
+        
+        # Convert dict to JSON string
+        credentials_json = json.dumps(credentials_dict)
+        
+        # Encrypt using same method as API keys
+        fernet = self._get_project_key(project_id)
+        encrypted_bytes = fernet.encrypt(credentials_json.encode('utf-8'))
+        return base64.urlsafe_b64encode(encrypted_bytes).decode('utf-8')
+    
+    def decrypt_mcp_credentials(self, project_id: str, encrypted_credentials: str) -> dict:
+        """
+        Decrypt MCP server credentials for specific project
+        
+        Args:
+            project_id: Project ID for key derivation
+            encrypted_credentials: Base64-encoded encrypted credentials JSON
+            
+        Returns:
+            Dictionary containing decrypted credentials
+        """
+        import json
+        
+        if not encrypted_credentials:
+            raise ValueError("Encrypted credentials cannot be empty")
+        
+        if not project_id:
+            raise ValueError("Project ID is required for decryption")
+        
+        try:
+            fernet = self._get_project_key(project_id)
+            encrypted_bytes = base64.urlsafe_b64decode(encrypted_credentials.encode('utf-8'))
+            decrypted_bytes = fernet.decrypt(encrypted_bytes)
+            credentials_json = decrypted_bytes.decode('utf-8')
+            return json.loads(credentials_json)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Failed to parse decrypted credentials JSON: {e}")
+        except Exception as e:
+            raise ValueError(f"Failed to decrypt MCP credentials: {e}")
 
 # Global instance
 encryption_service = ProjectAPIKeyEncryption()

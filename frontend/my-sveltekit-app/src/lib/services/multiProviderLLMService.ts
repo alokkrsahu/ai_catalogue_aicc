@@ -1,4 +1,4 @@
-// 🤖 PHASE 3: Multi-Provider LLM Configuration Service - Enhanced AutoGen Integration
+// 🤖 PHASE 3: Multi-Provider LLM Configuration Service - Enhanced Workflow Integration
 import { 
   type LLMProvider, 
   type LLMModel, 
@@ -490,10 +490,10 @@ class MultiProviderLLMConfigurationService {
     const recommendations: Record<string, string[]> = {
       'gpt-4': ['AssistantAgent', 'GroupChatManager'],
       'gpt-4-turbo': ['AssistantAgent', 'GroupChatManager', 'UserProxyAgent'],
-      'gpt-3.5-turbo': ['UserProxyAgent', 'FunctionTool'],
+      'gpt-3.5-turbo': ['UserProxyAgent', 'MCPServer'],
       'claude-3-opus': ['AssistantAgent', 'GroupChatManager'],
       'claude-3-sonnet': ['AssistantAgent', 'UserProxyAgent', 'GroupChatManager'],
-      'claude-3-haiku': ['UserProxyAgent', 'FunctionTool'],
+      'claude-3-haiku': ['UserProxyAgent', 'MCPServer'],
       'gemini-pro': ['AssistantAgent', 'GroupChatManager'],
       'gemini-pro-vision': ['AssistantAgent', 'UserProxyAgent']
     };

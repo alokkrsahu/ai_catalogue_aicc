@@ -76,6 +76,7 @@ INSTALLED_APPS = [
     'agent_orchestration',  # Add the Agent Orchestration app
     'django_milvus_search',  # Add the Django Milvus Search app
     'project_api_keys.apps.ProjectApiKeysConfig',  # Project-specific API key management
+    'mcp_servers',  # MCP Server integration
     'public_chatbot',  # Public Chatbot API (isolated from main system)
     
     # Third-party

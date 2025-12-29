@@ -217,6 +217,9 @@ urlpatterns = [
     # 🔑 PROJECT-SPECIFIC API KEY MANAGEMENT
     path('api/project-api-keys/', include('project_api_keys.urls')),
     
+    # 🔧 MCP SERVER MANAGEMENT
+    path('api/mcp-servers/', include('mcp_servers.urls')),
+    
     # 🤖 PUBLIC CHATBOT API (Isolated from main system)
     path('api/public-chatbot/', include('public_chatbot.urls')),
     

@@ -1,9 +1,9 @@
 """
-LLM Provider Manager - Fixed Version with Project-Specific API Keys
-==================================================================
+LLM Provider Manager - Project-Specific API Keys Only
+=====================================================
 
 Handles LLM provider initialization and configuration for conversation orchestration.
-Now integrated with project-specific encrypted API keys instead of just environment variables.
+All agents must use project-specific encrypted API keys. Environment variables are not used.
 """
 
 import os
@@ -26,37 +26,23 @@ logger = logging.getLogger('conversation_orchestrator')
 
 class LLMProviderManager:
     """
-    Manages LLM provider initialization and configuration with project-specific API keys
+    Manages LLM provider initialization and configuration with project-specific API keys only.
+    All agents must use project-specific encrypted API keys. Environment variables are not used.
     """
     
     def __init__(self):
-        # Keep environment variables as fallback
-        self.fallback_api_keys = {
-            'openai': os.getenv('OPENAI_API_KEY'),
-            'anthropic': os.getenv('ANTHROPIC_API_KEY'), 
-            'google': os.getenv('GOOGLE_API_KEY')  # Standardized to GOOGLE_API_KEY
-        }
-        
         # Initialize project API key service
         self.project_api_service = get_project_api_key_service()
-        
-        # Debug fallback API key availability
-        for provider, key in self.fallback_api_keys.items():
-            if key and key != 'Dummy-Key':
-                logger.info(f"✅ ORCHESTRATOR: {provider.upper()} fallback API key loaded (length: {len(key)})")
-            else:
-                logger.info(f"⚠️ ORCHESTRATOR: {provider.upper()} fallback API key not available (will use project-specific keys)")
-                
-        logger.info("🤖 LLM PROVIDER MANAGER: Initialized with project API key integration")
+        logger.info("🤖 LLM PROVIDER MANAGER: Initialized with project-specific API keys only (no environment variable fallback)")
         
     async def get_llm_provider(self, agent_config: Dict[str, Any], project: Optional[IntelliDocProject] = None) -> Optional[object]:
         """
-        Create LLM provider instance based on agent configuration
-        Now supports project-specific API keys
+        Create LLM provider instance based on agent configuration.
+        Requires project-specific API keys. Project context is mandatory.
         
         Args:
             agent_config: Agent configuration with provider type, model, etc.
-            project: Project instance for project-specific API keys (NEW)
+            project: Project instance for project-specific API keys (REQUIRED)
             
         Returns:
             LLM provider instance or None if no API key available
@@ -66,11 +52,32 @@ class LLMProviderManager:
         
         logger.info(f"🔧 LLM PROVIDER: Creating {provider_type} provider with model {model}")
         
-        # Get API key with project-specific priority
+        # Validate project is provided
+        if not project:
+            error_msg = f"Project context is required for API key access. All agents must use project-specific API keys. Provider: {provider_type}"
+            logger.error(f"❌ LLM PROVIDER: {error_msg}")
+            return None
+        
+        # Get API key from project-specific configuration only
         api_key = await self._get_api_key_for_provider(provider_type, project)
         
         if not api_key:
-            logger.error(f"❌ LLM PROVIDER: No API key available for {provider_type} (checked project-specific and fallback)")
+            error_msg = f"No project-specific {provider_type} API key found for project {project.name}. Please configure API keys in project settings."
+            logger.error(f"❌ LLM PROVIDER: {error_msg}")
+            return None
+        
+        # Final validation: ensure the key doesn't look like a placeholder
+        api_key_lower = api_key.lower().strip()
+        is_placeholder = (
+            'your_' in api_key_lower or
+            'placeholder' in api_key_lower or
+            'replace' in api_key_lower or
+            'example' in api_key_lower or
+            len(api_key.strip()) < 10
+        )
+        if is_placeholder:
+            error_msg = f"Project-specific API key for {provider_type} in project {project.name} appears to be a placeholder/dummy value. Please configure a valid API key in project settings."
+            logger.error(f"❌ LLM PROVIDER: {error_msg}")
             return None
         
         try:
@@ -105,80 +112,78 @@ class LLMProviderManager:
             logger.error(f"❌ LLM PROVIDER: Traceback: {traceback.format_exc()}")
             return None
 
-    async def _get_api_key_for_provider(self, provider_type: str, project: Optional[IntelliDocProject] = None) -> Optional[str]:
+    async def _get_api_key_for_provider(self, provider_type: str, project: IntelliDocProject) -> Optional[str]:
         """
-        Get API key for provider with project-specific priority
-        
-        Priority order:
-        1. Project-specific encrypted API key (if project provided)
-        2. Environment variable fallback (if not dummy)
-        3. None (will cause provider creation to fail)
+        Get API key for provider from project-specific configuration only.
+        Project context is required. No environment variable fallback.
         
         Args:
             provider_type: Type of provider (openai, google, anthropic)
-            project: Project instance for project-specific keys
+            project: Project instance for project-specific keys (REQUIRED)
             
         Returns:
-            API key string or None
+            API key string or None if not found
         """
-        # First try project-specific API key
-        if project:
-            try:
-                project_key = await sync_to_async(self.project_api_service.get_project_api_key)(project, provider_type)
-                if project_key:
-                    logger.info(f"✅ PROJECT API KEY: Using project-specific {provider_type} key for project {project.name}")
-                    return project_key
-                else:
-                    logger.info(f"ℹ️  PROJECT API KEY: No project-specific {provider_type} key found for project {project.name}")
-            except Exception as e:
-                logger.error(f"❌ PROJECT API KEY: Error getting project-specific {provider_type} key: {e}")
-        
-        # Fallback to environment variable (but not if it's a dummy value)
-        fallback_key = self.fallback_api_keys.get(provider_type)
-        if fallback_key and fallback_key != 'Dummy-Key':
-            logger.info(f"🔄 FALLBACK API KEY: Using environment variable {provider_type} key")
-            return fallback_key
-        
-        # No key available
-        if project:
-            logger.warning(f"⚠️  NO API KEY: Neither project-specific nor valid fallback key available for {provider_type} in project {project.name}")
-        else:
-            logger.warning(f"⚠️  NO API KEY: No valid API key available for {provider_type} (no project context, fallback is dummy)")
-        
-        return None
-
-    def get_llm_provider_sync(self, agent_config: Dict[str, Any]) -> Optional[object]:
-        """
-        Synchronous version for backward compatibility (uses fallback keys only)
-        This method should be deprecated in favor of the async version with project support
-        """
-        logger.warning("⚠️  LLM PROVIDER: Using deprecated sync method without project context")
-        return self._create_provider_with_fallback_keys(agent_config)
-    
-    def _create_provider_with_fallback_keys(self, agent_config: Dict[str, Any]) -> Optional[object]:
-        """
-        Create provider using fallback environment keys only (legacy support)
-        """
-        provider_type = agent_config.get('llm_provider', 'openai')
-        model = agent_config.get('llm_model', 'gpt-4')
-        
-        api_key = self.fallback_api_keys.get(provider_type)
-        if not api_key or api_key == 'Dummy-Key':
-            logger.error(f"❌ LLM PROVIDER (LEGACY): No valid fallback API key for {provider_type}")
+        if not project:
+            logger.error(f"❌ PROJECT API KEY: Project context is required for {provider_type} API key access")
             return None
         
         try:
-            if provider_type == 'openai':
-                return OpenAIProvider(api_key=api_key, model=model)
-            elif provider_type in ['anthropic', 'claude']:
-                # Claude requires max_tokens, use a reasonable default
-                max_tokens = 4096
-                return ClaudeProvider(api_key=api_key, model=model, max_tokens=max_tokens)
-            elif provider_type in ['google', 'gemini']:
-                return GeminiProvider(api_key=api_key, model=model)
+            project_key = await sync_to_async(self.project_api_service.get_project_api_key)(project, provider_type)
+            if project_key:
+                # Validate project key is not a placeholder
+                project_key_lower = project_key.lower().strip()
+                is_placeholder = (
+                    'your_' in project_key_lower or
+                    'placeholder' in project_key_lower or
+                    'replace' in project_key_lower or
+                    'example' in project_key_lower or
+                    'dummy' in project_key_lower or
+                    len(project_key.strip()) < 10
+                )
+                if is_placeholder:
+                    logger.error(f"❌ PROJECT API KEY: Project-specific {provider_type} key for project {project.name} appears to be a placeholder/dummy value (length: {len(project_key)})")
+                    logger.error(f"❌ PROJECT API KEY: Please configure a valid {provider_type} API key in project settings")
+                    return None
+                else:
+                    logger.info(f"✅ PROJECT API KEY: Using project-specific {provider_type} key for project {project.name} (length: {len(project_key)})")
+                    return project_key
             else:
-                logger.error(f"❌ LLM PROVIDER (LEGACY): Unknown provider type: {provider_type}")
+                logger.warning(f"⚠️ PROJECT API KEY: No project-specific {provider_type} key found for project {project.name}")
                 return None
         except Exception as e:
-            logger.error(f"❌ LLM PROVIDER (LEGACY): Failed to create provider: {e}")
+            logger.error(f"❌ PROJECT API KEY: Error getting project-specific {provider_type} key for project {project.name}: {e}")
+            import traceback
+            logger.error(f"❌ PROJECT API KEY: Traceback: {traceback.format_exc()}")
             return None
+
+    def get_llm_provider_sync(self, agent_config: Dict[str, Any], project: Optional[IntelliDocProject] = None) -> Optional[object]:
+        """
+        Synchronous version for backward compatibility.
+        DEPRECATED: This method should not be used. Use async get_llm_provider instead.
+        Project context is required - this method will fail if project is not provided.
+        
+        Args:
+            agent_config: Agent configuration with provider type, model, etc.
+            project: Project instance for project-specific API keys (REQUIRED)
+            
+        Returns:
+            LLM provider instance or None if no API key available
+        """
+        if not project:
+            logger.error("❌ LLM PROVIDER (SYNC): Project context is required. This sync method is deprecated. Use async get_llm_provider with project parameter instead.")
+            return None
+        
+        logger.warning("⚠️  LLM PROVIDER: Using deprecated sync method. Consider migrating to async get_llm_provider.")
+        # Use async method via asyncio.run for sync compatibility
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If loop is already running, we can't use asyncio.run
+                logger.error("❌ LLM PROVIDER (SYNC): Cannot use sync method in async context. Use async get_llm_provider instead.")
+                return None
+        except RuntimeError:
+            pass  # No event loop, we can use asyncio.run
+        
+        return asyncio.run(self.get_llm_provider(agent_config, project))

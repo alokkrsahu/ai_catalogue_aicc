@@ -1,16 +1,16 @@
 /**
- * AutoGen Schema Generator
- * Converts visual workflow graphs to AutoGen-compatible team configurations
+ * Workflow Schema Generator
+ * Converts visual workflow graphs to workflow-compatible team configurations
  */
 
-export interface AutoGenComponent {
+export interface WorkflowComponent {
   component_type: string;
   label?: string;
   description?: string;
   [key: string]: any;
 }
 
-export interface AutoGenModelClient extends AutoGenComponent {
+export interface WorkflowModelClient extends WorkflowComponent {
   component_type: "OpenAIChatCompletionClient" | "AnthropicChatCompletionClient" | "AzureOpenAIChatCompletionClient";
   model: string;
   api_key?: string;
@@ -26,7 +26,7 @@ export interface AutoGenModelClient extends AutoGenComponent {
   azure_deployment?: string;
 }
 
-export interface AutoGenTool extends AutoGenComponent {
+export interface WorkflowTool extends WorkflowComponent {
   component_type: "FunctionTool";
   name: string;
   description: string;
@@ -34,13 +34,13 @@ export interface AutoGenTool extends AutoGenComponent {
   global_imports?: string[];
 }
 
-export interface AutoGenAgent extends AutoGenComponent {
+export interface WorkflowAgent extends WorkflowComponent {
   component_type: "AssistantAgent" | "UserProxyAgent" | "MultimodalWebSurfer";
   name: string;
   description?: string;
   system_message?: string;
-  model_client: AutoGenModelClient;
-  tools?: AutoGenTool[];
+  model_client: WorkflowModelClient;
+  tools?: WorkflowTool[];
   handoffs?: string[];
   human_input_mode?: "ALWAYS" | "NEVER" | "TERMINATE";
   code_execution_config?: {
@@ -50,7 +50,7 @@ export interface AutoGenAgent extends AutoGenComponent {
   };
 }
 
-export interface AutoGenTermination extends AutoGenComponent {
+export interface WorkflowTermination extends WorkflowComponent {
   component_type: "TextMentionTermination" | "MaxMessageTermination" | "TokenUsageTermination" | "TimeoutTermination" | "StopMessageTermination" | "HandoffTermination";
   text?: string;
   max_messages?: number;
@@ -61,32 +61,32 @@ export interface AutoGenTermination extends AutoGenComponent {
   target?: string;
 }
 
-export interface AutoGenTeamConfig extends AutoGenComponent {
+export interface WorkflowTeamConfig extends WorkflowComponent {
   component_type: "SelectorGroupChat" | "RoundRobinGroupChat" | "Swarm";
-  participants: AutoGenAgent[];
-  termination_condition: AutoGenTermination;
-  model_client?: AutoGenModelClient;
+  participants: WorkflowAgent[];
+  termination_condition: WorkflowTermination;
+  model_client?: WorkflowModelClient;
   selector_prompt?: string;
   allow_repeated_speaker?: boolean;
 }
 
-export class AutoGenSchemaGenerator {
+export class WorkflowSchemaGenerator {
   
   /**
-   * Convert visual workflow graph to AutoGen team configuration
+   * Convert visual workflow graph to workflow team configuration
    */
-  static generateTeamConfig(graph: { nodes: any[], edges: any[] }, projectCapabilities: any): AutoGenTeamConfig {
-    console.log('🔧 AUTOGEN SCHEMA: Generating team config from graph', { 
+  static generateTeamConfig(graph: { nodes: any[], edges: any[] }, projectCapabilities: any): WorkflowTeamConfig {
+    console.log('🔧 WORKFLOW SCHEMA: Generating team config from graph', { 
       nodeCount: graph.nodes.length, 
       edgeCount: graph.edges.length 
     });
 
-    // Filter out StartNode and EndNode - they're workflow markers, not AutoGen agents
+    // Filter out StartNode and EndNode - they're workflow markers, not workflow agents
     const agentNodes = graph.nodes.filter(node => 
       !['StartNode', 'EndNode'].includes(node.type)
     );
 
-    // Convert nodes to AutoGen agents
+    // Convert nodes to workflow agents
     const participants = agentNodes.map(node => 
       this.convertNodeToAgent(node, projectCapabilities)
     );
@@ -98,7 +98,7 @@ export class AutoGenSchemaGenerator {
     const termination = this.generateTerminationCondition(graph, projectCapabilities);
 
     // Create base team config
-    const teamConfig: AutoGenTeamConfig = {
+    const teamConfig: WorkflowTeamConfig = {
       component_type: teamType,
       participants,
       termination_condition: termination
@@ -116,24 +116,24 @@ export class AutoGenSchemaGenerator {
       this.addSwarmHandoffs(teamConfig, graph.edges);
     }
 
-    console.log('✅ AUTOGEN SCHEMA: Generated team config', teamConfig);
+    console.log('✅ WORKFLOW SCHEMA: Generated team config', teamConfig);
     return teamConfig;
   }
 
   /**
-   * Convert workflow node to AutoGen agent
+   * Convert workflow node to workflow agent
    */
-  static convertNodeToAgent(node: any, projectCapabilities: any): AutoGenAgent {
+  static convertNodeToAgent(node: any, projectCapabilities: any): WorkflowAgent {
     const nodeData = node.data || {};
     
-    console.log(`🤖 AUTOGEN SCHEMA: Converting ${node.type} to AutoGen agent`, nodeData);
+    console.log(`🤖 WORKFLOW SCHEMA: Converting ${node.type} to workflow agent`, nodeData);
 
     // Create model client from node configuration
     const modelClient = this.createModelClient(nodeData);
 
     // Base agent configuration
-    const agent: AutoGenAgent = {
-      component_type: this.mapNodeTypeToAutoGenType(node.type),
+    const agent: WorkflowAgent = {
+      component_type: this.mapNodeTypeToWorkflowType(node.type),
       name: nodeData.name || `${node.type}_${node.id.slice(-8)}`,
       description: nodeData.description || this.getDefaultDescription(node.type),
       model_client: modelClient
@@ -153,7 +153,7 @@ export class AutoGenSchemaGenerator {
       case 'UserProxyAgent':
         agent.human_input_mode = nodeData.require_human_input ? "ALWAYS" : "NEVER";
         agent.code_execution_config = {
-          work_dir: `/tmp/autogen_${node.id.slice(-8)}`,
+          work_dir: `/tmp/workflow_${node.id.slice(-8)}`,
           use_docker: projectCapabilities.sandbox_execution || true,
           timeout: nodeData.timeout || 60
         };
@@ -169,9 +169,9 @@ export class AutoGenSchemaGenerator {
   }
 
   /**
-   * Map workflow node types to AutoGen agent types
+   * Map workflow node types to workflow agent types
    */
-  static mapNodeTypeToAutoGenType(nodeType: string): string {
+  static mapNodeTypeToWorkflowType(nodeType: string): string {
     const mapping: Record<string, string> = {
       'UserProxyAgent': 'UserProxyAgent',
       'AssistantAgent': 'AssistantAgent',
@@ -180,7 +180,7 @@ export class AutoGenSchemaGenerator {
       'CategoryClassifierAgent': 'AssistantAgent',
       'ContentReconstructorAgent': 'AssistantAgent',
       'GroupChatManager': 'AssistantAgent',
-      'FunctionTool': 'AssistantAgent'
+      'MCPServer': 'AssistantAgent'
     };
     
     return mapping[nodeType] || 'AssistantAgent';
@@ -189,7 +189,7 @@ export class AutoGenSchemaGenerator {
   /**
    * Create model client from node data
    */
-  static createModelClient(nodeData: any): AutoGenModelClient {
+  static createModelClient(nodeData: any): WorkflowModelClient {
     const provider = nodeData.llm_provider || 'openai';
     const model = nodeData.llm_model || 'gpt-4';
 
@@ -240,13 +240,19 @@ export class AutoGenSchemaGenerator {
 
   /**
    * Generate system message based on agent type
+   * 
+   * Priority:
+   * 1. User-provided system_message (custom or generated)
+   * 2. Template-based generation based on agent type
    */
   static generateSystemMessage(nodeType: string, nodeData: any, projectCapabilities: any): string {
-    // If user provided custom system message, use it
+    // If user provided custom system message (including generated ones), use it
     if (nodeData.system_message && nodeData.system_message.trim()) {
       return nodeData.system_message;
     }
 
+    // Note: If description is provided but no system_message, the UI should have generated it
+    // If we reach here, fall back to template-based generation
     // Generate based on agent type
     switch (nodeType) {
       case 'DocumentAnalyzerAgent':
@@ -320,8 +326,8 @@ Provide clear, accurate, and helpful responses. When analyzing documents, cite s
   /**
    * Generate tools for agents based on type and capabilities
    */
-  static generateTools(nodeType: string, nodeData: any, projectCapabilities: any): AutoGenTool[] {
-    const tools: AutoGenTool[] = [];
+  static generateTools(nodeType: string, nodeData: any, projectCapabilities: any): WorkflowTool[] {
+    const tools: WorkflowTool[] = [];
 
     // Add document-aware tools if enabled
     if (nodeData.doc_aware && projectCapabilities.supports_rag_agents) {
@@ -405,7 +411,7 @@ Provide clear, accurate, and helpful responses. When analyzing documents, cite s
   /**
    * Generate termination condition
    */
-  static generateTerminationCondition(graph: any, projectCapabilities: any): AutoGenTermination {
+  static generateTerminationCondition(graph: any, projectCapabilities: any): WorkflowTermination {
     // For now, use a simple combined termination
     // In the future, this could be made configurable in the UI
     
@@ -419,7 +425,7 @@ Provide clear, accurate, and helpful responses. When analyzing documents, cite s
   /**
    * Generate selector prompt for SelectorGroupChat
    */
-  static generateSelectorPrompt(participants: AutoGenAgent[]): string {
+  static generateSelectorPrompt(participants: WorkflowAgent[]): string {
     const roleDescriptions = participants.map(agent => 
       `${agent.name}: ${agent.description || 'AI assistant'}`
     ).join('\n');
@@ -443,7 +449,7 @@ Read the above conversation. Then select the next role from {participants} to pl
   /**
    * Add handoff configuration for Swarm teams
    */
-  static addSwarmHandoffs(teamConfig: AutoGenTeamConfig, edges: any[]): void {
+  static addSwarmHandoffs(teamConfig: WorkflowTeamConfig, edges: any[]): void {
     // Add handoffs based on edge connections
     teamConfig.participants.forEach(agent => {
       const handoffs: string[] = [];
@@ -464,7 +470,7 @@ Read the above conversation. Then select the next role from {participants} to pl
   /**
    * Create default model client for team-level operations
    */
-  static createDefaultModelClient(): AutoGenModelClient {
+  static createDefaultModelClient(): WorkflowModelClient {
     return {
       component_type: "OpenAIChatCompletionClient",
       model: "gpt-4o-mini",
@@ -509,3 +515,4 @@ ${nodeData.doc_aware ? 'You can access document content to provide context-aware
 Keep the conversation focused and productive while allowing each agent to contribute their specialized knowledge.`;
   }
 }
+

@@ -24,7 +24,7 @@
       description: 'Standard AutoGen agent-to-agent conversation flow',
       color: '#002147',
       icon: 'fa-arrow-right',
-      autogen_pattern: 'agent_to_agent',
+      workflow_pattern: 'agent_to_agent',
       configurable: ['label', 'description', 'timeout', 'request_reply'],
       help_text: 'Creates a direct conversation between two agents with optional reply request'
     },
@@ -34,7 +34,7 @@
       description: 'Agent self-review and iteration cycles',
       color: '#ef4444',
       icon: 'fa-redo',
-      autogen_pattern: 'reflection_loop',
+      workflow_pattern: 'reflection_loop',
       configurable: ['label', 'description', 'max_iterations', 'reflection_prompt', 'timeout'],
       help_text: 'Enables agents to review and improve their responses through iteration'
     }

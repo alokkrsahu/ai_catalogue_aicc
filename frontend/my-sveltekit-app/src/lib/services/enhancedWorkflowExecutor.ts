@@ -1,9 +1,9 @@
 /**
- * Enhanced AutoGen Workflow Execution Service
+ * Enhanced Workflow Execution Service
  * Integrates with existing AICC-IntelliDoc architecture
  */
 
-import { AutoGenSchemaGenerator, type AutoGenTeamConfig } from './autoGenSchemaGenerator';
+import { WorkflowSchemaGenerator, type WorkflowTeamConfig } from './workflowSchemaGenerator';
 import { cleanUniversalApi } from './cleanUniversalApi';
 import { toasts } from '$lib/stores/toast';
 
@@ -18,15 +18,15 @@ export interface WorkflowExecutionRequest {
 export interface WorkflowExecutionResult {
   success: boolean;
   runId?: string;
-  teamConfig?: AutoGenTeamConfig;
+  teamConfig?: WorkflowTeamConfig;
   error?: string;
-  executionType: 'autogen' | 'simulation';
+  executionType: 'workflow' | 'simulation';
 }
 
 export class EnhancedWorkflowExecutor {
   
   /**
-   * Execute workflow with AutoGen integration
+   * Execute workflow with workflow integration
    */
   static async executeWorkflow(request: WorkflowExecutionRequest): Promise<WorkflowExecutionResult> {
     console.log('🚀 ENHANCED EXECUTOR: Starting workflow execution', {
@@ -36,13 +36,13 @@ export class EnhancedWorkflowExecutor {
     });
 
     try {
-      // Step 1: Generate AutoGen team configuration
-      const teamConfig = AutoGenSchemaGenerator.generateTeamConfig(
+      // Step 1: Generate workflow team configuration
+      const teamConfig = WorkflowSchemaGenerator.generateTeamConfig(
         request.graph, 
         request.projectCapabilities
       );
 
-      console.log('✅ ENHANCED EXECUTOR: Generated AutoGen team config', teamConfig);
+      console.log('✅ ENHANCED EXECUTOR: Generated workflow team config', teamConfig);
 
       // Step 2: Validate the team configuration
       const validation = this.validateTeamConfig(teamConfig);
@@ -57,7 +57,7 @@ export class EnhancedWorkflowExecutor {
         {
           team_config: teamConfig,
           initial_message: request.initialMessage,
-          execution_type: 'autogen',
+          execution_type: 'workflow',
           project_capabilities: request.projectCapabilities
         }
       );
@@ -68,7 +68,7 @@ export class EnhancedWorkflowExecutor {
         success: true,
         runId: executionResult.run_id,
         teamConfig,
-        executionType: 'autogen'
+        executionType: 'workflow'
       };
 
     } catch (error) {
@@ -80,9 +80,9 @@ export class EnhancedWorkflowExecutor {
   }
 
   /**
-   * Validate AutoGen team configuration
+   * Validate workflow team configuration
    */
-  static validateTeamConfig(teamConfig: AutoGenTeamConfig): { valid: boolean, errors: string[] } {
+  static validateTeamConfig(teamConfig: WorkflowTeamConfig): { valid: boolean, errors: string[] } {
     const errors: string[] = [];
 
     // Check required fields
@@ -133,7 +133,7 @@ export class EnhancedWorkflowExecutor {
   }
 
   /**
-   * Fallback to simulation when AutoGen execution fails
+   * Fallback to simulation when workflow execution fails
    */
   static async fallbackToSimulation(request: WorkflowExecutionRequest, originalError: any): Promise<WorkflowExecutionResult> {
     console.log('🎭 ENHANCED EXECUTOR: Falling back to simulation', originalError);
@@ -150,13 +150,13 @@ export class EnhancedWorkflowExecutor {
         }
       );
 
-      toasts.warning('AutoGen execution failed - using enhanced simulation mode');
+      toasts.warning('Workflow execution failed - using enhanced simulation mode');
 
       return {
         success: true,
         runId: simulationResult.run_id,
         executionType: 'simulation',
-        error: `AutoGen fallback: ${originalError.message}`
+        error: `Workflow fallback: ${originalError.message}`
       };
 
     } catch (fallbackError) {
@@ -165,7 +165,7 @@ export class EnhancedWorkflowExecutor {
       return {
         success: false,
         executionType: 'simulation',
-        error: `Both AutoGen and simulation failed: ${originalError.message} | ${fallbackError.message}`
+        error: `Both workflow and simulation failed: ${originalError.message} | ${fallbackError.message}`
       };
     }
   }
@@ -247,7 +247,7 @@ export class EnhancedWorkflowExecutor {
    * Preview team configuration without execution
    */
   static generateTeamConfigPreview(graph: { nodes: any[], edges: any[] }, projectCapabilities: any): {
-    teamConfig: AutoGenTeamConfig;
+    teamConfig: WorkflowTeamConfig;
     validation: { valid: boolean, errors: string[] };
     executionEstimate: {
       agentCount: number;
@@ -257,7 +257,7 @@ export class EnhancedWorkflowExecutor {
     };
   } {
     // Generate team config
-    const teamConfig = AutoGenSchemaGenerator.generateTeamConfig(graph, projectCapabilities);
+    const teamConfig = WorkflowSchemaGenerator.generateTeamConfig(graph, projectCapabilities);
     
     // Validate
     const validation = this.validateTeamConfig(teamConfig);
@@ -302,7 +302,7 @@ export class EnhancedWorkflowExecutor {
   /**
    * Get execution requirements
    */
-  static getExecutionRequirements(teamConfig: AutoGenTeamConfig, projectCapabilities: any): string[] {
+  static getExecutionRequirements(teamConfig: WorkflowTeamConfig, projectCapabilities: any): string[] {
     const requirements: string[] = [];
 
     // Check LLM providers
@@ -345,7 +345,7 @@ export class EnhancedWorkflowExecutor {
   /**
    * Export team configuration for external use
    */
-  static exportTeamConfig(teamConfig: AutoGenTeamConfig, format: 'json' | 'yaml' = 'json'): string {
+  static exportTeamConfig(teamConfig: WorkflowTeamConfig, format: 'json' | 'yaml' = 'json'): string {
     if (format === 'json') {
       return JSON.stringify(teamConfig, null, 2);
     } else {

@@ -1,5 +1,5 @@
 """
-LLM Configuration URL Routing - Phase 3 AutoGen Integration
+LLM Configuration URL Routing - Phase 3 Workflow Integration
 
 URL patterns for multi-provider LLM configuration API endpoints.
 Supports OpenAI, Anthropic Claude, and Google Gemini providers.

@@ -149,7 +149,7 @@
       agentCapabilities = project.processing_capabilities || {
         supports_agent_orchestration: true,
         max_agents_per_workflow: 10,
-        supported_agent_types: ['UserProxyAgent', 'AssistantAgent', 'GroupChatManager', 'DelegateAgent', 'FunctionTool']
+        supported_agent_types: ['UserProxyAgent', 'AssistantAgent', 'GroupChatManager', 'DelegateAgent', 'MCPServer']
       };
       
       if (agentCapabilities.supported_agent_types && !agentCapabilities.supported_agent_types.includes('DelegateAgent')) {
@@ -353,7 +353,7 @@
       agentCapabilities = project.processing_capabilities || {
         supports_agent_orchestration: true,
         max_agents_per_workflow: 10,
-        supported_agent_types: ['UserProxyAgent', 'AssistantAgent', 'GroupChatManager', 'DelegateAgent', 'FunctionTool']
+        supported_agent_types: ['UserProxyAgent', 'AssistantAgent', 'GroupChatManager', 'DelegateAgent', 'MCPServer']
       };
       
       // Ensure DelegateAgent is always included for enhanced Chat Manager functionality

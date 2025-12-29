@@ -29,7 +29,7 @@ class AICCIntelliDocAgentOrchestrationService:
             'AssistantAgent',
             'GroupChatManager',
             'EndNode',
-            'FunctionTool',
+            'MCPServer',
             'DocumentAnalyzerAgent',  # AICC-IntelliDoc specific
             'HierarchicalProcessorAgent',  # AICC-IntelliDoc specific
             'CategoryClassifierAgent',  # AICC-IntelliDoc specific

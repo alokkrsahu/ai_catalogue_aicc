@@ -138,8 +138,8 @@ Navigate through different pages to access various features and capabilities.'''
                 # Agent Orchestration Capabilities
                 'supports_agent_orchestration': True,
                 'max_agents_per_workflow': 10,
-                'supported_agent_types': ['StartNode', 'UserProxyAgent', 'AssistantAgent', 'GroupChatManager', 'FunctionTool', 'EndNode'],
-                'supports_function_tools': True,
+                'supported_agent_types': ['StartNode', 'UserProxyAgent', 'AssistantAgent', 'GroupChatManager', 'DelegateAgent', 'MCPServer', 'EndNode'],
+                'supports_mcp_servers': True,
                 'supports_real_time_streaming': True,
                 'sandbox_execution': True,
                 'workflow_validation': True,

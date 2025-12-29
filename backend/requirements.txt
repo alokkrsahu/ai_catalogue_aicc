@@ -47,6 +47,12 @@ PyMuPDF>=1.23.0
 # OpenAI API for Content Summarization
 openai>=1.0.0
 
+# MCP Server Dependencies
+google-api-python-client>=2.100.0
+google-auth-oauthlib>=1.1.0
+google-auth-httplib2>=0.1.1
+msal>=1.24.0
+
 # Performance monitoring and caching
 psutil>=5.9.0
 packaging>=21.0

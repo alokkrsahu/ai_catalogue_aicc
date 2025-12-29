@@ -256,14 +256,14 @@
       functionality: 'Terminates workflow execution, collects and processes final results, generates output summaries, and handles cleanup operations.',
       useCases: ['Workflow completion', 'Result collection', 'Output processing', 'Final summaries']
     },
-    'FunctionTool': {
-      name: 'Function Tool',
-      description: 'Specialized agent that provides custom function capabilities and tool integration',
-      icon: 'fa-wrench',
-      color: '#6b7280',
-      category: 'Tool',
-      functionality: 'Provides custom function execution, tool integration, and specialized capabilities for workflow enhancement.',
-      useCases: ['Custom functions', 'Tool integration', 'API calls', 'Specialized operations']
+    'MCPServer': {
+      name: 'MCP Server',
+      description: 'Model Context Protocol server integration for external services like Google Drive and SharePoint',
+      icon: 'fa-server',
+      color: '#8b5cf6',
+      category: 'Integration',
+      functionality: 'Connects to MCP servers to access external services, execute tools, and retrieve resources. Supports Google Drive, SharePoint, and other MCP-compatible services.',
+      useCases: ['Google Drive integration', 'SharePoint integration', 'External service access', 'Document retrieval', 'File operations']
     }
   };
   
@@ -942,9 +942,9 @@
           description: 'Manages group conversation flow with delegates',
           system_message: 'You are a Group Chat Manager responsible for coordinating multiple specialized agents and synthesizing their contributions into comprehensive solutions.',
           speaker_selection: 'auto',
-          max_rounds: 10,
+          max_rounds: 10, // Default for Round Robin, Intelligent delegation will override to 1
           delegate_connections: [],
-          termination_strategy: 'all_delegates_complete'
+          termination_strategy: 'all_delegates_complete' // Default termination strategy
         };
       case 'DelegateAgent':
         return {
@@ -962,11 +962,13 @@
           output_format: 'summary',
           collect_results: true
         };
-      case 'FunctionTool':
+      case 'MCPServer':
         return {
-          name: `Function Tool ${count}`,
-          description: 'Custom function capabilities and tool integration',
-          function_name: 'custom_function',
+          name: `MCP Server ${count}`,
+          description: 'MCP server integration for external services',
+          server_type: 'google_drive',
+          server_config: {},
+          selected_tools: [],
           parameters: {}
         };
       default:
@@ -1236,10 +1238,14 @@
     }
     
     // Determine connection type based on agent types
-    // GroupChatManager-DelegateAgent connections always use 'sequential' type
     let connectionType = 'sequential';
-    // Note: GroupChatManager-DelegateAgent connections are always sequential
-    // The 'delegate' and 'delegate_return' types are no longer used
+    
+    // Special handling for GroupChatManager-DelegateAgent connections
+    // These should use 'delegate' type to maintain proper connection visualization
+    if ((source.type === 'GroupChatManager' && target.type === 'DelegateAgent') ||
+        (source.type === 'DelegateAgent' && target.type === 'GroupChatManager')) {
+      connectionType = 'delegate';
+    }
     
     const newConnection = {
       id: `${source.id}-${target.id}`,
@@ -1259,6 +1265,16 @@
     console.log('✅ CANVAS: Connection created:', newConnection);
     if (toasts && toasts.success) {
       toasts.success(`Connected ${source.data.name} to ${target.data.name}`);
+    }
+    
+    // Trigger Group Chat Manager prompt regeneration if delegate connection was created
+    if (connectionType === 'delegate' && source.type === 'GroupChatManager') {
+      console.log('🔧 GROUP CHAT MANAGER: Delegate connection created, will trigger prompt regeneration');
+      // The reactive statement in NodePropertiesPanel will handle this
+      // Force update selectedNode if it's the Group Chat Manager
+      if (selectedNode && selectedNode.id === source.id) {
+        selectedNode = { ...selectedNode }; // Trigger reactivity
+      }
     }
     
     saveWorkflowToDatabase(false); // Silent auto-save
@@ -1459,12 +1475,32 @@
   
   function deleteConnection(connection: any) {
     if (confirm('Delete this connection?')) {
+      // Check if this is a delegate connection to a Group Chat Manager
+      const sourceNode = nodes.find(n => n.id === connection.source);
+      const isDelegateConnection = connection.type === 'delegate' && 
+                                  sourceNode && 
+                                  sourceNode.type === 'GroupChatManager';
+      
+      // Remove the connection
       edges = edges.filter(e => e.id !== connection.id);
+      
       if (selectedEdge?.id === connection.id) {
         selectedEdge = null;
         showConnectionProperties = false;
       }
-      console.log('🗑️ CANVAS: Connection deleted');
+      
+      console.log('✅ CANVAS: Connection deleted:', connection);
+      
+      // Trigger Group Chat Manager prompt regeneration if delegate connection was deleted
+      if (isDelegateConnection) {
+        console.log('🔧 GROUP CHAT MANAGER: Delegate connection deleted, will trigger prompt regeneration');
+        // The reactive statement in NodePropertiesPanel will handle this
+        // Force update selectedNode if it's the Group Chat Manager
+        if (selectedNode && selectedNode.id === sourceNode.id) {
+          selectedNode = { ...selectedNode }; // Trigger reactivity
+        }
+      }
+      
       saveWorkflowToDatabase(false); // Silent auto-save
     }
   }
@@ -1533,7 +1569,7 @@
       case 'GroupChatManager': return 'fa-users';
       case 'DelegateAgent': return 'fa-handshake';
       case 'EndNode': return 'fa-stop';
-      case 'FunctionTool': return 'fa-wrench';
+      case 'MCPServer': return 'fa-server';
       default: return 'fa-cog';
     }
   }
@@ -1551,7 +1587,7 @@
       case 'GroupChatManager': return '#8b5cf6';
       case 'DelegateAgent': return '#f59e0b';
       case 'EndNode': return '#ef4444';
-      case 'FunctionTool': return '#6b7280';
+      case 'MCPServer': return '#8b5cf6';
       default: return '#6b7280';
     }
   }
@@ -1564,7 +1600,7 @@
       case 'DelegateAgent': return 'Delegate Agent';
       case 'StartNode': return 'Start Node';
       case 'EndNode': return 'End Node';
-      case 'FunctionTool': return 'Function Tool';
+      case 'MCPServer': return 'MCP Server';
       default: return agentType;
     }
   }
@@ -1577,7 +1613,7 @@
       case 'DelegateAgent': return 'Specialized delegate';
       case 'StartNode': return 'Workflow entry point';
       case 'EndNode': return 'Workflow termination';
-      case 'FunctionTool': return 'Custom function capabilities';
+      case 'MCPServer': return 'External service integration';
       default: return 'Custom agent type';
     }
   }
@@ -1631,7 +1667,7 @@
       
       <div class="p-4 space-y-3 flex-1 overflow-y-auto">
         <!-- All Agent Types (ensuring DelegateAgent is always included) -->
-        {#each ['StartNode', 'UserProxyAgent', 'AssistantAgent', 'GroupChatManager', 'DelegateAgent', 'FunctionTool', 'EndNode'].filter(type => agentTypes[type]) as agentType}
+        {#each ['StartNode', 'UserProxyAgent', 'AssistantAgent', 'GroupChatManager', 'DelegateAgent', 'MCPServer', 'EndNode'].filter(type => agentTypes[type]) as agentType}
           <div
             class="agent-component p-3 border border-gray-200 rounded-lg bg-white hover:border-oxford-blue hover:shadow-sm transition-all cursor-move select-none"
             draggable="true"

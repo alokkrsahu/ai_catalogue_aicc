@@ -13,7 +13,7 @@ class WorkflowValidator:
         self.template_type = 'aicc-intellidoc-v2'
         self.supported_agent_types = [
             'StartNode', 'UserProxyAgent', 'AssistantAgent', 
-            'GroupChatManager', 'EndNode', 'FunctionTool'
+            'GroupChatManager', 'EndNode', 'MCPServer'
         ]
         self.required_connection_types = ['sequential', 'conditional', 'parallel']
         
@@ -194,9 +194,11 @@ class WorkflowValidator:
             if not node_data.get('speaker_selection'):
                 warnings.append(f"Group Chat Manager {node_short_id} should specify speaker selection method")
         
-        elif node_type == 'FunctionTool':
-            if not node_data.get('function_name'):
-                errors.append(f"Function Tool {node_short_id} must specify a function name")
+        elif node_type == 'MCPServer':
+            if not node_data.get('server_type'):
+                errors.append(f"MCP Server {node_short_id} must specify a server type")
+            if node_data.get('server_type') and node_data.get('server_type') not in ['google_drive', 'sharepoint']:
+                errors.append(f"MCP Server {node_short_id} has invalid server type: {node_data.get('server_type')}")
         
         # Check for required name field
         if not node_data.get('name', '').strip():

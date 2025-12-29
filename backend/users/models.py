@@ -635,6 +635,108 @@ class ProjectAPIKey(models.Model):
 
 
 # ============================================================================
+# MCP SERVER MODELS
+# ============================================================================
+
+class MCPServerType(models.TextChoices):
+    """Supported MCP server types"""
+    GOOGLE_DRIVE = 'google_drive', 'Google Drive'
+    SHAREPOINT = 'sharepoint', 'SharePoint'
+
+
+class MCPServerCredential(models.Model):
+    """Project-specific MCP server credential storage with encryption"""
+    # Core identification
+    project = models.ForeignKey(IntelliDocProject, on_delete=models.CASCADE, related_name='mcp_server_credentials')
+    server_type = models.CharField(
+        max_length=20,
+        choices=MCPServerType.choices,
+        help_text="MCP server type"
+    )
+    
+    # Encrypted credentials storage (JSON format)
+    encrypted_credentials = models.TextField(
+        help_text="Encrypted credentials JSON using project-specific encryption"
+    )
+    
+    # Server configuration (unencrypted, for non-sensitive settings)
+    server_config = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Server configuration (site URLs, folder paths, etc.)"
+    )
+    
+    # Credential metadata
+    credential_name = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Optional descriptive name for the credential (e.g., 'Production Credentials')"
+    )
+    
+    # Status and validation
+    is_active = models.BooleanField(default=True, help_text="Whether this credential is active and should be used")
+    is_validated = models.BooleanField(default=False, help_text="Whether this credential has been validated with the server")
+    validation_error = models.TextField(blank=True, help_text="Last validation error message, if any")
+    last_validated_at = models.DateTimeField(null=True, blank=True, help_text="When the credential was last validated")
+    
+    # Usage tracking
+    usage_count = models.IntegerField(default=0, help_text="Number of times this credential has been used")
+    last_used_at = models.DateTimeField(null=True, blank=True, help_text="When the credential was last used")
+    
+    # Metadata
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE, help_text="User who added this credential")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-updated_at']
+        unique_together = ['project', 'server_type']  # One credential per server type per project
+        indexes = [
+            models.Index(fields=['project', 'server_type', 'is_active']),
+            models.Index(fields=['project', 'is_active']),
+        ]
+    
+    def __str__(self):
+        credential_name = self.credential_name or f"{self.get_server_type_display()} Credential"
+        return f"{self.project.name} - {credential_name} ({self.server_type})"
+    
+    @property
+    def status_display(self):
+        """Get human-readable status"""
+        if not self.is_active:
+            return "Inactive"
+        elif not self.is_validated:
+            return "Not Validated"
+        elif self.validation_error:
+            return "Validation Failed"
+        else:
+            return "Active"
+    
+    def get_server_display_info(self):
+        """Get server display information"""
+        server_info = {
+            'google_drive': {
+                'name': 'Google Drive',
+                'description': 'Access and manage Google Drive files and folders',
+                'icon': 'fa-google-drive',
+                'color': 'blue'
+            },
+            'sharepoint': {
+                'name': 'SharePoint',
+                'description': 'Access and manage SharePoint documents and sites',
+                'icon': 'fa-microsoft',
+                'color': 'orange'
+            }
+        }
+        return server_info.get(self.server_type, {
+            'name': self.get_server_type_display(),
+            'description': 'MCP server',
+            'icon': 'fa-server',
+            'color': 'oxford-blue'
+        })
+
+
+# ============================================================================
 # LLM EVALUATION MODELS
 # ============================================================================
 
@@ -849,7 +951,7 @@ class AgentWorkflowStatus(models.TextChoices):
 
 
 class AgentWorkflow(models.Model):
-    """Template-independent agent workflow storage with AutoGen integration"""
+    """Template-independent agent workflow storage with workflow orchestration"""
     # Core identification
     project = models.ForeignKey(IntelliDocProject, on_delete=models.CASCADE, related_name='agent_workflows')
     workflow_id = models.UUIDField(default=uuid.uuid4, unique=True)

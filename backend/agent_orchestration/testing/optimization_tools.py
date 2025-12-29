@@ -1,8 +1,8 @@
 """
-AutoGen Production Optimization & Monitoring Tools
+Workflow Production Optimization & Monitoring Tools
 
 Phase 5: Production optimization, performance monitoring, and operational excellence
-tools for the AutoGen integration.
+tools for the workflow integration.
 """
 
 import logging
@@ -21,7 +21,7 @@ from django.core.cache import cache
 # Project imports
 from users.models import IntelliDocProject, AgentWorkflow, SimulationRun, AgentMessage
 
-logger = logging.getLogger('autogen_optimization')
+logger = logging.getLogger('workflow_optimization')
 
 @dataclass
 class SystemHealthStatus:
@@ -35,11 +35,11 @@ class SystemHealthStatus:
     response_time_avg: float
     recommendations: List[str]
 
-class AutoGenPerformanceMonitor:
-    """Real-time performance monitoring for AutoGen workflows"""
+class WorkflowPerformanceMonitor:
+    """Real-time performance monitoring for workflows"""
     
     def __init__(self):
-        logger.info("🔍 AUTOGEN MONITOR: Performance monitor initialized")
+        logger.info("🔍 WORKFLOW MONITOR: Performance monitor initialized")
     
     def _calculate_health_status(self) -> SystemHealthStatus:
         """Calculate overall system health status"""
@@ -125,10 +125,10 @@ class AutoGenPerformanceMonitor:
             recommendations=recommendations
         )
 
-class AutoGenProductionCommand(BaseCommand):
-    """Django management command for AutoGen production operations"""
+class WorkflowProductionCommand(BaseCommand):
+    """Django management command for workflow production operations"""
     
-    help = 'AutoGen production monitoring and optimization tools'
+    help = 'Workflow production monitoring and optimization tools'
     
     def add_arguments(self, parser):
         parser.add_argument(
@@ -193,7 +193,7 @@ class AutoGenProductionCommand(BaseCommand):
             'report_period': f'Last {hours} hours',
             'generated_at': timezone.now().isoformat(),
             'system_status': 'healthy',
-            'autogen_integration_status': {
+            'workflow_integration_status': {
                 'phase_1_foundation': 'completed',
                 'phase_2_rag_integration': 'completed', 
                 'phase_3_multi_provider_llm': 'completed',
@@ -209,7 +209,7 @@ class AutoGenProductionCommand(BaseCommand):
                 'Run full integration tests before production deployment',
                 'Set up monitoring and logging for production environments',
                 'Configure proper error handling and recovery mechanisms',
-                'Install AutoGen: pip install pyautogen',
+                'Check workflow configuration and dependencies',
                 'Configure API keys for LLM providers (OpenAI, Anthropic, Google)',
                 'Set up Milvus vector database for RAG functionality'
             ]
@@ -238,7 +238,7 @@ if __name__ == '__main__':
     django.setup()
     
     # Example usage
-    monitor = AutoGenPerformanceMonitor()
+    monitor = WorkflowPerformanceMonitor()
     health = monitor._calculate_health_status()
     print(f"System Health: {health.overall_status}")
     print(f"Recommendations: {health.recommendations}")

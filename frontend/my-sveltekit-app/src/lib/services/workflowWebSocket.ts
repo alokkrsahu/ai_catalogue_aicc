@@ -1,7 +1,7 @@
 /**
- * AutoGen WebSocket Service - Real-Time Execution Communication
+ * Workflow WebSocket Service - Real-Time Execution Communication
  * 
- * PHASE 4: Handles real-time communication with AutoGen workflows including:
+ * PHASE 4: Handles real-time communication with workflow execution including:
  * - Live agent message streaming
  * - Human input request/response handling  
  * - Execution status updates
@@ -38,7 +38,7 @@ export interface ExecutionStatus {
     timestamp: string;
 }
 
-export interface AutoGenCapabilities {
+export interface WorkflowCapabilities {
     real_time_messaging: boolean;
     human_input_support: boolean;
     code_execution: boolean;
@@ -47,7 +47,7 @@ export interface AutoGenCapabilities {
     error_recovery: boolean;
 }
 
-export class AutoGenWebSocketService {
+export class WorkflowWebSocketService {
     private ws: WebSocket | null = null;
     private projectId: string = '';
     private reconnectAttempts = 0;
@@ -64,7 +64,7 @@ export class AutoGenWebSocketService {
         timestamp: new Date().toISOString()
     });
     public connectionStatus: Writable<'disconnected' | 'connecting' | 'connected' | 'error'> = writable('disconnected');
-    public capabilities: Writable<AutoGenCapabilities | null> = writable(null);
+    public capabilities: Writable<WorkflowCapabilities | null> = writable(null);
     public humanInputRequests: Writable<HumanInputRequest[]> = writable([]);
     
     // Event handlers
@@ -72,11 +72,11 @@ export class AutoGenWebSocketService {
     private humanInputCallback: ((request: HumanInputRequest) => void) | null = null;
     
     constructor() {
-        console.log('🤖 AutoGen WebSocket Service initialized');
+        console.log('🤖 Workflow WebSocket Service initialized');
     }
     
     /**
-     * Connect to AutoGen WebSocket for real-time execution
+     * Connect to Workflow WebSocket for real-time execution
      */
     async connect(projectId: string): Promise<void> {
         this.projectId = projectId;
@@ -88,14 +88,14 @@ export class AutoGenWebSocketService {
                 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                 const host = window.location.hostname;
                 const port = window.location.hostname === 'localhost' ? ':8000' : '';
-                const wsUrl = `${protocol}//${host}${port}/ws/autogen_workflow/${projectId}/`;
+                const wsUrl = `${protocol}//${host}${port}/ws/workflow/${projectId}/`;
                 
-                console.log(`🔌 AutoGen WebSocket connecting to: ${wsUrl}`);
+                console.log(`🔌 Workflow WebSocket connecting to: ${wsUrl}`);
                 
                 this.ws = new WebSocket(wsUrl);
                 
                 this.ws.onopen = () => {
-                    console.log('✅ AutoGen WebSocket connected');
+                    console.log('✅ Workflow WebSocket connected');
                     this.connectionStatus.set('connected');
                     this.reconnectAttempts = 0;
                     resolve();
@@ -106,12 +106,12 @@ export class AutoGenWebSocketService {
                         const data = JSON.parse(event.data);
                         this.handleMessage(data);
                     } catch (error) {
-                        console.error('❌ AutoGen WebSocket message parse error:', error);
+                        console.error('❌ Workflow WebSocket message parse error:', error);
                     }
                 };
                 
                 this.ws.onclose = (event) => {
-                    console.log('🔌 AutoGen WebSocket closed:', event.code, event.reason);
+                    console.log('🔌 Workflow WebSocket closed:', event.code, event.reason);
                     this.connectionStatus.set('disconnected');
                     this.ws = null;
                     
@@ -122,7 +122,7 @@ export class AutoGenWebSocketService {
                 };
                 
                 this.ws.onerror = (error) => {
-                    console.error('❌ AutoGen WebSocket error:', error);
+                    console.error('❌ Workflow WebSocket error:', error);
                     this.connectionStatus.set('error');
                     reject(error);
                 };
@@ -131,12 +131,12 @@ export class AutoGenWebSocketService {
                 setTimeout(() => {
                     if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
                         this.ws.close();
-                        reject(new Error('AutoGen WebSocket connection timeout'));
+                        reject(new Error('Workflow WebSocket connection timeout'));
                     }
                 }, 10000);
                 
             } catch (error) {
-                console.error('❌ AutoGen WebSocket connection error:', error);
+                console.error('❌ Workflow WebSocket connection error:', error);
                 this.connectionStatus.set('error');
                 reject(error);
             }
@@ -144,7 +144,7 @@ export class AutoGenWebSocketService {
     }
     
     /**
-     * Disconnect from AutoGen WebSocket
+     * Disconnect from Workflow WebSocket
      */
     disconnect(): void {
         if (this.reconnectTimer) {
@@ -158,17 +158,17 @@ export class AutoGenWebSocketService {
         }
         
         this.connectionStatus.set('disconnected');
-        console.log('🔌 AutoGen WebSocket disconnected');
+        console.log('🔌 Workflow WebSocket disconnected');
     }
     
     /**
      * Handle incoming WebSocket messages
      */
     private handleMessage(data: any): void {
-        console.log('📨 AutoGen WebSocket message:', data.type);
+        console.log('📨 Workflow WebSocket message:', data.type);
         
         switch (data.type) {
-            case 'autogen_connected':
+            case 'workflow_connected':
                 this.handleConnection(data);
                 break;
                 
@@ -197,7 +197,7 @@ export class AutoGenWebSocketService {
                 break;
                 
             default:
-                console.warn('⚠️ AutoGen WebSocket unknown message type:', data.type);
+                console.warn('⚠️ Workflow WebSocket unknown message type:', data.type);
         }
         
         // Call custom handlers
@@ -211,13 +211,13 @@ export class AutoGenWebSocketService {
      * Handle connection establishment
      */
     private handleConnection(data: any): void {
-        console.log('🎉 AutoGen connection established with capabilities:', data.capabilities);
+        console.log('🎉 Workflow connection established with capabilities:', data.capabilities);
         this.capabilities.set(data.capabilities);
         
         this.executionStatus.update(status => ({
             ...status,
             status: 'idle',
-            message: 'Connected to real-time AutoGen execution',
+            message: 'Connected to real-time workflow execution',
             timestamp: data.timestamp
         }));
     }
@@ -381,22 +381,23 @@ export class AutoGenWebSocketService {
      */
     private scheduleReconnect(): void {
         this.reconnectAttempts++;
-        console.log(`🔄 Scheduling AutoGen WebSocket reconnect attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts}`);
+        console.log(`🔄 Scheduling Workflow WebSocket reconnect attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts}`);
         
         this.reconnectTimer = setTimeout(async () => {
             try {
                 await this.connect(this.projectId);
             } catch (error) {
-                console.error('❌ AutoGen WebSocket reconnect failed:', error);
+                console.error('❌ Workflow WebSocket reconnect failed:', error);
             }
         }, this.reconnectInterval * this.reconnectAttempts);
     }
 }
 
 // Singleton instance for global use
-export const autoGenWebSocket = new AutoGenWebSocketService();
+export const workflowWebSocket = new WorkflowWebSocketService();
 
 // Helper function to create a new instance if needed
-export function createAutoGenWebSocket(): AutoGenWebSocketService {
-    return new AutoGenWebSocketService();
+export function createWorkflowWebSocket(): WorkflowWebSocketService {
+    return new WorkflowWebSocketService();
 }
+

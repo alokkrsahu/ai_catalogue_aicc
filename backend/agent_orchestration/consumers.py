@@ -2,7 +2,7 @@
 Agent Orchestration WebSocket Consumer - Template Independent Real-time Updates
 
 Provides real-time streaming of agent messages during workflow execution
-PHASE 4: Enhanced with real AutoGen execution support, human input handling,
+PHASE 4: Enhanced with real workflow execution support, human input handling,
 and execution status tracking.
 """
 
@@ -16,7 +16,7 @@ logger = logging.getLogger('agent_orchestration.websocket')
 
 class AgentOrchestrationConsumer(AsyncWebsocketConsumer):
     """
-    PHASE 4: Enhanced WebSocket consumer for real-time AutoGen execution
+    PHASE 4: Enhanced WebSocket consumer for real-time workflow execution
     
     Features:
     - Real-time agent message streaming
@@ -56,10 +56,10 @@ class AgentOrchestrationConsumer(AsyncWebsocketConsumer):
         
         # Send connection confirmation with Phase 4 capabilities
         await self.send(text_data=json.dumps({
-            'type': 'autogen_connected',
+            'type': 'workflow_connected',
             'project_id': self.project_id,
             'timestamp': 'now',
-            'message': 'Connected to real-time AutoGen execution',
+            'message': 'Connected to real-time workflow execution',
             'capabilities': {
                 'real_time_messaging': True,
                 'human_input_support': True,
@@ -151,15 +151,15 @@ class AgentOrchestrationConsumer(AsyncWebsocketConsumer):
         user_input = data.get('input', '')
         
         if request_id and user_input:
-            # TODO: Forward human input to the running AutoGen workflow
-            # This would integrate with the AutoGen executor's human input handler
+            # TODO: Forward human input to the running workflow
+            # This would integrate with the workflow executor's human input handler
             logger.info(f"👤 WEBSOCKET: Human input received for request {request_id}: {user_input[:50]}...")
             
             # Acknowledge receipt
             await self.send(text_data=json.dumps({
                 'type': 'human_input_acknowledged',
                 'request_id': request_id,
-                'message': 'Input received and forwarded to AutoGen workflow',
+                'message': 'Input received and forwarded to workflow',
                 'timestamp': 'now'
             }))
     
@@ -171,7 +171,7 @@ class AgentOrchestrationConsumer(AsyncWebsocketConsumer):
         logger.info(f"🎮 WEBSOCKET: Execution control received: {command} for run {run_id}")
         
         # TODO: Implement execution control (pause, resume, stop)
-        # This would integrate with the AutoGen executor
+        # This would integrate with the workflow executor
         
         # Acknowledge command
         await self.send(text_data=json.dumps({
