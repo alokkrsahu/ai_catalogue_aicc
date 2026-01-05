@@ -13,6 +13,8 @@ from django.core.files.base import ContentFile
 from users.models import IntelliDocProject, ProjectDocument, AgentWorkflow, SimulationRun, AgentMessage
 from templates.discovery import TemplateDiscoverySystem
 from .serializers import IntelliDocProjectSerializer, ProjectDocumentSerializer
+from .template_cloning_utils import clone_template_configuration
+from .template_schema_validator import validate_template_config_schema
 from agent_orchestration.serializers import (
     AgentWorkflowSerializer, SimulationRunSerializer, AgentMessageSerializer,
     WorkflowValidationSerializer, WorkflowExecutionSerializer
@@ -132,6 +134,7 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
         
         return Response(response_data)
     
+    @transaction.atomic
     def create(self, request, *args, **kwargs):
         """
         Create new project from template
@@ -165,25 +168,54 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
             template_config = template_data.get('configuration', {})
             template_metadata = template_data.get('metadata', {})
             
-            template_name = template_config.get('name') or template_metadata.get('name') or template_id.title()
-            template_type = template_config.get('template_type') or template_metadata.get('template_type') or template_id
+            # Validate template configuration before cloning
+            from .template_cloning_utils import validate_template_config
+            missing_fields = validate_template_config(template_config, template_id)
+            if missing_fields:
+                logger.warning(f"Template {template_id} missing fields: {missing_fields}, proceeding with defaults")
+            
+            # Schema validation (non-strict - logs warnings but doesn't fail)
+            schema_valid, schema_errors = validate_template_config_schema(template_config, template_id, strict=False)
+            if not schema_valid:
+                logger.warning(f"Template {template_id} schema validation found issues: {schema_errors}")
+            
+            # Clone template configuration with deep copy and audit trail
+            cloned_config, audit_trail = clone_template_configuration(
+                template_config, 
+                template_metadata, 
+                include_audit_trail=True
+            )
+            
+            # Log audit trail
+            if audit_trail:
+                logger.info(f"📋 Template cloning audit for {template_id}: {json.dumps(audit_trail, indent=2)}")
+            
+            template_name = cloned_config.get('name') or template_metadata.get('name') or template_id.title()
+            template_type = cloned_config.get('template_type') or template_metadata.get('template_type') or template_id
+            
+            # Handle icon_class fallback from metadata
+            icon_class = cloned_config.get('icon_class') or template_metadata.get('ui_assets', {}).get('icon', 'fa-file-alt')
+            
+            # Extract template version
+            template_version = template_metadata.get('version', '1.0.0')
             
             project_data = {
                 **request.data,
                 'project_id': str(uuid.uuid4()),
                 'template_name': template_name,
                 'template_type': template_type,
-                'instructions': template_config.get('instructions', ''),
-                'suggested_questions': template_config.get('suggested_questions', []),
-                'analysis_focus': template_config.get('analysis_focus', 'Document analysis'),
-                'icon_class': template_config.get('icon_class') or template_metadata.get('ui_assets', {}).get('icon', 'fa-file-alt'),
-                'color_theme': template_config.get('color_theme', 'oxford-blue'),
-                'has_navigation': template_config.get('has_navigation', False),
-                'total_pages': template_config.get('total_pages', 1),
-                'navigation_pages': template_config.get('navigation_pages', []),
-                'processing_capabilities': template_config.get('processing_capabilities', {}),
-                'validation_rules': template_config.get('validation_rules', {}),
-                'ui_configuration': template_config.get('ui_configuration', {})
+                'template_version': template_version,
+                'instructions': cloned_config.get('instructions', ''),
+                'suggested_questions': cloned_config.get('suggested_questions', []),
+                'analysis_focus': cloned_config.get('analysis_focus', 'Document analysis'),
+                'icon_class': icon_class,
+                'color_theme': cloned_config.get('color_theme', 'oxford-blue'),
+                'has_navigation': cloned_config.get('has_navigation', False),
+                'total_pages': cloned_config.get('total_pages', 1),
+                'navigation_pages': cloned_config.get('navigation_pages', []),
+                'processing_capabilities': cloned_config.get('processing_capabilities', {}),
+                'validation_rules': cloned_config.get('validation_rules', {}),
+                'ui_configuration': cloned_config.get('ui_configuration', {})
             }
             
             serializer = self.get_serializer(data=project_data)
@@ -199,6 +231,7 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                     'template_version': template_metadata.get('version', '1.0.0'),
                     'cloned_at': timezone.now().isoformat()
                 },
+                'cloning_audit': audit_trail if audit_trail else None,
                 'project_capabilities': {
                     'processing_mode': 'enhanced_hierarchical' if template_type == 'aicc-intellidoc' else 'enhanced',
                     'supports_navigation': project.has_navigation,
@@ -218,10 +251,107 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
             return Response(response_data, status=status.HTTP_201_CREATED)
             
         except Exception as e:
-            logger.error(f"❌ UNIVERSAL: Project creation failed: {e}")
+            import traceback
+            from django.conf import settings
+            
+            # Determine where the failure occurred
+            failed_at = 'unknown'
+            template_version = 'unknown'
+            if 'template_config' in locals():
+                failed_at = 'cloning'
+                template_version = template_metadata.get('version', 'unknown') if 'template_metadata' in locals() else 'unknown'
+            elif 'template_data' in locals():
+                failed_at = 'template_loading'
+            else:
+                failed_at = 'initialization'
+            
+            error_details = {
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'template_id': template_id if 'template_id' in locals() else 'unknown',
+                'template_version': template_version,
+                'failed_at': failed_at,
+                'traceback': traceback.format_exc() if settings.DEBUG else None
+            }
+            
+            logger.error(f"❌ UNIVERSAL: Project creation failed: {json.dumps(error_details, indent=2)}")
+            
             return Response({
                 'error': str(e),
-                'message': 'Failed to create project'
+                'message': 'Failed to create project',
+                'template_id': template_id if 'template_id' in locals() else None,
+                'details': error_details if settings.DEBUG else None
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=False, methods=['post'])
+    def preview_template_clone(self, request):
+        """
+        Preview what will be cloned from a template before creating a project.
+        POST /api/projects/preview_template_clone/
+        """
+        template_id = request.data.get('template_id')
+        if not template_id:
+            return Response({
+                'error': 'template_id is required',
+                'message': 'Please specify which template to preview'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            template_data = TemplateDiscoverySystem.get_template_configuration(template_id)
+            if not template_data:
+                return Response({
+                    'error': 'Template not found',
+                    'message': f'Template with ID {template_id} does not exist'
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            template_config = template_data.get('configuration', {})
+            template_metadata = template_data.get('metadata', {})
+            
+            # Get cloning preview with audit trail
+            cloned_config, audit_trail = clone_template_configuration(
+                template_config,
+                template_metadata,
+                include_audit_trail=True
+            )
+            
+            # Get schema validation summary
+            from .template_schema_validator import get_schema_validation_summary
+            schema_summary = get_schema_validation_summary(template_config)
+            
+            # Build preview response
+            template_name = cloned_config.get('name') or template_metadata.get('name') or template_id.title()
+            template_type = cloned_config.get('template_type') or template_metadata.get('template_type') or template_id
+            icon_class = cloned_config.get('icon_class') or template_metadata.get('ui_assets', {}).get('icon', 'fa-file-alt')
+            
+            preview = {
+                'template_id': template_id,
+                'template_name': template_name,
+                'template_type': template_type,
+                'template_version': template_metadata.get('version', '1.0.0'),
+                'icon_class': icon_class,
+                'will_clone': {
+                    'navigation_pages_count': len(cloned_config.get('navigation_pages', [])),
+                    'navigation_pages': cloned_config.get('navigation_pages', [])[:3],  # First 3 pages as sample
+                    'processing_capabilities_keys': list(cloned_config.get('processing_capabilities', {}).keys()),
+                    'validation_rules_keys': list(cloned_config.get('validation_rules', {}).keys()),
+                    'ui_configuration_keys': list(cloned_config.get('ui_configuration', {}).keys()),
+                    'suggested_questions_count': len(cloned_config.get('suggested_questions', [])),
+                    'has_navigation': cloned_config.get('has_navigation', False),
+                    'total_pages': cloned_config.get('total_pages', 1)
+                },
+                'cloning_audit': audit_trail,
+                'schema_validation': schema_summary,
+                'preview_generated_at': timezone.now().isoformat()
+            }
+            
+            return Response(preview, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Preview template clone failed: {e}")
+            return Response({
+                'error': str(e),
+                'message': 'Failed to generate preview',
+                'template_id': template_id
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=True, methods=['get'])

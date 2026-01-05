@@ -1,0 +1,418 @@
+\documentclass[11pt]{article}
+
+% Change "review" to "final" to generate the final (sometimes called camera-ready) version.
+% Change to "preprint" to generate a non-anonymous version with page numbers.
+\usepackage[review]{acl}
+
+% Standard package includes
+\usepackage{times}
+\usepackage{latexsym}
+
+% For proper rendering and hyphenation of words containing Latin characters (including in bib files)
+\usepackage[T1]{fontenc}
+
+% This assumes your files are encoded as UTF8
+\usepackage[utf8]{inputenc}
+
+% This is not strictly necessary, and may be commented out,
+% but it will improve the layout of the manuscript,
+% and will typically save some space.
+\usepackage{microtype}
+
+% This is also not strictly necessary, and may be commented out.
+% However, it will improve the aesthetics of text in
+% the typewriter font.
+\usepackage{inconsolata}
+
+% Including images in your LaTeX document requires adding additional package(s)
+\usepackage{graphicx}
+
+% Additional packages for this paper
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{multirow}
+\usepackage{url}
+\usepackage{tabularx}
+\usepackage{subcaption}
+
+% Code listing setup
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.97,0.97,0.95}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\scriptsize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=none,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=2,
+    frame=single,
+}
+
+\lstset{style=mystyle}
+
+\title{AICC-IntelliDoc: A Multi-Agent Orchestration Framework with\\Per-Agent RAG and Intelligent Delegation for Document-Aware Conversational AI}
+
+\author{First Author \\
+  Affiliation / Address line 1 \\
+  Affiliation / Address line 2 \\
+  \texttt{email@domain} \\\And
+  Second Author \\
+  Affiliation / Address line 1 \\
+  Affiliation / Address line 2 \\
+  \texttt{email@domain} \\}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Building production-ready document-intelligent chatbots from multi-agent workflows remains challenging due to fragmentation across existing tools: multi-agent frameworks provide coordination but lack per-agent document awareness; visual workflow builders offer accessibility but couple RAG configuration to entire workflows rather than individual agents; deployment requires custom infrastructure. We present \textbf{AICC-IntelliDoc}, an open-source framework that bridges visual workflow design to deployable chatbots with five key contributions: (1) \textbf{DocAware}, a per-agent RAG system enabling each agent to independently configure search methods and content filters for specialized document access; (2) \textbf{Dual-Mode Human-in-the-Loop}, distinguishing between administrator oversight and end-user interaction contexts; (3) \textbf{Intelligent Delegation}, an LLM-based query decomposition and capability-matching system for the Group Chat Manager that dynamically routes subqueries to specialized delegates; (4) \textbf{Workflow Evaluation Platform}, providing automated quality assessment using lexical and semantic metrics; and (5) \textbf{Workflow-to-Chatbot Deployment}, translating visual workflows into embeddable chatbots with origin management and rate limiting.
+\end{abstract}
+
+\section{Introduction}
+
+The emergence of large language models has enabled sophisticated multi-agent systems where specialized agents collaborate to solve complex tasks. However, translating these systems into production-ready, document-intelligent chatbots remains challenging. Consider a customer service scenario requiring a Legal Agent that retrieves contract information, a Technical Agent that accesses product documentation, and a human administrator who provides final approval before responses reach customers. Current solutions fragment this workflow across multiple tools: a multi-agent framework for coordination, a separate RAG system for document retrieval, custom code for human-in-the-loop logic, and bespoke deployment infrastructure.
+
+This fragmentation manifests in three critical gaps. First, existing visual workflow tools provide RAG configuration at the \textit{workflow level}, meaning all agents share the same retrieval settings—preventing the specialization where a Legal Agent searches only contract folders while a Technical Agent searches documentation. Second, human-in-the-loop implementations treat human input as a single interaction point, without distinguishing between an administrator reviewing workflow outputs and an end-user conversing with a deployed chatbot. Third, translating visual workflow designs into production chatbots requires custom deployment pipelines that most frameworks do not provide.
+
+\textbf{AICC-IntelliDoc} addresses these gaps with a unified framework spanning from visual workflow design to deployable chatbot. The framework makes five contributions:
+
+\begin{enumerate}
+    \item \textbf{DocAware: Per-Agent RAG Configuration} (\S\ref{sec:docaware})—Each agent independently configures its retrieval strategy, including search method selection and folder/file-level content filtering.
+    
+    \item \textbf{Dual-Mode Human-in-the-Loop} (\S\ref{sec:hitl})—The UserProxyAgent supports both Admin-in-the-Loop mode for executive oversight and User-in-the-Loop mode for end-user conversations in deployed chatbots.
+    
+    \item \textbf{Intelligent Delegation} (\S\ref{sec:delegation})—The Group Chat Manager employs LLM-based query decomposition to split complex inputs into subqueries and route them to appropriate delegates based on capability matching.
+    
+    \item \textbf{Workflow Evaluation Platform} (\S\ref{sec:evaluation})—An integrated system assessing workflow quality against ground-truth datasets using ROUGE, BLEU, BERTScore, and semantic similarity metrics.
+    
+    \item \textbf{Workflow-to-Chatbot Deployment} (\S\ref{sec:deployment})—A complete pipeline from visual design to embeddable chatbot with HTML code generation and per-origin rate limiting.
+\end{enumerate}
+
+Figure~\ref{fig:system-overview} illustrates the overall system architecture.
+
+\begin{figure}[t]
+    \centering
+    \fbox{\parbox{0.95\columnwidth}{\centering\vspace{1.8cm}\textbf{[FIGURE PLACEHOLDER]}\\\vspace{0.2cm}System Architecture Overview showing:\\Visual Workflow Designer $\rightarrow$ Orchestration Engine\\(DocAware, HITL, Intelligent Delegation)\\$\rightarrow$ Deployment $\rightarrow$ Embedded Chatbot\vspace{1.8cm}}}
+    \caption{AICC-IntelliDoc system architecture. Users design workflows visually, configure per-agent DocAware settings and delegation strategies, then deploy as embeddable chatbots.}
+    \label{fig:system-overview}
+\end{figure}
+
+
+\section{Related Work}
+\label{sec:related}
+
+Multi-agent frameworks like AutoGen, LangGraph, and CrewAI provide sophisticated agent coordination with various human-in-the-loop mechanisms. However, none provide \textit{per-agent} RAG configuration—retrieval settings apply uniformly across agents or require manual integration. Visual workflow tools including Dify, Flowise, and Langflow democratize development through drag-and-drop interfaces but couple RAG to the workflow level.
+
+Existing HITL implementations range from AutoGen's per-message interruption to LangGraph's indefinite pause capability, but these treat human input uniformly without distinguishing administrator oversight from end-user interaction. Task delegation approaches in current frameworks—AutoGen's speaker selection, CrewAI's hierarchical manager, MetaGPT's SOP-driven routing—operate on complete tasks without dynamic decomposition. AICC-IntelliDoc's Intelligent Delegation performs LLM-based query splitting and capability-based routing, enabling complex queries to be decomposed and distributed to specialized delegates.
+
+
+\section{System Architecture}
+\label{sec:architecture}
+
+AICC-IntelliDoc employs a microservices architecture with PostgreSQL for relational data, Milvus for vector storage, Django for backend services, and SvelteKit for the frontend. The system maintains project-level isolation through database constraints, application-layer access control, and dedicated Milvus collections per project. The orchestration engine executes workflows through topological sorting of the DAG, supporting parallel execution of independent branches. Implementation details are provided in Appendix~\ref{app:implementation}.
+
+
+\section{DocAware: Per-Agent RAG Configuration}
+\label{sec:docaware}
+
+DocAware distinguishes AICC-IntelliDoc from workflow-level RAG approaches by enabling each agent to independently configure: (1) whether DocAware is enabled, (2) which search method to use, (3) search parameters, and (4) content filters specifying accessible folders and files.
+
+\subsection{Per-Agent Configuration Model}
+
+Table~\ref{tab:docaware-config} illustrates how multiple agents in the same workflow can have different DocAware configurations, enabling document specialization impossible with workflow-level RAG systems.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+\textbf{Agent} & \textbf{DocAware} & \textbf{Search} & \textbf{Content Filter} \\
+\midrule
+Legal Agent & \checkmark & hierarchical & \texttt{/contracts/} \\
+Tech Agent & \checkmark & hybrid & \texttt{/docs/}, \texttt{/faq/} \\
+Summary Agent & --- & --- & --- \\
+\bottomrule
+\end{tabular}
+\caption{Per-agent DocAware configuration. The Legal Agent accesses only contracts using hierarchical search; the Technical Agent searches documentation using hybrid retrieval; the Summary Agent operates without document retrieval.}
+\label{tab:docaware-config}
+\end{table}
+
+When an agent with DocAware enabled executes, the system extracts a search query from the agent's input context, applies the configured search method with content filters, and injects retrieved documents into the prompt before LLM generation.
+
+\subsection{Content Filtering with Hierarchical Structure}
+
+DocAware extracts hierarchical structure from document filenames during ingestion. A document uploaded as \texttt{Legal/Contracts/Agreement.pdf} creates the virtual path \texttt{Legal/Contracts/} with hierarchical metadata stored in Milvus, enabling prefix-based folder filtering. Content filters support multi-select with OR logic, allowing agents to access multiple folder paths or specific file IDs (see Appendix~\ref{app:content-filter} for filter expression examples).
+
+DocAware integrates with Milvus to support six search strategies including semantic, hybrid, contextual, hierarchical, keyword, and threshold-based search. Each agent selects its optimal strategy based on its specialization. Details of each search method are provided in Appendix~\ref{app:search-methods}.
+
+
+\section{Dual-Mode Human-in-the-Loop}
+\label{sec:hitl}
+
+The UserProxyAgent implements human-in-the-loop functionality with two distinct modes addressing different deployment contexts.
+
+\subsection{Admin-in-the-Loop Mode}
+
+Admin-in-the-Loop pauses workflow execution for administrator review before responses reach end-users. The administrator interface displays aggregated inputs from connected agents, agent reasoning and intermediate outputs, retrieved documents from DocAware, and the proposed response. This mode enables compliance-critical workflows where human experts must approve AI-generated content before delivery.
+
+\subsection{User-in-the-Loop Mode}
+
+User-in-the-Loop enables stateful conversations in deployed chatbots where end-users provide input mid-workflow. When execution reaches a UserProxyAgent in this mode, the system pauses and creates a \texttt{HumanInputInteraction} record storing execution context. The chatbot presents an input interface, receives user input through the deployment API, and resumes execution with user input as the node's output. Algorithm~\ref{alg:hitl} formalizes this mechanism.
+
+\begin{algorithm}[t]
+\caption{Human-in-the-Loop Pause/Resume}
+\label{alg:hitl}
+\begin{algorithmic}[1]
+\REQUIRE UserProxyAgent node $n$, mode $m \in \{\text{admin}, \text{user}\}$
+\STATE Pause workflow execution at node $n$
+\STATE $ctx \leftarrow$ AggregateInputs($n$.connected\_agents)
+\STATE Create HumanInputInteraction record with $ctx$
+\IF{$m = \text{admin}$}
+    \STATE Display full workflow context to administrator
+\ELSE
+    \STATE Present chat interface to end-user
+\ENDIF
+\STATE Wait for human input $h$ via API
+\STATE Resume workflow with $h$ as node output
+\end{algorithmic}
+\end{algorithm}
+
+\begin{figure}[t]
+    \centering
+    \fbox{\parbox{0.95\columnwidth}{\centering\vspace{1.3cm}\textbf{[FIGURE PLACEHOLDER]}\\\vspace{0.2cm}Dual-Mode HITL Architecture:\\Left: Admin mode (full context visible)\\Right: User mode (chatbot interface)\vspace{1.3cm}}}
+    \caption{Dual-mode HITL. Admin mode provides workflow transparency for oversight; User mode presents a conversational interface.}
+    \label{fig:hitl-modes}
+\end{figure}
+
+
+\section{Intelligent Delegation}
+\label{sec:delegation}
+
+The Group Chat Manager coordinates multiple delegate agents using two strategies: \textit{round-robin} (iterative cycling) and \textit{intelligent} (LLM-based query decomposition with capability matching). Intelligent delegation is the novel contribution enabling dynamic task distribution.
+
+\subsection{Delegation Strategies}
+
+\textbf{Round-Robin Delegation} cycles through all connected delegates for a configurable number of iterations, with each delegate processing the full input context. This suits collaborative refinement where specialists contribute sequentially.
+
+\textbf{Intelligent Delegation} analyzes input queries, decomposes them into subqueries, and routes each to the most capable delegate(s). A query about ``contract terms and technical specifications'' can be split and routed to Legal and Technical delegates respectively.
+
+\subsection{Query Analysis, Matching, and Execution}
+
+The intelligent delegation pipeline consists of three phases. First, \textit{Query Analysis}: given input text and delegate descriptions, the Query Analysis Service uses an LLM to generate structured subqueries, each containing the decomposed query text, priority level, dependencies on other subqueries, and suggested delegates. Second, \textit{Delegate Matching}: for each subquery, the system matches against delegate descriptions using semantic similarity. If confidence falls below a threshold (default 0.7), the system broadcasts to all delegates rather than risk incorrect routing. Third, \textit{Parallel Execution}: subqueries are grouped by dependency level using topological sorting; independent subqueries execute in parallel while dependent ones wait for prerequisites.
+
+Algorithm~\ref{alg:intelligent-delegation} details the complete process.
+
+\begin{algorithm}[t]
+\caption{Intelligent Delegation}
+\label{alg:intelligent-delegation}
+\begin{algorithmic}[1]
+\REQUIRE Query $q$, delegates $D$, confidence threshold $\theta$
+\ENSURE Aggregated delegate responses
+\STATE \textit{// Phase 1: Query Analysis}
+\STATE $S \leftarrow$ LLM\_SplitQuery($q$)
+\STATE \COMMENT{$S$ = list of (id, text, priority, dependencies)}
+\STATE
+\STATE \textit{// Phase 2: Delegate Matching}
+\FOR{each subquery $s \in S$}
+    \STATE $(delegates, conf) \leftarrow$ MatchToDelegates($s$.text, $D$)
+    \IF{$conf < \theta$}
+        \STATE $assigned[s] \leftarrow D$ \COMMENT{Broadcast fallback}
+    \ELSE
+        \STATE $assigned[s] \leftarrow delegates$
+    \ENDIF
+\ENDFOR
+\STATE
+\STATE \textit{// Phase 3: Dependency-Aware Parallel Execution}
+\STATE $levels \leftarrow$ GroupByDependencyLevel($S$)
+\FOR{each $level$ in $levels$}
+    \STATE $results[level] \leftarrow$ ParallelExecute($assigned$, $level$)
+\ENDFOR
+\RETURN Aggregate($results$)
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Comparison with Existing Approaches}
+
+Table~\ref{tab:delegation-comparison} contrasts intelligent delegation with existing frameworks. AICC-IntelliDoc uniquely combines LLM-based query decomposition with capability-based routing.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{Framework} & \textbf{Query Split} & \textbf{Dynamic Routing} \\
+\midrule
+AutoGen & No & Speaker selection \\
+CrewAI & No & Hierarchical manager \\
+MetaGPT & No & SOP-based \\
+LangGraph & No & Developer-defined \\
+\textbf{AICC-IntelliDoc} & \textbf{Yes (LLM)} & \textbf{Capability matching} \\
+\bottomrule
+\end{tabular}
+\caption{Delegation strategy comparison across frameworks.}
+\label{tab:delegation-comparison}
+\end{table}
+
+
+\section{Workflow Evaluation Platform}
+\label{sec:evaluation}
+
+AICC-IntelliDoc includes an integrated evaluation platform enabling users to assess workflow quality against ground-truth datasets, supporting iterative workflow improvement.
+
+\subsection{Evaluation Methodology}
+
+Users upload CSV files with \texttt{input} and \texttt{expected\_output} columns. For each row, the system: (1) substitutes the Start node prompt with the input, (2) executes the complete workflow, (3) extracts output from nodes connected to the End node, and (4) compares against expected output using multiple metrics.
+
+\subsection{Evaluation Metrics}
+
+The platform computes six metrics: \textbf{ROUGE-1, ROUGE-2, ROUGE-L} for n-gram overlap; \textbf{BLEU} for precision-based evaluation; \textbf{BERTScore} for contextual embedding similarity; and \textbf{Semantic Similarity} using sentence-transformer cosine similarity. Results are stored in database records enabling historical comparison across workflow iterations.
+
+
+\section{Workflow-to-Chatbot Deployment}
+\label{sec:deployment}
+
+AICC-IntelliDoc provides a complete deployment pipeline from visual workflow design to embeddable chatbot.
+
+\subsection{Deployment Pipeline}
+
+The six-stage pipeline consists of: (1) \textit{Visual Design}—users create workflows via drag-and-drop; (2) \textit{Validation}—graphs are validated for DAG properties and required nodes; (3) \textit{Configuration}—users select the workflow, specify allowed origins, and set rate limits; (4) \textit{Code Generation}—the system generates self-contained HTML embed code; (5) \textit{Integration}—users copy embed code into websites; (6) \textit{Execution}—the system validates origins, enforces rate limits, and executes workflows.
+
+\subsection{Origin Management and Rate Limiting}
+
+Each deployment maintains allowed origins (domains) that can embed the chatbot. The system validates \texttt{Origin} headers, rejecting requests from unlisted domains. Each origin has independent rate limit configuration enabling fine-grained usage control. CORS middleware handles cross-origin requests for browser security compliance. See Appendix~\ref{app:deployment-config} for configuration examples and Appendix~\ref{app:embed-code} for the HTML embed code structure.
+
+
+\section{Limitations and Conclusion}
+\label{sec:conclusion}
+
+\textbf{Limitations.} The intelligent delegation strategy depends on LLM quality for query splitting—poor decomposition may route subqueries incorrectly. Evaluation metrics assess textual similarity but may not capture semantic correctness for all use cases. Documents sent to external LLM providers are subject to those providers' data handling policies.
+
+\textbf{Conclusion.} We presented AICC-IntelliDoc, a framework addressing fragmentation between multi-agent orchestration, document retrieval, and chatbot deployment. The five contributions—per-agent DocAware configuration, dual-mode human-in-the-loop, intelligent delegation with query decomposition, workflow evaluation, and seamless deployment—create an end-to-end solution for document-intelligent conversational applications. The per-agent RAG configuration enables specialization that workflow-level approaches cannot achieve. Intelligent delegation dynamically decomposes complex queries and routes them to capable delegates, advancing beyond static assignment strategies. AICC-IntelliDoc will be released as open source.
+
+
+\section*{Acknowledgments}
+
+We thank the open-source community for foundational tools including Django, SvelteKit, Milvus, and the Hugging Face ecosystem.
+
+
+% Bibliography
+\bibliography{anthology,custom}
+\bibliographystyle{acl_natbib}
+
+\appendix
+
+\section{Implementation Details}
+\label{app:implementation}
+
+AICC-IntelliDoc is implemented with the following technology stack:
+
+\textbf{Backend}: Django 4.x with Django REST Framework, Celery for background tasks, and asyncio for concurrent workflow execution.
+
+\textbf{Vector Database}: Milvus 2.x with project-specific collections using the pattern \texttt{\{project\_name\}\_\{project\_id\}}. Document embeddings use all-MiniLM-L6-v2 (384 dimensions).
+
+\textbf{Frontend}: SvelteKit with a visual workflow designer supporting drag-and-drop node placement and per-node configuration panels.
+
+\textbf{LLM Integration}: Abstracted provider interface supporting OpenAI, Anthropic, and other providers through project-specific API key management.
+
+
+\section{DocAware Search Methods}
+\label{app:search-methods}
+
+DocAware integrates with Milvus to support six search strategies:
+
+\begin{enumerate}
+    \item \textbf{Semantic Search}: Cosine similarity on document embeddings
+    \item \textbf{Hybrid Search}: Combines semantic and keyword matching with configurable weights
+    \item \textbf{Contextual Search}: Query expansion using conversation history
+    \item \textbf{Hierarchical Search}: Leverages filename-based folder structure for boosting
+    \item \textbf{Keyword Search}: BM25-style lexical ranking
+    \item \textbf{Threshold Search}: Filters results by minimum similarity score
+\end{enumerate}
+
+All methods support hierarchical content filtering, enabling targeted retrieval from specific folder structures.
+
+
+\section{Content Filter Expressions}
+\label{app:content-filter}
+
+Content filters support folder and file-level filtering with OR logic:
+
+\begin{lstlisting}[language=Python,caption={Content filter expression examples}]
+# Single folder filter
+filter = 'hierarchical_path like "Legal/Contracts%"'
+
+# Multiple folders with OR logic
+filter = (
+  'hierarchical_path like "Legal/Contracts%"'
+  ' or hierarchical_path like "Legal/Policies%"'
+)
+
+# Combined folder and file filter
+filter = (
+  'hierarchical_path like "Reports%"'
+  ' or document_id == "doc_12345"'
+)
+\end{lstlisting}
+
+
+\section{Deployment Configuration}
+\label{app:deployment-config}
+
+Table~\ref{tab:deployment-origins} shows an example per-origin deployment configuration.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{Allowed Origin} & \textbf{Rate Limit} & \textbf{Status} \\
+\midrule
+\texttt{example.com} & 60/min & Active \\
+\texttt{app.example.com} & 120/min & Active \\
+\texttt{staging.example.com} & 30/min & Inactive \\
+\bottomrule
+\end{tabular}
+\caption{Per-origin deployment configuration showing independent rate limits and activation status.}
+\label{tab:deployment-origins}
+\end{table}
+
+
+\section{HTML Embed Code Structure}
+\label{app:embed-code}
+
+The generated embed code is self-contained:
+
+\begin{lstlisting}[language=HTML,caption={Generated HTML embed code structure}]
+<div id="aicc-chatbot">
+  <script>
+    window.AICC_CONFIG = {
+      endpoint: '/api/deploy/{id}/chat/',
+      sessionId: crypto.randomUUID(),
+      greeting: 'Hello! How can I help?'
+    };
+  </script>
+  <script src="/static/chatbot.js"></script>
+</div>
+\end{lstlisting}
+
+The chatbot interface includes responsive design, message styling, input handling, error states, and session management for stateful conversations.
+
+
+\end{document}

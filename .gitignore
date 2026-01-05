@@ -256,6 +256,10 @@ datasets/
 docs/_build/
 documentation/
 
+# LaTeX/Academic Papers
+AICC_INTELLIDOC_PAPER.tex
+custom.bib
+
 
 # =============================================================================
 # KUBERNETES FOLDER

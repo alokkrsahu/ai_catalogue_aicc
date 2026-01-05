@@ -389,6 +389,7 @@ class IntelliDocProject(models.Model):
     # Cloned template data (copied during creation, independent of original template)
     template_name = models.CharField(max_length=100, blank=True)
     template_type = models.CharField(max_length=20, blank=True)
+    template_version = models.CharField(max_length=50, blank=True, help_text="Template version at creation time")
     template_description = models.TextField(blank=True)
     instructions = models.TextField(blank=True)
     suggested_questions = models.JSONField(default=list)

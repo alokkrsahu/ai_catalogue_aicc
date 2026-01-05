@@ -11,6 +11,7 @@ from users.models import (
     UserProjectPermission, GroupProjectPermission
 )
 from templates.discovery import TemplateDiscoverySystem
+from .template_cloning_utils import clone_template_configuration
 
 User = get_user_model()
 
@@ -196,9 +197,19 @@ class IntelliDocProjectCreateSerializer(serializers.ModelSerializer):
         template_id = validated_data.pop('template_id')
         
         # Get complete template configuration from folder
-        template_config = TemplateDiscoverySystem.get_template_configuration(template_id)
-        if not template_config:
+        template_data = TemplateDiscoverySystem.get_template_configuration(template_id)
+        if not template_data:
             raise serializers.ValidationError("Template configuration not found.")
+        
+        template_config = template_data.get('configuration', {})
+        template_metadata = template_data.get('metadata', {})
+        
+        # Clone COMPLETE template configuration with deep copy
+        cloned_config, _ = clone_template_configuration(
+            template_config,
+            template_metadata,
+            include_audit_trail=False
+        )
         
         # Clone COMPLETE template configuration into the project
         project = IntelliDocProject.objects.create(
@@ -208,23 +219,23 @@ class IntelliDocProjectCreateSerializer(serializers.ModelSerializer):
             created_by=validated_data['created_by'],
             
             # Cloned basic template data
-            template_name=template_config.get('name'),
-            template_type=template_config.get('template_type'),
-            template_description=template_config.get('description'),
-            instructions=template_config.get('instructions'),
-            suggested_questions=template_config.get('suggested_questions', []).copy(),
-            required_fields=template_config.get('required_fields', []).copy(),
-            analysis_focus=template_config.get('analysis_focus'),
-            icon_class=template_config.get('icon_class'),
-            color_theme=template_config.get('color_theme'),
-            has_navigation=template_config.get('has_navigation', False),
+            template_name=cloned_config.get('name'),
+            template_type=cloned_config.get('template_type'),
+            template_description=cloned_config.get('description'),
+            instructions=cloned_config.get('instructions'),
+            suggested_questions=cloned_config.get('suggested_questions', []),
+            required_fields=cloned_config.get('required_fields', []),
+            analysis_focus=cloned_config.get('analysis_focus'),
+            icon_class=cloned_config.get('icon_class'),
+            color_theme=cloned_config.get('color_theme'),
+            has_navigation=cloned_config.get('has_navigation', False),
             
-            # NEW: Clone complete configuration
-            total_pages=template_config.get('total_pages', 1),
-            navigation_pages=template_config.get('navigation_pages', []).copy(),
-            processing_capabilities=template_config.get('processing_capabilities', {}).copy(),
-            validation_rules=template_config.get('validation_rules', {}).copy(),
-            ui_configuration=template_config.get('ui_configuration', {}).copy()
+            # Clone complete configuration (deep copied)
+            total_pages=cloned_config.get('total_pages', 1),
+            navigation_pages=cloned_config.get('navigation_pages', []),
+            processing_capabilities=cloned_config.get('processing_capabilities', {}),
+            validation_rules=cloned_config.get('validation_rules', {}),
+            ui_configuration=cloned_config.get('ui_configuration', {})
         )
         return project
 
@@ -346,7 +357,7 @@ class IntelliDocProjectSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'project_id', 'name', 'description', 'has_navigation',
             # Cloned template data (directly accessible)
-            'template_name', 'template_type', 'template_description', 'instructions',
+            'template_name', 'template_type', 'template_version', 'template_description', 'instructions',
             'suggested_questions', 'required_fields', 'analysis_focus', 'icon_class', 'color_theme',
             # Complete configuration fields
             'total_pages', 'navigation_pages', 'processing_capabilities', 'validation_rules', 'ui_configuration',
@@ -393,6 +404,16 @@ class IntelliDocProjectCreateSerializer(serializers.ModelSerializer):
         config = template_config.get('configuration', {})
         metadata = template_config.get('metadata', {})
         
+        # Clone COMPLETE template configuration with deep copy
+        cloned_config, _ = clone_template_configuration(
+            config,
+            metadata,
+            include_audit_trail=False
+        )
+        
+        # Extract template version
+        template_version = metadata.get('version', '1.0.0')
+        
         # Clone COMPLETE template configuration into the project
         project = IntelliDocProject.objects.create(
             # Project data
@@ -401,23 +422,24 @@ class IntelliDocProjectCreateSerializer(serializers.ModelSerializer):
             created_by=validated_data['created_by'],
             
             # Cloned basic template data
-            template_name=config.get('name', metadata.get('name')),
-            template_type=config.get('template_type', metadata.get('template_type')),
-            template_description=config.get('description', metadata.get('description')),
-            instructions=config.get('instructions', ''),
-            suggested_questions=config.get('suggested_questions', []).copy(),
-            required_fields=config.get('required_fields', []).copy(),
-            analysis_focus=config.get('analysis_focus', ''),
-            icon_class=config.get('icon_class', metadata.get('ui_assets', {}).get('icon', 'fa-file-alt')),
-            color_theme=config.get('color_theme', metadata.get('color_theme', 'oxford-blue')),
-            has_navigation=config.get('total_pages', 1) > 1,
+            template_name=cloned_config.get('name', metadata.get('name')),
+            template_type=cloned_config.get('template_type', metadata.get('template_type')),
+            template_version=template_version,
+            template_description=cloned_config.get('description', metadata.get('description')),
+            instructions=cloned_config.get('instructions', ''),
+            suggested_questions=cloned_config.get('suggested_questions', []),
+            required_fields=cloned_config.get('required_fields', []),
+            analysis_focus=cloned_config.get('analysis_focus', ''),
+            icon_class=cloned_config.get('icon_class', metadata.get('ui_assets', {}).get('icon', 'fa-file-alt')),
+            color_theme=cloned_config.get('color_theme', metadata.get('color_theme', 'oxford-blue')),
+            has_navigation=cloned_config.get('total_pages', 1) > 1,
             
-            # Complete configuration cloning
-            total_pages=config.get('total_pages', 1),
-            navigation_pages=config.get('navigation_pages', []).copy(),
-            processing_capabilities=config.get('processing_capabilities', {}).copy(),
-            validation_rules=config.get('validation_rules', {}).copy(),
-            ui_configuration=config.get('ui_configuration', {}).copy()
+            # Complete configuration cloning (deep copied)
+            total_pages=cloned_config.get('total_pages', 1),
+            navigation_pages=cloned_config.get('navigation_pages', []),
+            processing_capabilities=cloned_config.get('processing_capabilities', {}),
+            validation_rules=cloned_config.get('validation_rules', {}),
+            ui_configuration=cloned_config.get('ui_configuration', {})
         )
         return project
 
