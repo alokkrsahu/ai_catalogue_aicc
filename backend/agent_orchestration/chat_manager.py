@@ -7,6 +7,8 @@ Handles group chat management and delegate conversation execution for conversati
 
 import logging
 import asyncio
+import json
+import time
 from typing import Dict, List, Any, Optional
 from asgiref.sync import sync_to_async
 
@@ -289,8 +291,10 @@ class ChatManager:
                 except Exception as term_error:
                     logger.error(f"❌ GROUP CHAT MANAGER (MULTI-INPUT): Termination strategy check failed: {term_error}")
                 
-                logger.info(f"📊 GROUP CHAT MANAGER (MULTI-INPUT): Round {round_num + 1} completed - processed {len(round_tasks)} delegates in parallel")
+                delegates_processed_this_round = len(round_tasks)
+                logger.info(f"📊 GROUP CHAT MANAGER (MULTI-INPUT): Round {round_num + 1} completed - processed {delegates_processed_this_round} delegates in parallel")
             else:
+                delegates_processed_this_round = 0
                 logger.info(f"📊 GROUP CHAT MANAGER (MULTI-INPUT): Round {round_num + 1} skipped - no delegates to execute")
             
             # Check if all delegates completed
@@ -1232,7 +1236,7 @@ class ChatManager:
         # Initialize query analysis service
         query_analysis_service = get_query_analysis_service(self.llm_provider_manager)
         
-        # Step 1: Analyze and split query
+        # Step 1: Analyze and split query (track time for experiment metrics)
         logger.info(f"🔍 GROUP CHAT MANAGER (INTELLIGENT): Analyzing and splitting input query")
         
         # Get max_subqueries from manager configuration (default: None = no limit)
@@ -1249,6 +1253,9 @@ class ChatManager:
                 logger.warning(f"⚠️ GROUP CHAT MANAGER (INTELLIGENT): Invalid max_subqueries value, ignoring limit")
                 max_subqueries = None
         
+        # Track query splitting time
+        query_splitting_start_time = time.time()
+        query_splitting_time_s = 0.0  # Initialize to ensure it's always defined
         try:
             subqueries = await query_analysis_service.analyze_and_split_query(
                 input_text=input_text,
@@ -1257,6 +1264,8 @@ class ChatManager:
                 project=project,
                 max_subqueries=max_subqueries
             )
+            query_splitting_end_time = time.time()
+            query_splitting_time_s = query_splitting_end_time - query_splitting_start_time
             
             if not subqueries:
                 logger.warning(f"⚠️ GROUP CHAT MANAGER (INTELLIGENT): No subqueries generated, falling back to single query")
@@ -1273,6 +1282,8 @@ class ChatManager:
             logger.info(f"✅ GROUP CHAT MANAGER (INTELLIGENT): Split into {len(subqueries)} subqueries")
             
         except Exception as e:
+            query_splitting_end_time = time.time()
+            query_splitting_time_s = query_splitting_end_time - query_splitting_start_time
             logger.error(f"❌ GROUP CHAT MANAGER (INTELLIGENT): Query analysis failed: {e}")
             import traceback
             logger.error(f"❌ GROUP CHAT MANAGER (INTELLIGENT): Traceback: {traceback.format_exc()}")
@@ -1293,6 +1304,15 @@ class ChatManager:
         
         # Track assignment statistics for debugging
         delegate_assignment_counts = {name: 0 for name in delegate_descriptions.keys()}
+        
+        # Initialize delegation_metrics early for broadcast tracking
+        delegation_metrics = {
+            'broadcast_delegations': 0,
+            'query_splitting_time_s': query_splitting_time_s,
+        }
+        
+        # Track matching time for experiment metrics
+        matching_start_time = asyncio.get_event_loop().time()
         
         # Create parallel matching tasks for all subqueries
         matching_tasks = []
@@ -1317,17 +1337,22 @@ class ChatManager:
             return_exceptions=True
         )
         
+        # Calculate matching time
+        matching_end_time = asyncio.get_event_loop().time()
+        matching_time = matching_end_time - matching_start_time
+        
         # Process matching results
         for (sq_id, subquery, _), match_result in zip(matching_tasks, matching_results):
             try:
                 # Handle exceptions from parallel execution
                 if isinstance(match_result, Exception):
                     logger.error(f"❌ GROUP CHAT MANAGER (INTELLIGENT): Exception matching subquery {sq_id[:8]}: {match_result}")
-                    # Fallback: assign to all delegates
+                    # Fallback: assign to all delegates (treat as broadcast)
                     assigned_delegates = list(delegate_descriptions.keys())
                     for delegate_name in assigned_delegates:
                         if delegate_name in delegate_assignment_counts:
                             delegate_assignment_counts[delegate_name] += 1
+                    delegation_metrics['broadcast_delegations'] += 1
                     subquery_assignments[sq_id] = {
                         'subquery': subquery,
                         'assigned_delegates': assigned_delegates,
@@ -1354,6 +1379,7 @@ class ChatManager:
                     logger.warning(f"⚠️ GROUP CHAT MANAGER (INTELLIGENT): Low confidence ({confidence:.2f}) or no match for {sq_id[:8]}, broadcasting to all {len(delegate_descriptions)} delegates")
                     assigned_delegates = list(delegate_descriptions.keys())
                     confidence = 0.5
+                    delegation_metrics['broadcast_delegations'] += 1
                     logger.info(f"📊 DELEGATE ASSIGNMENT: Subquery {sq_id[:8]} broadcast to all delegates: {assigned_delegates}")
                 
                 # Track assignment counts
@@ -1370,11 +1396,12 @@ class ChatManager:
                 }
             except Exception as e:
                 logger.error(f"❌ GROUP CHAT MANAGER (INTELLIGENT): Failed to process match result for subquery {sq_id[:8]}: {e}")
-                # Fallback: assign to all delegates
+                # Fallback: assign to all delegates (treat as broadcast)
                 assigned_delegates = list(delegate_descriptions.keys())
                 for delegate_name in assigned_delegates:
                     if delegate_name in delegate_assignment_counts:
                         delegate_assignment_counts[delegate_name] += 1
+                delegation_metrics['broadcast_delegations'] += 1
                 subquery_assignments[sq_id] = {
                     'subquery': subquery,
                     'assigned_delegates': assigned_delegates,
@@ -1388,7 +1415,8 @@ class ChatManager:
         
         delegate_responses = {}  # {subquery_id: {delegate_name: response}}
         conversation_log = []
-        delegation_metrics = {
+        # Update delegation_metrics with additional fields (preserve broadcast_delegations)
+        delegation_metrics.update({
             'total_delegations': 0,
             'successful_delegations': 0,
             'failed_delegations': 0,
@@ -1396,8 +1424,8 @@ class ChatManager:
             'retries': 0,
             'matching_time': matching_time,
             'delegation_start_time': None,
-            'delegation_end_time': None
-        }
+            'delegation_end_time': None,
+        })
         
         # Group subqueries by dependency level for parallel processing
         dependency_levels = self._group_subqueries_by_dependency_level(subqueries, subquery_assignments)
@@ -1477,10 +1505,13 @@ class ChatManager:
         # Step 4: Aggregate responses and generate final synthesis
         logger.info(f"📊 GROUP CHAT MANAGER (INTELLIGENT): Aggregating {len(conversation_log)} delegate responses")
         
-        # Calculate performance metrics
+        # Calculate performance and experiment metrics
         total_time = delegation_metrics.get('delegation_time', 0) + delegation_metrics.get('matching_time', 0)
         avg_delegate_time = delegation_metrics['delegation_time'] / max(delegation_metrics['total_delegations'], 1) if delegation_metrics.get('delegation_time') else 0
         success_rate = (delegation_metrics['successful_delegations'] / max(delegation_metrics['total_delegations'], 1)) * 100
+        total_subqueries = len(subqueries)
+        broadcast_count = delegation_metrics.get('broadcast_delegations', 0)
+        broadcast_rate = (broadcast_count / max(total_subqueries, 1)) * 100
         
         logger.info(f"📊 PERFORMANCE METRICS:")
         logger.info(f"  - Matching time: {delegation_metrics.get('matching_time', 0):.2f}s")
@@ -1492,6 +1523,70 @@ class ChatManager:
         logger.info(f"  - Successful: {delegation_metrics['successful_delegations']}")
         logger.info(f"  - Failed: {delegation_metrics['failed_delegations']}")
         logger.info(f"  - Retries: {delegation_metrics['retries']}")
+        logger.info(f"  - Broadcast delegations (subqueries): {broadcast_count}/{total_subqueries} ({broadcast_rate:.1f}%)")
+        
+        # Structured experiment log for offline analysis (Intelligent Delegation Accuracy / Overhead)
+        try:
+            # Extract configuration
+            delegate_count = len(delegate_descriptions)
+            configuration = {
+                "delegate_count": delegate_count,
+                "confidence_threshold": confidence_threshold,
+                "max_subqueries": max_subqueries if 'max_subqueries' in locals() else None,
+            }
+            
+            exp_payload = {
+                "experiment": "intelligent_delegation",
+                "manager_name": manager_name,
+                "project_id": str(project_id) if project_id else None,
+                "total_subqueries": total_subqueries,
+                "delegation_confidence_threshold": confidence_threshold,
+                "query_splitting_time_s": delegation_metrics.get("query_splitting_time_s", 0),
+                "matching_time_s": delegation_metrics.get("matching_time", 0),
+                "delegation_time_s": delegation_metrics.get("delegation_time", 0),
+                "total_time_s": total_time,
+                "total_delegations": delegation_metrics["total_delegations"],
+                "successful_delegations": delegation_metrics["successful_delegations"],
+                "failed_delegations": delegation_metrics["failed_delegations"],
+                "timeouts": delegation_metrics["timeouts"],
+                "retries": delegation_metrics["retries"],
+                "broadcast_subqueries": broadcast_count,
+                "broadcast_rate_pct": broadcast_rate,
+                "delegate_assignment_counts": delegate_assignment_counts,
+            }
+            logger.info(f"EXP_METRIC_INTELLIGENT_DELEGATION | {json.dumps(exp_payload, default=str)}")
+            
+            # Store in database
+            if project_id:
+                try:
+                    from users.models import IntelliDocProject, ExperimentMetric
+                    
+                    def save_metric():
+                        try:
+                            project_obj = IntelliDocProject.objects.get(project_id=project_id)
+                            metric = ExperimentMetric.objects.create(
+                                project=project_obj,
+                                experiment_type='intelligent_delegation',
+                                metric_data=exp_payload,
+                                configuration=configuration,
+                                execution_id=execution_id if 'execution_id' in locals() else '',
+                            )
+                            logger.info(f"✅ Stored intelligent delegation experiment metric: id={metric.id}, project={project_id}")
+                        except IntelliDocProject.DoesNotExist:
+                            logger.warning(f"⚠️ Could not save experiment metric: Project {project_id} not found")
+                        except Exception as e:
+                            logger.error(f"❌ Failed to save experiment metric to database: {e}", exc_info=True)
+                            import traceback
+                            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+                    
+                    # Use sync_to_async for database write
+                    await sync_to_async(save_metric)()
+                except Exception as db_error:
+                    logger.error(f"❌ Failed to store experiment metric in database: {db_error}", exc_info=True)
+                    import traceback
+                    logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+        except Exception as metric_error:
+            logger.error(f"❌ EXP_METRIC_INTELLIGENT_DELEGATION: Failed to log metrics: {metric_error}")
         
         # Build aggregation context
         aggregation_context = f"""

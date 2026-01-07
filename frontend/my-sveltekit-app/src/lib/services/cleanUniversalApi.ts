@@ -1123,6 +1123,31 @@ export class CleanUniversalApiService {
     
     throw new Error('Session not found');
   }
+
+  // ============================================================================
+  // SYSTEM PERFORMANCE ANALYSIS
+  // ============================================================================
+
+  /**
+   * Get experiment metrics for System Performance Analysis
+   */
+  async getExperimentMetrics(projectId: string): Promise<any> {
+    console.log(`📊 PERFORMANCE: Getting experiment metrics for project ${projectId}`);
+    
+    const response = await this.handleAuthenticatedRequest(`${API_BASE}/projects/${projectId}/experiment-metrics/`, {
+      method: 'GET',
+      headers: this.getAuthHeaders(),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Get experiment metrics failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+    console.log(`✅ PERFORMANCE: Retrieved experiment metrics`);
+    return result;
+  }
 }
 
 // Export singleton instance

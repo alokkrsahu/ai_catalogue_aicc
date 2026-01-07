@@ -8,6 +8,8 @@ Main workflow execution engine for conversation orchestration.
 import logging
 import time
 import asyncio
+import json
+import uuid
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 from django.utils import timezone
@@ -91,7 +93,8 @@ class WorkflowExecutor:
             logger.info(f"🚀 ORCHESTRATOR: Starting REAL workflow execution for {workflow_id}")
         
         start_time = timezone.now()
-        execution_id = f"exec_{int(time.time() * 1000)}" # Added milliseconds for uniqueness
+        # Generate unique execution_id with UUID to prevent collisions in parallel execution
+        execution_id = f"exec_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
         
         # CRITICAL FIX: Create execution record IMMEDIATELY so it's available for human input pausing
         execution_record = await sync_to_async(WorkflowExecution.objects.create)(
@@ -161,6 +164,11 @@ class WorkflowExecutor:
             
             # Execute nodes with parallel execution support
             node_index = 0
+
+            # Experiment helpers for execution analysis (sequential vs parallel)
+            parallel_batches = 0
+            parallel_nodes_executed = 0
+            sequential_nodes_executed = 0
             
             # CRITICAL FIX: Handle StartNode first (it's skipped by _find_ready_nodes)
             if node_index < len(execution_sequence):
@@ -216,12 +224,15 @@ class WorkflowExecutor:
                 # If only one node is ready, execute it sequentially
                 if len(ready_nodes) == 1:
                     node_index, node = ready_nodes[0]
+                    sequential_nodes_executed += 1
                     node_index += 1  # Move to next after execution
                 else:
                     # Multiple nodes ready - execute in parallel
                     logger.info(f"🔀 PARALLEL: Executing {len(ready_nodes)} nodes in parallel")
                     node_names = [n[1].get('data', {}).get('name', n[1].get('id')) for n in ready_nodes]
                     logger.info(f"🔀 PARALLEL: Nodes: {', '.join(node_names)}")
+                    parallel_batches += 1
+                    parallel_nodes_executed += len(ready_nodes)
                     
                     # CRITICAL FIX: Check if UserProxyAgent's dependencies are actually satisfied
                     # Build dependency map to check UserProxyAgent dependencies
@@ -947,7 +958,7 @@ class WorkflowExecutor:
                         # For MCP Server nodes, we expect the input to contain tool execution requests
                         # The input should be in format: {"tool": "tool_name", "arguments": {...}}
                         # If not in that format, we'll try to extract tool calls from the text
-                        import json
+                        # Note: json is already imported at module level
                         tool_request = None
                         
                         # Get primary input from aggregated context
@@ -1177,9 +1188,89 @@ class WorkflowExecutor:
                 'messages': final_messages,
                 'result_summary': f"Successfully executed {len(execution_sequence)} nodes with {len(agents_involved)} agents"
             }
-            
+
             logger.info(f"✅ ORCHESTRATOR: REAL workflow execution completed successfully - {len(final_messages)} total messages logged")
             logger.info(f"📊 MESSAGE COUNT VERIFICATION: Expected ~{len(execution_sequence)} nodes, logged {len(final_messages)} messages")
+
+            # Structured experiment log for workflow execution performance (sequential vs parallel)
+            try:
+                # Extract configuration: agent count and RAG status
+                nodes = graph_json.get('nodes', [])
+                agent_count = sum(1 for node in nodes if node.get('type') in ['AssistantAgent', 'DelegateAgent'])
+                has_rag = any(
+                    node.get('data', {}).get('doc_aware', False) 
+                    for node in nodes 
+                    if node.get('type') == 'AssistantAgent'
+                )
+                
+                configuration = {
+                    "agent_count": agent_count,
+                    "total_nodes": len(nodes),
+                    "has_rag": has_rag,
+                    "is_deployment": is_deployment,
+                }
+                
+                # Extract evaluation_id from deployment_context if available
+                evaluation_id_value = ''
+                if deployment_context and isinstance(deployment_context, dict):
+                    evaluation_id_value = deployment_context.get('evaluation_id', '')
+                
+                exp_payload = {
+                    "experiment": "workflow_execution",
+                    "workflow_id": str(workflow_id),
+                    "workflow_name": workflow_name,
+                    "project_id": str(project_id),
+                    "execution_id": execution_id,
+                    "is_deployment": is_deployment,
+                    "evaluation_id": evaluation_id_value,  # Include in payload for logging
+                    "duration_s": duration,
+                    "total_nodes": len(nodes),
+                    "parallel_batches": parallel_batches,
+                    "parallel_nodes_executed": parallel_nodes_executed,
+                    "sequential_nodes_executed": sequential_nodes_executed,
+                }
+                
+                # Log with deployment/evaluation context
+                if is_deployment:
+                    logger.info(f"🚀 EXP_METRIC_WORKFLOW_EXECUTION [DEPLOYMENT] | {json.dumps(exp_payload, default=str)}")
+                elif evaluation_id_value:
+                    logger.info(f"📊 EXP_METRIC_WORKFLOW_EXECUTION [EVALUATION:{evaluation_id_value}] | {json.dumps(exp_payload, default=str)}")
+                else:
+                    logger.info(f"EXP_METRIC_WORKFLOW_EXECUTION | {json.dumps(exp_payload, default=str)}")
+                
+                # Store in database
+                try:
+                    from users.models import IntelliDocProject, ExperimentMetric
+                    
+                    # evaluation_id_value already extracted above
+                    
+                    def save_metric():
+                        try:
+                            project_obj = IntelliDocProject.objects.get(project_id=project_id)
+                            metric = ExperimentMetric.objects.create(
+                                project=project_obj,
+                                experiment_type='workflow_execution',
+                                metric_data=exp_payload,
+                                configuration=configuration,
+                                execution_id=execution_id,
+                                evaluation_id=evaluation_id_value,
+                            )
+                            logger.info(f"✅ Stored workflow execution experiment metric: id={metric.id}, project={project_id}, execution={execution_id}, evaluation={evaluation_id_value or 'N/A'}")
+                        except IntelliDocProject.DoesNotExist:
+                            logger.warning(f"⚠️ Could not save experiment metric: Project {project_id} not found")
+                        except Exception as e:
+                            logger.error(f"❌ Failed to save experiment metric to database: {e}", exc_info=True)
+                            import traceback
+                            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+                    
+                    # Use sync_to_async for database write
+                    await sync_to_async(save_metric)()
+                except Exception as db_error:
+                    logger.error(f"❌ Failed to store experiment metric in database: {db_error}", exc_info=True)
+                    import traceback
+                    logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+            except Exception as metric_error:
+                logger.error(f"❌ EXP_METRIC_WORKFLOW_EXECUTION: Failed to log metrics: {metric_error}")
             
             # Debug: Log all message types for verification
             message_types = [msg['message_type'] for msg in final_messages]

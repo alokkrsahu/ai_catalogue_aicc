@@ -1069,6 +1069,39 @@
         {/if}
       </div>
     {/if}
+    
+    {#if hasNavigation && currentPage === 6}
+      <!-- Page 6: System Performance Analysis -->
+      <div class="system-performance-analysis-page h-full flex-1 w-full px-6 py-8">
+        {#await import('$lib/components/SystemPerformanceAnalysis.svelte')}
+          <div class="flex items-center justify-center min-h-96">
+            <div class="text-center">
+              <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
+              <p class="text-oxford-blue">Loading System Performance Analysis...</p>
+            </div>
+          </div>
+        {:then PerformanceModule}
+          <svelte:component this={PerformanceModule.default} {projectId} />
+        {:catch error}
+          <div class="flex items-center justify-center min-h-96">
+            <div class="text-center">
+              <div class="w-16 h-16 bg-red-100 text-red-600 rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
+                <i class="fas fa-exclamation-triangle text-2xl"></i>
+              </div>
+              <h3 class="text-xl font-bold text-gray-900 mb-2">Loading Error</h3>
+              <p class="text-gray-600">Failed to load System Performance Analysis component.</p>
+              <button
+                class="mt-4 px-4 py-2 bg-oxford-blue text-white rounded-lg hover:bg-blue-700 transition-colors"
+                on:click={() => window.location.reload()}
+              >
+                <i class="fas fa-refresh mr-2"></i>
+                Reload Page
+              </button>
+            </div>
+          </div>
+        {/await}
+      </div>
+    {/if}
       </div>
     </div>
   </div>

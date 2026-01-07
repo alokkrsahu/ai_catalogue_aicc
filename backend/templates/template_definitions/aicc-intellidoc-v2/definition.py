@@ -66,7 +66,7 @@ Navigate through different pages to access various features and capabilities.'''
             'icon_class': 'fa-sitemap',
             'color_theme': 'oxford-blue',
             'has_navigation': True,
-            'total_pages': 5,
+            'total_pages': 6,
             'navigation_pages': [
                 {
                     'page_number': 1,
@@ -102,6 +102,13 @@ Navigate through different pages to access various features and capabilities.'''
                     'short_name': 'Activity',
                     'icon': 'fa-chart-line',
                     'features': ['deployment_activity', 'session_tracking', 'analytics']
+                },
+                {
+                    'page_number': 6,
+                    'name': 'System Performance Analysis',
+                    'short_name': 'Performance',
+                    'icon': 'fa-chart-bar',
+                    'features': ['experiment_metrics', 'performance_analysis', 'system_evaluation']
                 }
             ],
             'processing_capabilities': {

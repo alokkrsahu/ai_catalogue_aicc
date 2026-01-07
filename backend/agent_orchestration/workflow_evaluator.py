@@ -9,6 +9,8 @@ import logging
 import csv
 import io
 import time
+import asyncio
+import os
 from typing import Dict, List, Any, Optional
 from django.utils import timezone
 from asgiref.sync import sync_to_async
@@ -76,24 +78,48 @@ class WorkflowEvaluator:
                 executed_by=executed_by
             )
         
-        # Process each row sequentially
-        for row_index, row_data in enumerate(csv_data, start=1):
-            try:
-                await self._process_evaluation_row(
+        # Auto-detect concurrency limit
+        cpu_count = os.cpu_count() or 4  # Default to 4 if cpu_count() returns None
+        concurrency_limit = min(total_rows, cpu_count * 2, 10)
+        logger.info(f"🔀 EVALUATOR: Processing {total_rows} rows with concurrency limit: {concurrency_limit}")
+        
+        # Create semaphore for concurrency control
+        semaphore = asyncio.Semaphore(concurrency_limit)
+        
+        # Wrapper function to process row with semaphore control
+        async def process_row_with_semaphore(row_index: int, row_data: Dict[str, str]):
+            """Process a single row with semaphore-based concurrency control"""
+            async with semaphore:
+                return await self._process_evaluation_row(
                     evaluation,
                     workflow,
                     row_index,
                     row_data,
                     executed_by
                 )
-                
-                # Update evaluation progress
-                evaluation.completed_rows += 1
-                await sync_to_async(evaluation.save)(update_fields=['completed_rows'])
-                
-            except Exception as e:
-                logger.error(f"❌ EVALUATOR: Failed to process row {row_index}: {e}")
-                evaluation.failed_rows += 1
+        
+        # Create tasks for all rows
+        logger.info(f"🚀 EVALUATOR: Starting parallel execution of {total_rows} rows")
+        tasks = [
+            process_row_with_semaphore(row_index, row_data)
+            for row_index, row_data in enumerate(csv_data, start=1)
+        ]
+        
+        # Execute all rows in parallel with error handling
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Process results and update evaluation progress in batch
+        completed_count = 0
+        failed_count = 0
+        
+        for i, result in enumerate(results):
+            row_index = i + 1
+            row_data = csv_data[i]
+            
+            if isinstance(result, Exception):
+                # Handle failed row
+                logger.error(f"❌ EVALUATOR: Failed to process row {row_index}: {result}")
+                failed_count += 1
                 
                 # Create failed result record
                 await sync_to_async(WorkflowEvaluationResult.objects.create)(
@@ -102,16 +128,19 @@ class WorkflowEvaluator:
                     input_text=row_data.get('input', ''),
                     expected_output=row_data.get('expected_output', ''),
                     status=EvaluationResultStatus.FAILED,
-                    error_message=str(e)
+                    error_message=str(result)
                 )
-                
-                await sync_to_async(evaluation.save)(update_fields=['failed_rows'])
+            else:
+                # Success - result is already saved in _process_evaluation_row
+                completed_count += 1
         
-        # Mark evaluation as completed
+        # Batch update evaluation progress
+        evaluation.completed_rows = completed_count
+        evaluation.failed_rows = failed_count
         evaluation.status = EvaluationStatus.COMPLETED
-        await sync_to_async(evaluation.save)(update_fields=['status'])
+        await sync_to_async(evaluation.save)(update_fields=['completed_rows', 'failed_rows', 'status'])
         
-        logger.info(f"✅ EVALUATOR: Evaluation completed - {evaluation.completed_rows} successful, {evaluation.failed_rows} failed")
+        logger.info(f"✅ EVALUATOR: Parallel execution completed - {completed_count} successful, {failed_count} failed")
         
         return evaluation
     
@@ -144,24 +173,64 @@ class WorkflowEvaluator:
             if not rows:
                 raise ValueError("CSV file is empty")
             
-            # Validate required columns
-            required_columns = {'input', 'expected_output'}
-            if not required_columns.issubset(set(rows[0].keys())):
-                missing = required_columns - set(rows[0].keys())
-                raise ValueError(f"CSV missing required columns: {', '.join(missing)}")
+            # Get available column names (case-insensitive)
+            available_columns = {key.lower().strip(): key for key in rows[0].keys()}
+            logger.info(f"📊 EVALUATOR: Found CSV columns: {list(rows[0].keys())}")
             
-            # Normalize column names (handle case-insensitive matching)
+            # Normalize column names (handle case-insensitive matching and common alternatives)
+            # Common input column names: input, question, query, prompt, text, user_input
+            # Common output column names: expected_output, expected output, output, answer, response, expected
+            input_column_map = {
+                'input', 'question', 'query', 'prompt', 'text', 'user_input', 
+                'user input', 'user_query', 'user query', 'input_text', 'input text'
+            }
+            output_column_map = {
+                'expected_output', 'expected output', 'output', 'answer', 'response', 
+                'expected', 'expected_answer', 'expected answer', 'ground_truth', 
+                'ground truth', 'target', 'target_output', 'target output'
+            }
+            
+            # Find input column
+            input_column = None
+            for col_key in input_column_map:
+                if col_key in available_columns:
+                    input_column = available_columns[col_key]
+                    logger.info(f"📊 EVALUATOR: Mapped '{input_column}' -> 'input'")
+                    break
+            
+            # Find output column
+            output_column = None
+            for col_key in output_column_map:
+                if col_key in available_columns:
+                    output_column = available_columns[col_key]
+                    logger.info(f"📊 EVALUATOR: Mapped '{output_column}' -> 'expected_output'")
+                    break
+            
+            # Validate that we found both required columns
+            missing = []
+            if not input_column:
+                missing.append('input (or: question, query, prompt, text)')
+            if not output_column:
+                missing.append('expected_output (or: answer, response, output)')
+            
+            if missing:
+                found_columns = list(rows[0].keys())
+                raise ValueError(
+                    f"CSV missing required columns: {', '.join(missing)}. "
+                    f"Found columns: {', '.join(found_columns)}"
+                )
+            
+            # Normalize rows to use standard column names
             normalized_rows = []
             for row in rows:
-                normalized_row = {}
+                normalized_row = {
+                    'input': row[input_column].strip() if row.get(input_column) else '',
+                    'expected_output': row[output_column].strip() if row.get(output_column) else ''
+                }
+                # Include any additional columns as-is
                 for key, value in row.items():
-                    key_lower = key.lower().strip()
-                    if key_lower == 'input':
-                        normalized_row['input'] = value.strip()
-                    elif key_lower in ['expected_output', 'expected output', 'output']:
-                        normalized_row['expected_output'] = value.strip()
-                    else:
-                        normalized_row[key] = value.strip()
+                    if key not in [input_column, output_column]:
+                        normalized_row[key] = value.strip() if value else ''
                 normalized_rows.append(normalized_row)
             
             logger.info(f"📊 EVALUATOR: Parsed {len(normalized_rows)} rows from CSV")
@@ -188,6 +257,9 @@ class WorkflowEvaluator:
             row_number: Row number in CSV
             row_data: Dictionary with 'input' and 'expected_output'
             executed_by: User who initiated evaluation
+            
+        Returns:
+            None on success, raises Exception on failure (caught by asyncio.gather with return_exceptions=True)
         """
         input_text = row_data.get('input', '')
         expected_output = row_data.get('expected_output', '')
@@ -196,55 +268,55 @@ class WorkflowEvaluator:
         
         start_time = time.time()
         
-        try:
-            # Execute workflow with input substitution
-            execution_result = await self.execute_workflow_with_input(
-                workflow,
-                input_text,
-                executed_by
-            )
-            
-            execution_time = time.time() - start_time
-            
-            # Extract End node input messages
-            workflow_output = self.extract_end_node_inputs(
-                execution_result,
-                workflow.graph_json
-            )
-            
-            # Calculate metrics
-            metrics = self.calculate_metrics(workflow_output, expected_output)
-            
-            # Create evaluation result
-            await sync_to_async(WorkflowEvaluationResult.objects.create)(
-                evaluation=evaluation,
-                row_number=row_number,
-                input_text=input_text,
-                expected_output=expected_output,
-                workflow_output=workflow_output,
-                execution_id=execution_result.get('execution_id', ''),
-                rouge_1_score=metrics['rouge_1'],
-                rouge_2_score=metrics['rouge_2'],
-                rouge_l_score=metrics['rouge_l'],
-                bleu_score=metrics['bleu'],
-                bert_score=metrics['bert_score'],
-                semantic_similarity=metrics['semantic_similarity'],
-                average_score=metrics['average_score'],
-                status=EvaluationResultStatus.SUCCESS,
-                execution_time_seconds=execution_time
-            )
-            
-            logger.info(f"✅ EVALUATOR: Row {row_number} processed successfully - avg score: {metrics['average_score']:.3f}")
-            
-        except Exception as e:
-            logger.error(f"❌ EVALUATOR: Row {row_number} processing failed: {e}")
-            raise
+        # Execute workflow with input substitution, passing evaluation_id
+        evaluation_id_str = str(evaluation.evaluation_id) if evaluation.evaluation_id else ''
+        execution_result = await self.execute_workflow_with_input(
+            workflow,
+            input_text,
+            executed_by,
+            evaluation_id=evaluation_id_str
+        )
+        
+        execution_time = time.time() - start_time
+        
+        # Extract End node input messages
+        workflow_output = self.extract_end_node_inputs(
+            execution_result,
+            workflow.graph_json
+        )
+        
+        # Calculate metrics
+        metrics = self.calculate_metrics(workflow_output, expected_output)
+        
+        # Create evaluation result
+        await sync_to_async(WorkflowEvaluationResult.objects.create)(
+            evaluation=evaluation,
+            row_number=row_number,
+            input_text=input_text,
+            expected_output=expected_output,
+            workflow_output=workflow_output,
+            execution_id=execution_result.get('execution_id', ''),
+            rouge_1_score=metrics['rouge_1'],
+            rouge_2_score=metrics['rouge_2'],
+            rouge_l_score=metrics['rouge_l'],
+            bleu_score=metrics['bleu'],
+            bert_score=metrics['bert_score'],
+            semantic_similarity=metrics['semantic_similarity'],
+            average_score=metrics['average_score'],
+            status=EvaluationResultStatus.SUCCESS,
+            execution_time_seconds=execution_time
+        )
+        
+        logger.info(f"✅ EVALUATOR: Row {row_number} processed successfully - avg score: {metrics['average_score']:.3f}")
+        
+        # Return None on success - exceptions will be caught by asyncio.gather
     
     async def execute_workflow_with_input(
         self,
         workflow: AgentWorkflow,
         input_text: str,
-        executed_by
+        executed_by,
+        evaluation_id: str = ''
     ) -> Dict[str, Any]:
         """
         Execute workflow with custom input (substitutes Start node prompt)
@@ -253,6 +325,7 @@ class WorkflowEvaluator:
             workflow: AgentWorkflow instance
             input_text: Input text to use as Start node prompt
             executed_by: User executing the workflow
+            evaluation_id: Optional evaluation ID to link metrics to evaluation
             
         Returns:
             Execution result dictionary
@@ -283,8 +356,16 @@ class WorkflowEvaluator:
         workflow.graph_json = graph_json
         
         try:
-            # Execute workflow with modified graph
-            execution_result = await self.workflow_executor.execute_workflow(workflow, executed_by)
+            # Execute workflow with modified graph, passing evaluation_id via deployment_context
+            evaluation_context = {
+                'evaluation_id': evaluation_id
+            } if evaluation_id else None
+            
+            execution_result = await self.workflow_executor.execute_workflow(
+                workflow, 
+                executed_by,
+                deployment_context=evaluation_context
+            )
             
             return execution_result
             

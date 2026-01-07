@@ -354,6 +354,308 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                 'template_id': template_id
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
+    @action(detail=True, methods=['get'], url_path='experiment-metrics')
+    def experiment_metrics(self, request, project_id=None):
+        """Get experiment metrics for System Performance Analysis"""
+        from users.models import WorkflowEvaluation, WorkflowEvaluationResult, ExperimentMetric
+        from django.db.models import Avg, Count, Q, Sum, Min, Max
+        
+        project = self.get_object()
+        
+        try:
+            # Read metrics from database
+            try:
+                experiment_metrics = ExperimentMetric.objects.filter(project=project).order_by('-created_at')
+                logger.info(f"📊 PERFORMANCE: Found {experiment_metrics.count()} experiment metrics for project {project.project_id}")
+            except Exception as e:
+                logger.error(f"❌ PERFORMANCE: Failed to query ExperimentMetric table: {e}", exc_info=True)
+                # Table might not exist if migration hasn't run
+                return Response({
+                    'error': 'ExperimentMetric table not found. Please run migrations: python manage.py migrate',
+                    'metrics_count': 0
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+            result_data = {}
+            configurations = {}
+            
+            # Optionally filter by evaluation_id if provided in query params
+            evaluation_id_filter = request.query_params.get('evaluation_id', None)
+            if evaluation_id_filter:
+                experiment_metrics = experiment_metrics.filter(evaluation_id=evaluation_id_filter)
+                logger.info(f"📊 PERFORMANCE: Filtering all metrics by evaluation_id={evaluation_id_filter}")
+            
+            # Count deployment vs evaluation metrics
+            deployment_metrics_count = experiment_metrics.filter(
+                experiment_type='workflow_execution',
+                configuration__is_deployment=True
+            ).count()
+            evaluation_metrics_count = experiment_metrics.filter(
+                experiment_type='workflow_execution'
+            ).exclude(evaluation_id__isnull=True).exclude(evaluation_id='').count()
+            logger.info(f"📊 PERFORMANCE: Found {deployment_metrics_count} deployment metrics, {evaluation_metrics_count} evaluation metrics")
+            
+            # 1. Intelligent Delegation Accuracy
+            delegation_metrics = experiment_metrics.filter(experiment_type='intelligent_delegation')
+            if delegation_metrics.exists():
+                # Aggregate metrics
+                total_subqueries = sum(m.metric_data.get('total_subqueries', 0) for m in delegation_metrics)
+                successful = sum(m.metric_data.get('successful_delegations', 0) for m in delegation_metrics)
+                broadcast = sum(m.metric_data.get('broadcast_subqueries', 0) for m in delegation_metrics)
+                
+                # Get configuration from most recent metric
+                latest_config = delegation_metrics.first().configuration
+                configurations['intelligent_delegation'] = latest_config
+                
+                result_data['intelligent_delegation'] = {
+                    'routing_accuracy': (successful / total_subqueries * 100) if total_subqueries > 0 else 0,
+                    'broadcast_rate': (broadcast / total_subqueries * 100) if total_subqueries > 0 else 0,
+                    'configuration': latest_config
+                }
+            else:
+                # No delegation metrics found
+                result_data['intelligent_delegation'] = {
+                    'routing_accuracy': None,
+                    'broadcast_rate': None,
+                    'configuration': {},
+                    'message': 'Requires workflow with Group Chat Manager using intelligent delegation mode'
+                }
+            
+            # 2. Delegation Processing Overhead
+            if delegation_metrics.exists():
+                query_splitting_times = []
+                matching_times = []
+                for m in delegation_metrics:
+                    metric_data = m.metric_data
+                    if metric_data.get('query_splitting_time_s'):
+                        query_splitting_times.append(metric_data.get('query_splitting_time_s', 0) * 1000)
+                    if metric_data.get('matching_time_s'):
+                        matching_times.append(metric_data.get('matching_time_s', 0) * 1000)
+                
+                result_data['delegation_overhead'] = {
+                    'query_analysis_time_ms': sum(query_splitting_times) / len(query_splitting_times) if query_splitting_times else None,
+                    'matching_time_ms': sum(matching_times) / len(matching_times) if matching_times else None,
+                    'message': None
+                }
+            else:
+                # No delegation metrics found
+                result_data['delegation_overhead'] = {
+                    'query_analysis_time_ms': None,
+                    'matching_time_ms': None,
+                    'message': 'Requires workflow with Group Chat Manager using intelligent delegation mode'
+                }
+            
+            # 3. Sequential vs Parallel Execution
+            workflow_metrics = experiment_metrics.filter(experiment_type='workflow_execution')
+            
+            # Log deployment vs evaluation breakdown
+            if workflow_metrics.exists():
+                deployment_workflow_metrics = workflow_metrics.filter(configuration__is_deployment=True)
+                evaluation_workflow_metrics = workflow_metrics.exclude(evaluation_id__isnull=True).exclude(evaluation_id='')
+                logger.info(f"📊 PERFORMANCE: Sequential/Parallel analysis - {deployment_workflow_metrics.count()} deployment, {evaluation_workflow_metrics.count()} evaluation metrics")
+            
+            if workflow_metrics.exists():
+                sequential = [m for m in workflow_metrics if m.metric_data.get('parallel_batches', 0) == 0]
+                parallel = [m for m in workflow_metrics if m.metric_data.get('parallel_batches', 0) > 0]
+                
+                if sequential and parallel:
+                    avg_sequential = sum(m.metric_data.get('duration_s', 0) for m in sequential) / len(sequential)
+                    avg_parallel = sum(m.metric_data.get('duration_s', 0) for m in parallel) / len(parallel)
+                    
+                    # Get configuration from most recent metric
+                    latest_config = workflow_metrics.first().configuration
+                    configurations['sequential_vs_parallel'] = latest_config
+                    
+                    result_data['sequential_vs_parallel'] = {
+                        'sequential_time_s': avg_sequential,
+                        'parallel_time_s': avg_parallel,
+                        'speedup_factor': avg_sequential / avg_parallel if avg_parallel > 0 else None
+                    }
+                elif sequential:
+                    # Only sequential executions available
+                    avg_sequential = sum(m.metric_data.get('duration_s', 0) for m in sequential) / len(sequential)
+                    latest_config = workflow_metrics.first().configuration
+                    configurations['sequential_vs_parallel'] = latest_config
+                    
+                    result_data['sequential_vs_parallel'] = {
+                        'sequential_time_s': avg_sequential,
+                        'parallel_time_s': None,
+                        'speedup_factor': None
+                    }
+                elif parallel:
+                    # Only parallel executions available
+                    avg_parallel = sum(m.metric_data.get('duration_s', 0) for m in parallel) / len(parallel)
+                    latest_config = workflow_metrics.first().configuration
+                    configurations['sequential_vs_parallel'] = latest_config
+                    
+                    result_data['sequential_vs_parallel'] = {
+                        'sequential_time_s': None,
+                        'parallel_time_s': avg_parallel,
+                        'speedup_factor': None
+                    }
+            
+            # 4. DocAware Impact - Check workflow configuration for RAG status
+            # Filter metrics by evaluation_id if available to get evaluation-specific metrics
+            docaware_metrics = experiment_metrics.filter(experiment_type__in=['docaware_single', 'docaware_context'])
+            
+            # Optionally filter by evaluation_id if provided in query params
+            evaluation_id_filter = request.query_params.get('evaluation_id', None)
+            if evaluation_id_filter:
+                docaware_metrics = docaware_metrics.filter(evaluation_id=evaluation_id_filter)
+                logger.info(f"📊 PERFORMANCE: Filtering DocAware metrics by evaluation_id={evaluation_id_filter}")
+            
+            if docaware_metrics.exists():
+                # Get evaluations and check their workflow configurations for RAG
+                evaluations = WorkflowEvaluation.objects.filter(workflow__project=project).order_by('-created_at')
+                
+                # If evaluation_id filter is provided, only use that evaluation
+                if evaluation_id_filter:
+                    try:
+                        target_eval = evaluations.get(evaluation_id=evaluation_id_filter)
+                        evaluations = [target_eval]
+                    except WorkflowEvaluation.DoesNotExist:
+                        logger.warning(f"⚠️ PERFORMANCE: Evaluation {evaluation_id_filter} not found")
+                        evaluations = []
+                
+                with_rag_eval = None
+                without_rag_eval = None
+                
+                for eval_obj in evaluations:
+                    workflow = eval_obj.workflow
+                    # Check if workflow has RAG enabled
+                    nodes = workflow.graph_json.get('nodes', [])
+                    has_rag = any(
+                        node.get('data', {}).get('doc_aware', False)
+                        for node in nodes
+                        if node.get('type') == 'AssistantAgent'
+                    )
+                    
+                    if has_rag and with_rag_eval is None:
+                        with_rag_eval = eval_obj
+                    elif not has_rag and without_rag_eval is None:
+                        without_rag_eval = eval_obj
+                    
+                    if with_rag_eval and without_rag_eval:
+                        break
+                
+                # Initialize retrieval_times before the if/else block
+                retrieval_times = []
+                
+                if with_rag_eval and without_rag_eval:
+                    with_rag_results = WorkflowEvaluationResult.objects.filter(evaluation=with_rag_eval)
+                    without_rag_results = WorkflowEvaluationResult.objects.filter(evaluation=without_rag_eval)
+                    
+                    avg_bert_with = with_rag_results.aggregate(avg=Avg('bert_score'))['avg'] or 0
+                    avg_bert_without = without_rag_results.aggregate(avg=Avg('bert_score'))['avg'] or 0
+                    
+                    # Filter DocAware metrics by evaluation_id if we have specific evaluations
+                    if with_rag_eval:
+                        # Get metrics linked to with_rag_eval
+                        with_rag_metrics = docaware_metrics.filter(evaluation_id=str(with_rag_eval.evaluation_id))
+                        retrieval_times.extend([
+                            m.metric_data.get('search_duration_ms', 0) 
+                            for m in with_rag_metrics 
+                            if m.metric_data.get('search_duration_ms')
+                        ])
+                    if without_rag_eval:
+                        # Get metrics linked to without_rag_eval
+                        without_rag_metrics = docaware_metrics.filter(evaluation_id=str(without_rag_eval.evaluation_id))
+                        retrieval_times.extend([
+                            m.metric_data.get('search_duration_ms', 0) 
+                            for m in without_rag_metrics 
+                            if m.metric_data.get('search_duration_ms')
+                        ])
+                    
+                    # Get configuration from most recent metric
+                    latest_config = docaware_metrics.first().configuration
+                    configurations['docaware_impact'] = latest_config
+                    
+                    result_data['docaware_impact'] = {
+                        'bertscore_delta': avg_bert_with - avg_bert_without,
+                        'retrieval_overhead_ms': sum(retrieval_times) / len(retrieval_times) if retrieval_times else None,
+                        'configuration': latest_config
+                    }
+                else:
+                    # No comparison data available - need both with and without RAG evaluations
+                    # Collect retrieval times from all docaware metrics if available
+                    retrieval_times = [
+                        m.metric_data.get('search_duration_ms', 0) 
+                        for m in docaware_metrics 
+                        if m.metric_data.get('search_duration_ms')
+                    ]
+                    
+                    latest_config = docaware_metrics.first().configuration if docaware_metrics.exists() else {}
+                    configurations['docaware_impact'] = latest_config
+                    result_data['docaware_impact'] = {
+                        'bertscore_delta': None,
+                        'retrieval_overhead_ms': sum(retrieval_times) / len(retrieval_times) if retrieval_times else None,
+                        'configuration': latest_config,
+                        'message': 'Requires two evaluations: one with RAG enabled and one without'
+                    }
+            
+            # 5. Per-Agent vs Workflow-Level RAG (placeholder - requires domain analysis)
+            result_data['per_agent_vs_workflow_rag'] = {
+                'response_relevance': None,
+                'cross_contamination_rate': None
+            }
+            configurations['per_agent_vs_workflow_rag'] = {}
+            
+            # 6. Concurrent Load (placeholder - requires load testing)
+            result_data['concurrent_load'] = {
+                'p95_latency_s': None,
+                'throughput_req_min': None
+            }
+            configurations['concurrent_load'] = {}
+            
+            # 7. Agent Statistics - Per-agent performance metrics
+            from users.models import WorkflowExecutionMessage, WorkflowExecution
+            
+            # Get all workflow executions for this project
+            project_workflows = AgentWorkflow.objects.filter(project=project)
+            project_executions = WorkflowExecution.objects.filter(workflow__in=project_workflows)
+            
+            # Aggregate agent statistics from WorkflowExecutionMessage
+            agent_stats_query = WorkflowExecutionMessage.objects.filter(
+                execution__in=project_executions
+            ).exclude(
+                agent_name__in=['Start', 'End']  # Exclude workflow control nodes
+            ).values('agent_name', 'agent_type').annotate(
+                total_executions=Count('execution', distinct=True),
+                total_messages=Count('id'),
+                avg_response_time_ms=Avg('response_time_ms'),
+                total_tokens=Sum('token_count'),
+                min_response_time_ms=Min('response_time_ms'),
+                max_response_time_ms=Max('response_time_ms')
+            ).order_by('-total_messages')
+            
+            agent_statistics = []
+            for agent_stat in agent_stats_query:
+                agent_statistics.append({
+                    'agent_name': agent_stat['agent_name'],
+                    'agent_type': agent_stat['agent_type'],
+                    'total_executions': agent_stat['total_executions'],
+                    'total_messages': agent_stat['total_messages'],
+                    'avg_response_time_ms': round(agent_stat['avg_response_time_ms'] or 0, 2),
+                    'total_tokens': agent_stat['total_tokens'] or 0,
+                    'min_response_time_ms': agent_stat['min_response_time_ms'] or 0,
+                    'max_response_time_ms': agent_stat['max_response_time_ms'] or 0,
+                })
+            
+            result_data['agent_statistics'] = agent_statistics
+            logger.info(f"📊 PERFORMANCE: Found {len(agent_statistics)} agents with statistics")
+            
+            # Add configurations to response
+            result_data['configurations'] = configurations
+            
+            return Response(result_data, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Failed to retrieve experiment metrics: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return Response({
+                'error': f'Failed to retrieve experiment metrics: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
     @action(detail=True, methods=['get'])
     def documents(self, request, project_id=None):
         """Get project documents"""

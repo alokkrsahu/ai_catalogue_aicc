@@ -6,6 +6,8 @@ Handles DocAware integration and context management for conversation orchestrati
 """
 
 import logging
+import time
+import json
 from typing import Dict, List, Any, Optional
 from asgiref.sync import sync_to_async
 
@@ -79,7 +81,9 @@ class DocAwareHandler:
                     content_filters=content_filters
                 )
 
+            search_start = time.time()
             search_results = await sync_to_async(perform_search)()
+            search_duration_ms = (time.time() - search_start) * 1000.0
             
             if not search_results:
                 logger.info(f"📚 DOCAWARE: No relevant documents found for single agent query")
@@ -112,6 +116,64 @@ class DocAwareHandler:
             
             result_text = "\n".join(context_parts)
             logger.info(f"📚 DOCAWARE: Generated context from {len(search_results)} results ({len(result_text)} chars)")
+
+            # Structured experiment log for DocAware impact / retrieval overhead
+            try:
+                agent_name = agent_data.get('name') or agent_node.get('data', {}).get('name', 'UnknownAgent')
+                domain_counts: Dict[str, int] = {}
+                for r in search_results:
+                    meta = r.get('metadata', {}) or {}
+                    # Try common domain/category fields
+                    domain = meta.get('category') or meta.get('domain') or meta.get('document_type') or 'unknown'
+                    domain_counts[domain] = domain_counts.get(domain, 0) + 1
+
+                # Extract configuration
+                configuration = {
+                    "agent_name": agent_name,
+                    "search_method": search_method,
+                    "has_content_filters": bool(content_filters),
+                }
+
+                exp_payload = {
+                    "experiment": "docaware_single_agent",
+                    "project_id": project_id,
+                    "agent_name": agent_name,
+                    "search_method": search_method,
+                    "query_length": len(search_query or ""),
+                    "results_count": len(search_results),
+                    "search_duration_ms": search_duration_ms,
+                    "content_filters": content_filters,
+                    "domain_counts": domain_counts,
+                }
+                logger.info(f"EXP_METRIC_DOCAWARE_SINGLE | {json.dumps(exp_payload, default=str)}")
+                
+                # Store in database
+                if project_id:
+                    try:
+                        from users.models import IntelliDocProject, ExperimentMetric
+                        # Note: sync_to_async is already imported at module level
+                        
+                        def save_metric():
+                            try:
+                                project_obj = IntelliDocProject.objects.get(project_id=project_id)
+                                ExperimentMetric.objects.create(
+                                    project=project_obj,
+                                    experiment_type='docaware_single',
+                                    metric_data=exp_payload,
+                                    configuration=configuration,
+                                )
+                                logger.info(f"✅ Stored DocAware experiment metric for project {project_id}")
+                            except IntelliDocProject.DoesNotExist:
+                                logger.warning(f"⚠️ Could not save experiment metric: Project {project_id} not found")
+                            except Exception as e:
+                                logger.error(f"❌ Failed to save experiment metric to database: {e}", exc_info=True)
+                        
+                        # Use sync_to_async for database write (imported at module level)
+                        await sync_to_async(save_metric)()
+                    except Exception as db_error:
+                        logger.warning(f"⚠️ Failed to store experiment metric in database: {db_error}", exc_info=True)
+            except Exception as metric_error:
+                logger.error(f"❌ EXP_METRIC_DOCAWARE_SINGLE: Failed to log metrics: {metric_error}")
             
             return result_text
             
@@ -149,6 +211,7 @@ class DocAwareHandler:
             content_filters = agent_data.get('content_filters', [])
 
             # Perform document search
+            search_start = time.time()
             search_results = docaware_service.search_documents(
                 query=query,
                 search_method=SearchMethod(search_method),
@@ -156,6 +219,7 @@ class DocAwareHandler:
                 conversation_context=conversation_context,
                 content_filters=content_filters
             )
+            search_duration_ms = (time.time() - search_start) * 1000.0
             
             if not search_results:
                 logger.info(f"📚 DOCAWARE: No relevant documents found for query: {query[:50]}...")
@@ -178,6 +242,62 @@ class DocAwareHandler:
             
             result_text = "\n".join(context_parts)
             logger.info(f"📚 DOCAWARE: Generated context with {len(search_results)} results ({len(result_text)} chars)")
+
+            # Structured experiment log for DocAware impact (generic path)
+            try:
+                agent_name = agent_data.get('name') or agent_node.get('data', {}).get('name', 'UnknownAgent')
+                domain_counts: Dict[str, int] = {}
+                for r in search_results:
+                    meta = r.get('metadata', {}) or {}
+                    domain = meta.get('category') or meta.get('domain') or meta.get('document_type') or 'unknown'
+                    domain_counts[domain] = domain_counts.get(domain, 0) + 1
+
+                # Extract configuration
+                configuration = {
+                    "agent_name": agent_name,
+                    "search_method": search_method,
+                    "has_content_filters": bool(content_filters),
+                }
+                
+                exp_payload = {
+                    "experiment": "docaware_contextual",
+                    "project_id": project_id,
+                    "agent_name": agent_name,
+                    "search_method": search_method,
+                    "query_length": len(query or ""),
+                    "results_count": len(search_results),
+                    "search_duration_ms": search_duration_ms,
+                    "content_filters": content_filters,
+                    "domain_counts": domain_counts,
+                }
+                logger.info(f"EXP_METRIC_DOCAWARE_CONTEXT | {json.dumps(exp_payload, default=str)}")
+                
+                # Store in database (sync method, so use direct DB call - no await needed)
+                if project_id:
+                    try:
+                        from users.models import IntelliDocProject, ExperimentMetric
+                        
+                        try:
+                            project_obj = IntelliDocProject.objects.get(project_id=project_id)
+                            metric = ExperimentMetric.objects.create(
+                                project=project_obj,
+                                experiment_type='docaware_context',
+                                metric_data=exp_payload,
+                                configuration=configuration,
+                            )
+                            logger.info(f"✅ Stored DocAware context experiment metric: id={metric.id}, project={project_id}")
+                        except IntelliDocProject.DoesNotExist:
+                            logger.warning(f"⚠️ Could not save experiment metric: Project {project_id} not found")
+                        except Exception as e:
+                            logger.error(f"❌ Failed to save experiment metric to database: {e}", exc_info=True)
+                            import traceback
+                            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+                    except Exception as db_error:
+                        logger.error(f"❌ Failed to store experiment metric in database: {db_error}", exc_info=True)
+                        import traceback
+                        logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+            except Exception as metric_error:
+                logger.error(f"❌ EXP_METRIC_DOCAWARE_CONTEXT: Failed to log metrics: {metric_error}")
             
             return result_text
             
@@ -214,13 +334,19 @@ class DocAwareHandler:
             line = line.strip()
             if not line:
                 continue
-            
+
             # Check if this is a user message
             # Patterns: "User:", "user:", or lines that don't start with assistant/agent names
             line_lower = line.lower()
-            
-            # Skip assistant/agent responses
-            if any(skip in line_lower for skip in ['assistant:', 'ai assistant', 'start node:', 'end node:']):
+
+            # SPECIAL CASE: "Start Node:" contains the user's initial query
+            if line_lower.startswith('start node:'):
+                user_query = line.split(':', 1)[1].strip() if ':' in line else line
+                logger.info(f"📚 DOCAWARE QUERY EXTRACTION: Found query from Start Node: '{user_query[:100]}...'")
+                break
+
+            # Skip assistant/agent responses (but NOT Start Node which we handled above)
+            if any(skip in line_lower for skip in ['assistant:', 'ai assistant', 'end node:']):
                 continue
             
             # Check for explicit "User:" prefix
@@ -408,7 +534,7 @@ class DocAwareHandler:
         try:
             # Get project for API key retrieval
             from users.models import IntelliDocProject
-            from asgiref.sync import sync_to_async
+            # Note: sync_to_async is already imported at module level
             
             project = await sync_to_async(IntelliDocProject.objects.get)(project_id=project_id)
             

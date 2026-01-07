@@ -82,14 +82,14 @@
 \maketitle
 
 \begin{abstract}
-Building production-ready document-intelligent chatbots from multi-agent workflows remains challenging due to fragmentation across existing tools: multi-agent frameworks provide coordination but lack per-agent document awareness; visual workflow builders offer accessibility but couple RAG configuration to entire workflows rather than individual agents; deployment requires custom infrastructure. We present \textbf{IntelliDoc}, an open-source framework that bridges visual workflow design to deployable chatbots with five key contributions: (1) \textbf{DocAware}, a per-agent RAG system enabling each agent to independently configure search methods and content filters for specialized document access; (2) \textbf{Dual-Mode Human-in-the-Loop}, distinguishing between administrator oversight and end-user interaction contexts; (3) \textbf{Intelligent Delegation}, an LLM-based query decomposition and capability-matching system for the Group Chat Manager that dynamically routes subqueries to specialized delegates; (4) \textbf{Workflow Evaluation Platform}, providing automated quality assessment using lexical and semantic metrics; and (5) \textbf{Workflow-to-Chatbot Deployment}, translating visual workflows into embeddable chatbots with origin management and rate limiting.
+Building production-ready document-intelligent chatbots from multi-agent workflows remains challenging due to fragmentation across existing tools: multi-agent frameworks provide coordination but lack per-agent document awareness; visual workflow builders offer accessibility but couple RAG configuration to entire workflows rather than individual agents; deployment requires custom infrastructure. We present \textbf{IntelliDoc\footnote{\url{https://github.com/submissionanonymous4-byte/intellidoc}}}, an open-source framework that bridges visual workflow design to deployable chatbots with five key contributions: (1) \textbf{DocAware}, a per-agent RAG system enabling each agent to independently configure search methods and content filters for specialised document access; (2) \textbf{Dual-Mode Human-in-the-Loop}, distinguishing between administrator oversight and end-user interaction contexts; (3) \textbf{Intelligent Delegation}, an LLM-based query decomposition and capability-matching system for the Group Chat Manager that dynamically routes subqueries to specialised delegates; (4) \textbf{Workflow Evaluation Platform}, providing automated quality assessment using lexical and semantic metrics; and (5) \textbf{Workflow-to-Chatbot Deployment}, translating visual workflows into embeddable chatbots with origin management and rate limiting.
 \end{abstract}
 
 \section{Introduction}
 
-Large language models have enabled multi-agent systems where specialized agents collaborate on complex tasks, yet translating these into production-ready, document-intelligent chatbots remains fragmented. A customer service workflow requiring a Legal Agent retrieving contracts, a Technical Agent accessing documentation, and administrator approval before customer delivery currently demands separate tools: a multi-agent framework, RAG system, custom human-in-the-loop code, and bespoke deployment infrastructure.
+Large language models have enabled multi-agent systems where specialised agents collaborate on complex tasks, yet translating these into production-ready, document-intelligent chatbots remains fragmented. A customer service workflow requiring a Legal Agent retrieving contracts, a Technical Agent accessing documentation, and administrator approval before customer delivery currently demands separate tools: a multi-agent framework, RAG system, custom human-in-the-loop code, and bespoke deployment infrastructure.
 
-This fragmentation creates three gaps: (1) visual workflow tools configure RAG at the \textit{workflow level}, preventing agent specialization where Legal and Technical agents search different folders; (2) human-in-the-loop implementations lack distinction between administrator oversight and end-user chatbot interaction; (3) translating visual designs into production chatbots requires custom pipelines most frameworks omit.
+This fragmentation creates three gaps: (1) visual workflow tools configure RAG at the \textit{workflow level}, preventing agent specialisation where Legal and Technical agents search different folders; (2) human-in-the-loop implementations lack distinction between administrator oversight and end-user chatbot interaction; (3) translating visual designs into production chatbots requires custom pipelines most frameworks omit.
 
 \textbf{IntelliDoc} addresses these gaps with five contributions:
 
@@ -109,7 +109,7 @@ This fragmentation creates three gaps: (1) visual workflow tools configure RAG a
 \label{sec:related}
 
 \paragraph{Multi-Agent Frameworks.}
-AutoGen \citep{wu2024autogen} provides configurable human-in-the-loop via \texttt{human\_input\_mode} settings, but RAG is confined to a single \texttt{RetrieveUserProxyAgent}---other agents cannot maintain independent retrieval configurations. LangGraph \citep{langgraph2024} offers stateful orchestration with \texttt{interrupt()} and checkpoint persistence, yet requires manual per-node retriever creation without declarative per-agent RAG schemas. CrewAI \citep{crewai2024} supports per-agent \texttt{knowledge\_sources} with independent embedders and hierarchical delegation via \texttt{Process.hierarchical}. MetaGPT \citep{hong2024metagpt} encodes SOPs into prompts with publish-subscribe task routing; its RAG module supports multiple backends but configures retrieval at the engine level rather than per-role. The OpenAI Agents SDK \citep{openaiagents2024} provides \texttt{FileSearchTool} with per-agent \texttt{vector\_store\_ids}, though search method and embedding model customization remain unavailable at the agent level.
+AutoGen \citep{wu2024autogen} provides configurable human-in-the-loop via \texttt{human\_input\_mode} settings, but RAG is confined to a single \texttt{RetrieveUserProxyAgent}---other agents cannot maintain independent retrieval configurations. LangGraph \citep{langgraph2024} offers stateful orchestration with \texttt{interrupt()} and checkpoint persistence, yet requires manual per-node retriever creation without declarative per-agent RAG schemas. CrewAI \citep{crewai2024} supports per-agent \texttt{knowledge\_sources} with independent embedders and hierarchical delegation via \texttt{Process.hierarchical}. MetaGPT \citep{hong2024metagpt} encodes SOPs into prompts with publish-subscribe task routing; its RAG module supports multiple backends but configures retrieval at the engine level rather than per-role. The OpenAI Agents SDK \citep{openaiagents2024} provides \texttt{FileSearchTool} with per-agent \texttt{vector\_store\_ids}, though search method and embedding model customisation remain unavailable at the agent level.
 
 \paragraph{RAG Systems.}
 LlamaIndex \citep{liu2022llamaindex} enables per-agent document access through \texttt{QueryEngineTool} binding with \texttt{SubQuestionQueryEngine} for automatic query decomposition. Haystack \citep{haystack2024} implements pipeline-based RAG with compound boolean metadata filtering and \texttt{ComponentTool} for agents-as-tools patterns. Both provide evaluation capabilities---LlamaIndex through LLM-based metrics and Haystack via \texttt{DeepEvalEvaluator} and \texttt{RagasEvaluator}---but neither offers native ROUGE, BLEU, or BERTScore computation.
@@ -166,14 +166,7 @@ The framework provides six agent types, each serving distinct roles in workflow 
 \section{DocAware: Per-Agent RAG Configuration}
 \label{sec:docaware}
 
-DocAware distinguishes IntelliDoc from workflow-level RAG approaches by enabling each agent to independently configure: (1) whether DocAware is enabled, (2) which search method to use, (3) search parameters, and (4) content filters specifying accessible folders and files. Figure~\ref{fig:docaware-config} illustrates the per-agent configuration interface.
-
-\begin{figure}[!t]
-    \centering
-    \includegraphics[width=\columnwidth]{Figure2_DocAware.png}
-    \caption{Per-agent DocAware configuration interface (Section~\ref{sec:docaware}) enabling independent search method selection and content filtering per agent.}
-    \label{fig:docaware-config}
-\end{figure}
+DocAware distinguishes IntelliDoc from workflow-level RAG approaches by enabling each agent to independently configure: (1) whether DocAware is enabled, (2) which search method to use, (3) search parameters, and (4) content filters specifying accessible folders and files (see Figure~\ref{fig:docaware-config} in Appendix~\ref{app:figures}).
 
 \subsection{Per-Agent Configuration Model}
 
@@ -191,14 +184,7 @@ DocAware integrates with Milvus to support six search strategies including seman
 \section{Dual-Mode Human-in-the-Loop}
 \label{sec:hitl}
 
-The UserProxyAgent implements human-in-the-loop functionality with two distinct modes addressing different deployment contexts. Figure~\ref{fig:hitl-modes} illustrates both Admin-in-the-Loop and User-in-the-Loop interfaces.
-
-\begin{figure}[!t]
-    \centering
-    \includegraphics[width=\columnwidth]{Figure3_DualInputMode.png}
-    \caption{Dual-mode Human-in-the-Loop interface (Section~\ref{sec:hitl}). Left: Admin-in-the-Loop mode with full workflow context. Right: User-in-the-Loop conversational interface.}
-    \label{fig:hitl-modes}
-\end{figure}
+The UserProxyAgent implements human-in-the-loop functionality with two distinct modes addressing different deployment contexts (see Figure~\ref{fig:hitl-modes} in Appendix~\ref{app:figures}).
 
 \subsection{Admin-in-the-Loop Mode}
 
@@ -284,17 +270,60 @@ The six-stage pipeline consists of: (1) \textit{Visual Design}—users create wo
 Each deployment maintains allowed origins (domains) that can embed the chatbot. The system validates \texttt{Origin} headers, rejecting requests from unlisted domains. Each origin has independent rate limit configuration enabling fine-grained usage control. CORS middleware handles cross-origin requests for browser security compliance. See Appendix~\ref{app:deployment-config} for configuration examples and Appendix~\ref{app:embed-code} for the HTML embed code structure.
 
 
+\section{Performance Evaluation}
+\label{sec:performance}
+
+We evaluate IntelliDoc's runtime performance focusing on the overhead introduced by per-agent DocAware retrieval. Experiments use a single AI Assistant agent with OpenAI GPT-3.5-turbo processing 9 question-answer pairs from a domain-specific dataset.
+
+\subsection{Experimental Setup}
+
+We compare execution time under two conditions: (1) \textit{Baseline} configuration without DocAware enabled, and (2) \textit{DocAware-enabled} configuration using hybrid search with content filters restricting retrieval to a single document. The workflow consists of three nodes (Start, AI Assistant, End) executing sequentially. All experiments run on the same infrastructure with Django 5.2 backend, Milvus 2.6.0 vector database, and all-MiniLM-L6-v2 embeddings (384 dimensions).
+
+\subsection{Execution Time Analysis}
+
+Table~\ref{tab:performance} presents execution time statistics across both configurations.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{Metric} & \textbf{Without DocAware} & \textbf{With DocAware} \\
+\midrule
+Average Time & 1.709s & 2.787s \\
+Min Time & 1.193s & 2.601s \\
+Max Time & 3.377s & 3.071s \\
+Test Cases & 9 & 9 \\
+\midrule
+\textbf{DocAware Overhead} & & \\
+Search Duration & - & $\sim$45ms \\
+Documents Retrieved & 0 & 1 per query \\
+Total Overhead & - & +1.078s (+63\%) \\
+\bottomrule
+\end{tabular}
+\caption{Execution time comparison for single-agent workflow with and without DocAware retrieval. DocAware introduces 63\% overhead, though actual vector search accounts for only 45ms; the remainder stems from LLM processing expanded prompts with document context.}
+\label{tab:performance}
+\end{table}
+
+The DocAware-enabled configuration exhibits a 1.078-second average overhead (63\% increase) compared to the baseline. However, the actual vector search operation contributes only approximately 45 milliseconds per query. The dominant overhead factor is LLM processing time for expanded prompts containing retrieved document context (averaging 648 characters). This demonstrates that while per-agent RAG retrieval introduces measurable latency, the vector search itself remains efficient, with the primary cost being downstream LLM inference on augmented context.
+
+
 \section{Limitations and Conclusion}
 \label{sec:conclusion}
 
 \textbf{Limitations.} The intelligent delegation strategy depends on LLM quality for query splitting—poor decomposition may route subqueries incorrectly. Evaluation metrics assess textual similarity but may not capture semantic correctness for all use cases. Documents sent to external LLM providers are subject to those providers' data handling policies.
 
-\textbf{Conclusion.} We presented IntelliDoc, a framework addressing fragmentation between multi-agent orchestration, document retrieval, and chatbot deployment. The five contributions—per-agent DocAware configuration, dual-mode human-in-the-loop, intelligent delegation with query decomposition, workflow evaluation, and seamless deployment—create an end-to-end solution for document-intelligent conversational applications. The per-agent RAG configuration enables specialisation that workflow-level approaches cannot achieve. Intelligent delegation dynamically decomposes complex queries and routes them to capable delegates, advancing beyond static assignment strategies. IntelliDoc will be released as open source.
+\textbf{Conclusion.} We presented IntelliDoc, a framework addressing fragmentation between multi-agent orchestration, document retrieval, and chatbot deployment. The five contributions---per-agent DocAware configuration, dual-mode human-in-the-loop, intelligent delegation with query decomposition, workflow evaluation, and seamless deployment---create an end-to-end solution for document-intelligent conversational applications. The per-agent RAG configuration enables specialisation that workflow-level approaches cannot achieve. Intelligent delegation dynamically decomposes complex queries and routes them to capable delegates, advancing beyond static assignment strategies. IntelliDoc will be released as open source under the Apache License 2.0 \citep{apache2license}, enabling unrestricted use, modification, and distribution for both research and commercial applications.
 
 
-\section*{Acknowledgements}
+
+
+\section*{Acknowledgement}
 
 We thank the open-source community for foundational tools including Django, SvelteKit, Milvus, and the Hugging Face ecosystem.
+
+This work utilised AI-assisted programming tools. We acknowledge the use of Cursor \citep{cursor2024}, an AI-powered code editor, for code completion and refactoring assistance. We also utilised large language model assistants including Claude \citep{anthropic2024claude}, ChatGPT \citep{openai2023gpt4}, and Gemini \citep{team2023gemini} for code generation, debugging support, documentation drafting, and iterative development feedback. These tools contributed to accelerating the implementation process while all generated code was reviewed and validated by the authors.
+
 
 
 % Bibliography must appear before appendix
@@ -478,6 +507,20 @@ The chatbot interface includes responsive design, message styling, input handlin
 \label{app:figures}
 
 This section provides detailed interface screenshots for key system components referenced throughout the paper. Figures are displayed in full-width format to show the complete user interface and workflow details. Each screenshot demonstrates specific features discussed in the corresponding main text sections.
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=\columnwidth]{Figure2_DocAware.png}
+    \caption{Per-agent DocAware configuration interface (Section~\ref{sec:docaware}) enabling independent search method selection and content filtering per agent.}
+    \label{fig:docaware-config}
+\end{figure}
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=\columnwidth]{Figure3_DualInputMode.png}
+    \caption{Dual-mode Human-in-the-Loop interface (Section~\ref{sec:hitl}). Admin-in-the-Loop or User-in-the-Loop selection interface.}
+    \label{fig:hitl-modes}
+\end{figure}
 
 \begin{figure*}[t]
     \centering

@@ -1516,3 +1516,48 @@ class WorkflowEvaluationResult(models.Model):
         else:
             hours = self.execution_time_seconds / 3600
             return f"{hours:.1f}h"
+
+
+class ExperimentMetric(models.Model):
+    """
+    Store experiment metrics for System Performance Analysis
+    
+    This model stores structured experiment metrics from various system components
+    (intelligent delegation, workflow execution, DocAware, etc.) for analysis
+    and reporting in the System Performance Analysis page.
+    """
+    project = models.ForeignKey(IntelliDocProject, on_delete=models.CASCADE, related_name='experiment_metrics')
+    experiment_type = models.CharField(
+        max_length=50,
+        help_text="Type of experiment: intelligent_delegation, workflow_execution, docaware_single, docaware_context"
+    )
+    metric_data = models.JSONField(
+        default=dict,
+        help_text="All metric values for this experiment (timing, counts, percentages, etc.)"
+    )
+    configuration = models.JSONField(
+        default=dict,
+        help_text="Experiment configuration (delegate count, threshold, agent count, RAG status, etc.)"
+    )
+    execution_id = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Optional: Link to WorkflowExecution if this metric is from a workflow execution"
+    )
+    evaluation_id = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Optional: Link to WorkflowEvaluation if this metric is from an evaluation"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['project', 'experiment_type', '-created_at']),
+            models.Index(fields=['project', '-created_at']),
+            models.Index(fields=['experiment_type', '-created_at']),
+        ]
+    
+    def __str__(self):
+        return f"{self.experiment_type} - {self.project.name} ({self.created_at.strftime('%Y-%m-%d %H:%M')})"
