@@ -499,8 +499,10 @@ class WorkflowExecutor:
                             else:
                                 # Use traditional single-input version for backward compatibility
                                 logger.info(f"📥 ORCHESTRATOR: GroupChatManager {node_name} has {len(input_sources)} input source - using single-input mode")
+                                # Get project for API keys (same as multi-input mode)
+                                project = await sync_to_async(lambda: workflow.project)()
                                 chat_result = await self.chat_manager.execute_group_chat_manager(
-                                    node, llm_provider, conversation_history, execution_sequence, graph_json
+                                    node, llm_provider, conversation_history, execution_sequence, graph_json, str(project_id), project
                                 )
                             
                             logger.info(f"✅ ORCHESTRATOR: GroupChatManager {node_name} completed successfully")

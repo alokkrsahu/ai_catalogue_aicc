@@ -695,9 +695,18 @@ class ChatManager:
         
         return "\n".join(prompt_parts)
     
-    async def execute_group_chat_manager(self, chat_manager_node: Dict[str, Any], llm_provider, conversation_history: str, execution_sequence: List[Dict[str, Any]], graph_json: Dict[str, Any]) -> str:
+    async def execute_group_chat_manager(self, chat_manager_node: Dict[str, Any], llm_provider, conversation_history: str, execution_sequence: List[Dict[str, Any]], graph_json: Dict[str, Any], project_id: Optional[str] = None, project: Optional[Any] = None) -> str:
         """
         Execute GroupChatManager with delegate processing using enhanced logic
+        
+        Args:
+            chat_manager_node: The GroupChatManager node data
+            llm_provider: LLM provider instance
+            conversation_history: Conversation history string
+            execution_sequence: Complete workflow execution sequence
+            graph_json: Full workflow graph data
+            project_id: Project ID for API key access (optional)
+            project: Project instance for API keys (optional)
         """
         manager_name = chat_manager_node.get('data', {}).get('name', 'Chat Manager')
         manager_data = chat_manager_node.get('data', {})
@@ -814,7 +823,9 @@ class ChatManager:
                         llm_provider, 
                         conversation_history, 
                         conversation_log,
-                        status
+                        status,
+                        project_id,
+                        project
                     )
                     logger.info(f"✅ GROUP CHAT MANAGER: Successfully executed delegate {delegate_name} - response length: {len(delegate_response)} chars")
                     
@@ -955,9 +966,18 @@ class ChatManager:
             'input_count': 1
         }
     
-    async def execute_delegate_conversation(self, delegate_node: Dict[str, Any], llm_provider, conversation_history: str, conversation_log: List[str], status: Dict[str, Any]) -> str:
+    async def execute_delegate_conversation(self, delegate_node: Dict[str, Any], llm_provider, conversation_history: str, conversation_log: List[str], status: Dict[str, Any], project_id: Optional[str] = None, project: Optional[Any] = None) -> str:
         """
         Execute a single conversation round with a delegate agent
+        
+        Args:
+            delegate_node: The delegate node data
+            llm_provider: LLM provider instance (fallback)
+            conversation_history: Conversation history string
+            conversation_log: Previous delegate conversation log
+            status: Delegate status tracking dict
+            project_id: Project ID for API key access (optional)
+            project: Project instance for API keys (optional)
         """
         delegate_name = delegate_node.get('data', {}).get('name', 'Delegate')
         delegate_data = delegate_node.get('data', {})
@@ -973,13 +993,23 @@ class ChatManager:
         
         logger.info(f"🔧 DELEGATE: Config for {delegate_name}: {delegate_config}")
         
-        # Try to create delegate-specific LLM provider with modern async method
+        # Try to create delegate-specific LLM provider with project context
         delegate_llm = None
         try:
             logger.info(f"🔧 DELEGATE: Attempting to create LLM provider for {delegate_name}")
+            
+            # Get project from project_id if project is None
+            if project is None and project_id:
+                from users.models import IntelliDocProject
+                from asgiref.sync import sync_to_async
+                try:
+                    project = await sync_to_async(IntelliDocProject.objects.get)(project_id=project_id)
+                    logger.info(f"✅ DELEGATE: Retrieved project {project.name} for {delegate_name} API keys")
+                except IntelliDocProject.DoesNotExist:
+                    logger.warning(f"⚠️ DELEGATE: Project {project_id} not found for {delegate_name}")
+            
             # Use modern async method with project support (same as AssistantAgent)
-            # Note: This legacy method doesn't have project context, so passing None
-            delegate_llm = await self.llm_provider_manager.get_llm_provider(delegate_config, None)
+            delegate_llm = await self.llm_provider_manager.get_llm_provider(delegate_config, project)
             if delegate_llm:
                 logger.info(f"✅ DELEGATE: Successfully created LLM provider for {delegate_name}")
             else:
