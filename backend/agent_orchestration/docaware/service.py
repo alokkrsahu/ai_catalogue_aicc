@@ -35,13 +35,20 @@ class EnhancedDocAwareAgentService:
         # Load project
         try:
             self.project = IntelliDocProject.objects.get(project_id=project_id)
-            self.collection_name = self.project.generate_collection_name()
+            
+            # Use the actual collection name from ProjectVectorCollection if it exists
+            # This ensures we use the same name that was used when documents were processed
+            from users.models import ProjectVectorCollection
+            try:
+                vector_collection = ProjectVectorCollection.objects.get(project=self.project)
+                self.collection_name = vector_collection.collection_name
+                logger.info(f"📚 ENHANCED RAG: Using stored collection name from ProjectVectorCollection: {self.collection_name}")
+            except ProjectVectorCollection.DoesNotExist:
+                # Fallback to generated name if no collection record exists yet
+                self.collection_name = self.project.generate_collection_name()
+                logger.info(f"📚 ENHANCED RAG: No ProjectVectorCollection found, using generated name: {self.collection_name}")
+            
             logger.info(f"📚 ENHANCED RAG: Loaded project {self.project.name}, collection: {self.collection_name}")
-            # Validate collection name matches project
-            expected_collection = self.project.generate_collection_name()
-            if self.collection_name != expected_collection:
-                logger.warning(f"⚠️ PROJECT ISOLATION: Collection name mismatch! Expected: {expected_collection}, Got: {self.collection_name}")
-                self.collection_name = expected_collection
             logger.info(f"📦 PROJECT ISOLATION: DocAware service initialized for project {project_id} with collection {self.collection_name}")
         except IntelliDocProject.DoesNotExist:
             logger.error(f"📚 ENHANCED RAG: Project {project_id} not found")

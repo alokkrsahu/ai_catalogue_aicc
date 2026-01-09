@@ -385,12 +385,39 @@ class DocAwareConfigViewSet(viewsets.ViewSet):
 
             logger.info(f"📚 DOCAWARE API: Found {folders_count} folders and {files_count} files")
 
+            # Check document and processing status for better user feedback
+            documents_count = project.documents.count()
+            ready_documents_count = project.documents.filter(upload_status='ready').count()
+            
+            # Check vector collection status
+            processing_status = None
+            collection_status = None
+            try:
+                from users.models import ProjectVectorCollection, VectorProcessingStatus
+                if hasattr(project, 'vector_collection'):
+                    collection = project.vector_collection
+                    collection_status = collection.status
+                    processing_status = {
+                        'status': collection.status,
+                        'total_documents': collection.total_documents,
+                        'processed_documents': collection.processed_documents,
+                        'progress': collection.processing_progress if hasattr(collection, 'processing_progress') else 0
+                    }
+            except Exception as status_error:
+                logger.debug(f"Could not get processing status: {status_error}")
+
             response_data = {
                 'project_id': project_id,
                 'hierarchical_paths': hierarchical_data,
                 'folders_count': folders_count,
                 'files_count': files_count,
-                'total_count': len(hierarchical_data)
+                'total_count': len(hierarchical_data),
+                'documents_info': {
+                    'total_documents': documents_count,
+                    'ready_documents': ready_documents_count,
+                    'collection_status': collection_status,
+                    'processing_status': processing_status
+                }
             }
 
             print(f"✅ DEBUG HIERARCHICAL PATHS: Returning response with {len(hierarchical_data)} items")

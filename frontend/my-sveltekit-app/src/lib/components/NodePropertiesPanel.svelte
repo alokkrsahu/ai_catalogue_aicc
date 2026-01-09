@@ -26,6 +26,7 @@
   export let modelsLoaded: boolean = false; // Whether models are loaded
   export let hierarchicalPaths: any[] = []; // Hierarchical paths for Content Filter
   export let hierarchicalPathsLoaded: boolean = false; // Whether hierarchical paths are loaded
+  export let documentsInfo: any = null; // Document and processing status info
   
   const dispatch = createEventDispatcher();
   
@@ -1962,9 +1963,30 @@
               </div>
             {:else if hierarchicalPaths.length === 0}
               <div class="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-yellow-50">
-                <div class="text-yellow-700 text-sm flex items-center">
-                  <i class="fas fa-info-circle mr-2"></i>
-                  No folders/files available for filtering. Upload and process documents first.
+                <div class="text-yellow-700 text-sm">
+                  {#if documentsInfo && documentsInfo.total_documents > 0}
+                    {#if documentsInfo.collection_status === 'PROCESSING'}
+                      <div class="flex items-center">
+                        <i class="fas fa-spinner fa-spin mr-2"></i>
+                        <span>Documents are being processed ({documentsInfo.processing_status?.processed_documents || 0}/{documentsInfo.processing_status?.total_documents || documentsInfo.total_documents}). Content filters will be available once processing completes.</span>
+                      </div>
+                    {:else if documentsInfo.collection_status === 'COMPLETED' && documentsInfo.processing_status?.processed_documents === 0}
+                      <div class="flex items-center">
+                        <i class="fas fa-exclamation-triangle mr-2"></i>
+                        <span>Processing completed but no documents were vectorized. Please check document processing logs.</span>
+                      </div>
+                    {:else}
+                      <div class="flex items-center">
+                        <i class="fas fa-info-circle mr-2"></i>
+                        <span>You have {documentsInfo.total_documents} document{documentsInfo.total_documents === 1 ? '' : 's'} uploaded, but they haven't been processed yet. Please process documents first to enable content filtering.</span>
+                      </div>
+                    {/if}
+                  {:else}
+                    <div class="flex items-center">
+                      <i class="fas fa-info-circle mr-2"></i>
+                      <span>No folders/files available for filtering. Upload and process documents first.</span>
+                    </div>
+                  {/if}
                 </div>
               </div>
             {:else}
@@ -2274,9 +2296,30 @@
               </div>
             {:else if hierarchicalPaths.length === 0}
               <div class="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-yellow-50">
-                <div class="text-yellow-700 text-sm flex items-center">
-                  <i class="fas fa-info-circle mr-2"></i>
-                  No folders/files available for filtering. Upload and process documents first.
+                <div class="text-yellow-700 text-sm">
+                  {#if documentsInfo && documentsInfo.total_documents > 0}
+                    {#if documentsInfo.collection_status === 'PROCESSING'}
+                      <div class="flex items-center">
+                        <i class="fas fa-spinner fa-spin mr-2"></i>
+                        <span>Documents are being processed ({documentsInfo.processing_status?.processed_documents || 0}/{documentsInfo.processing_status?.total_documents || documentsInfo.total_documents}). Content filters will be available once processing completes.</span>
+                      </div>
+                    {:else if documentsInfo.collection_status === 'COMPLETED' && documentsInfo.processing_status?.processed_documents === 0}
+                      <div class="flex items-center">
+                        <i class="fas fa-exclamation-triangle mr-2"></i>
+                        <span>Processing completed but no documents were vectorized. Please check document processing logs.</span>
+                      </div>
+                    {:else}
+                      <div class="flex items-center">
+                        <i class="fas fa-info-circle mr-2"></i>
+                        <span>You have {documentsInfo.total_documents} document{documentsInfo.total_documents === 1 ? '' : 's'} uploaded, but they haven't been processed yet. Please process documents first to enable content filtering.</span>
+                      </div>
+                    {/if}
+                  {:else}
+                    <div class="flex items-center">
+                      <i class="fas fa-info-circle mr-2"></i>
+                      <span>No folders/files available for filtering. Upload and process documents first.</span>
+                    </div>
+                  {/if}
                 </div>
               </div>
             {:else}

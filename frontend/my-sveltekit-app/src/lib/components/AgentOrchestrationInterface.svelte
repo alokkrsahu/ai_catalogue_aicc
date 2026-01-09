@@ -36,6 +36,7 @@
   let hierarchicalPathsLoading = false;
   let hierarchicalPathsLoaded = false; // Track if loading is complete (regardless of whether paths exist)
   let hierarchicalPathsError: string | null = null;
+  let documentsInfo: any = null; // Store document and processing status info
   
   // Conversation history state
   let selectedRunId: string | null = null;
@@ -265,6 +266,9 @@
 
       console.log(`✅ AGENT ORCHESTRATION: Loaded ${hierarchicalPaths.length} content filter options`,
         `(${pathsData.folders_count || 0} folders, ${pathsData.files_count || 0} files)`);
+
+      // Store document info for better user feedback
+      documentsInfo = pathsData.documents_info || null;
 
       // Mark as loaded regardless of whether paths exist
       hierarchicalPathsLoaded = true;
@@ -1009,6 +1013,7 @@
               modelsLoaded={modelsLoaded}
               hierarchicalPaths={hierarchicalPaths}
               hierarchicalPathsLoaded={hierarchicalPathsLoaded}
+              documentsInfo={documentsInfo}
               on:workflowUpdate={(e) => handleWorkflowUpdate(e.detail)}
             />
           {:catch error}

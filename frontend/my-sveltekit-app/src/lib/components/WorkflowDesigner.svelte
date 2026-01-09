@@ -17,6 +17,7 @@
   export let modelsLoaded: boolean = false;
   export let hierarchicalPaths: any[] = []; // Hierarchical paths for Content Filter
   export let hierarchicalPathsLoaded: boolean = false; // Whether hierarchical paths are loaded
+  export let documentsInfo: any = null; // Document and processing status info
   
   const dispatch = createEventDispatcher();
   
@@ -2298,6 +2299,7 @@
         {modelsLoaded}
         {hierarchicalPaths}
         {hierarchicalPathsLoaded}
+        documentsInfo={documentsInfo}
         on:nodeUpdate={(e) => {
           const updatedNode = e.detail;
           const nodeIndex = nodes.findIndex(n => n.id === updatedNode.id);
