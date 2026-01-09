@@ -350,7 +350,8 @@ class DocAwareConfigViewSet(viewsets.ViewSet):
                 print(f"❌ DEBUG HIERARCHICAL PATHS: Project lookup failed: {proj_error}")
                 raise proj_error
 
-            if project.created_by != request.user:
+            # Use proper project access check that handles admins and shared projects
+            if not project.has_user_access(request.user):
                 print(f"❌ DEBUG HIERARCHICAL PATHS: Access denied - project owner: {project.created_by}, request user: {request.user}")
                 return Response(
                     {'error': 'You do not have access to this project'},

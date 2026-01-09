@@ -1018,8 +1018,22 @@ class EnhancedDocAwareAgentService:
             return result_list
 
         except Exception as e:
-            logger.error(f"📚 HIERARCHICAL PATHS: Failed to get paths: {e}")
-            import traceback
-            logger.error(f"📚 HIERARCHICAL PATHS: Traceback: {traceback.format_exc()}")
-            return []
+            # Check if this is a collection not found error (expected when documents haven't been processed)
+            error_message = str(e)
+            is_collection_not_found = (
+                'not exist' in error_message.lower() or 
+                'SchemaNotReadyException' in str(type(e).__name__) or
+                'collection' in error_message.lower() and ('not found' in error_message.lower() or 'not exist' in error_message.lower())
+            )
+            
+            if is_collection_not_found:
+                # Collection doesn't exist yet - this is expected when documents haven't been processed
+                logger.warning(f"📚 HIERARCHICAL PATHS: Collection '{self.collection_name}' does not exist yet. Documents may not have been processed. Returning empty list.")
+                return []
+            else:
+                # Unexpected error - log as error
+                logger.error(f"📚 HIERARCHICAL PATHS: Failed to get paths: {e}")
+                import traceback
+                logger.error(f"📚 HIERARCHICAL PATHS: Traceback: {traceback.format_exc()}")
+                return []
 
