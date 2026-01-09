@@ -438,6 +438,11 @@ class IntelliDocProject(models.Model):
         if self.created_by == user:
             return True
         
+        # Superusers always have access (Django's built-in permission system)
+        # This ensures superusers have access even if their role field is not ADMIN
+        if user.is_superuser:
+            return True
+        
         # Admin users always have access
         if user.is_admin:
             return True

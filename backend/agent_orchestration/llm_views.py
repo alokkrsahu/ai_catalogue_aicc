@@ -37,8 +37,8 @@ def get_user_project(user, project_id=None):
             return project
         else:
             # Get user's first accessible project as default
-            # Admin users can see all projects
-            if user.is_admin:
+            # Superusers and admin users can see all projects
+            if user.is_superuser or user.is_admin:
                 return IntelliDocProject.objects.first()
             
             # Get projects where user is creator or has permissions

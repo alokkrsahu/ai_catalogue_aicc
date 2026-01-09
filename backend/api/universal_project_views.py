@@ -60,8 +60,8 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
         """Get projects accessible to current user based on permissions"""
         user = self.request.user
         
-        # Admin users can see all projects
-        if user.is_admin:
+        # Superusers and admin users can see all projects
+        if user.is_superuser or user.is_admin:
             return IntelliDocProject.objects.all()
         
         # Regular users see projects they created + projects they have permission to access
