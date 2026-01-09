@@ -54,7 +54,9 @@ class MilvusProjectVectorDatabase:
             
             # Sanitize project name for Milvus compatibility
             # Milvus collection names can only contain numbers, letters and underscores
-            sanitized_name = re.sub(r'[^a-zA-Z0-9_]', '', project.name.lower())
+            # Remove all non-alphanumeric characters (spaces, hyphens, etc.) to match actual collection creation behavior
+            # This ensures consistency with IntelliDocProject.generate_collection_name()
+            sanitized_name = re.sub(r'[^a-zA-Z0-9]', '', project.name.lower())
             
             # Ensure name is not empty and starts with a letter or underscore
             if not sanitized_name or sanitized_name[0].isdigit():

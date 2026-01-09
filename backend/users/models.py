@@ -459,17 +459,29 @@ class IntelliDocProject(models.Model):
         return False
     
     def generate_collection_name(self) -> str:
-        """Generate collection name using project name instead of generic 'project' prefix"""
-        # Sanitize project name for Milvus collection naming
-        # Replace spaces and special characters with underscores
-        sanitized_name = self.name.lower().replace(' ', '_').replace('-', '_')
-        # Remove any non-alphanumeric characters except underscores
-        sanitized_name = ''.join(c for c in sanitized_name if c.isalnum() or c == '_')
-        # Ensure it starts with a letter (Milvus requirement)
-        if not sanitized_name or not sanitized_name[0].isalpha():
-            sanitized_name = 'project_' + sanitized_name
+        """Generate collection name using project name instead of generic 'project' prefix
         
-        # Add project ID suffix to ensure uniqueness
+        IMPORTANT: This method MUST match the logic in MilvusProjectVectorDatabase._generate_collection_name()
+        to prevent collection name mismatches between database records and actual Milvus collections.
+        """
+        import re
+        
+        # Sanitize project name for Milvus compatibility
+        # Milvus collection names can only contain numbers, letters and underscores
+        # Remove all non-alphanumeric characters (spaces, hyphens, etc.) to match actual collection creation behavior
+        # This matches the behavior in MilvusProjectVectorDatabase._generate_collection_name()
+        sanitized_name = re.sub(r'[^a-zA-Z0-9]', '', self.name.lower())
+        
+        # Ensure name is not empty and starts with a letter or underscore
+        if not sanitized_name or sanitized_name[0].isdigit():
+            sanitized_name = f"project_{sanitized_name}"
+        
+        # Limit length to reasonable size (Milvus has limits)
+        # This MUST match the limit in MilvusProjectVectorDatabase._generate_collection_name()
+        if len(sanitized_name) > 20:
+            sanitized_name = sanitized_name[:20]
+        
+        # Append project ID suffix to ensure uniqueness
         project_id_suffix = str(self.project_id).replace('-', '_')
         collection_name = f"{sanitized_name}_{project_id_suffix}"
         
