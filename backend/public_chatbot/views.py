@@ -278,6 +278,7 @@ def public_chat_api(request):
                 ip_address=client_ip,
                 user_agent=user_agent,
                 origin_domain=origin_domain[:200],  # Truncate for safety
+                message=message,  # Store full message
                 message_preview=message[:100],  # Privacy-safe truncation
                 message_length=len(message),
                 message_hash=hashlib.sha256(message.encode()).hexdigest(),
@@ -767,6 +768,7 @@ def public_chat_stream_api(request):
                 ip_address=client_ip,
                 user_agent=user_agent,
                 origin_domain=origin_domain[:200],  # Truncate for safety
+                message=message,  # Store full message
                 message_preview=message[:100],  # Privacy-safe truncation
                 message_length=len(message),
                 message_hash=hashlib.sha256(message.encode()).hexdigest(),

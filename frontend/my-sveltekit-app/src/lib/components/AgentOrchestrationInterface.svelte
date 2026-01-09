@@ -34,6 +34,7 @@
   // Content Filter hierarchical paths state
   let hierarchicalPaths: any[] = [];
   let hierarchicalPathsLoading = false;
+  let hierarchicalPathsLoaded = false; // Track if loading is complete (regardless of whether paths exist)
   let hierarchicalPathsError: string | null = null;
   
   // Conversation history state
@@ -244,6 +245,7 @@
   async function loadHierarchicalPaths() {
     try {
       hierarchicalPathsLoading = true;
+      hierarchicalPathsLoaded = false; // Reset loaded state
       hierarchicalPathsError = null;
 
       console.log('📚 AGENT ORCHESTRATION: Loading hierarchical paths for multi-select content filtering');
@@ -264,10 +266,15 @@
       console.log(`✅ AGENT ORCHESTRATION: Loaded ${hierarchicalPaths.length} content filter options`,
         `(${pathsData.folders_count || 0} folders, ${pathsData.files_count || 0} files)`);
 
+      // Mark as loaded regardless of whether paths exist
+      hierarchicalPathsLoaded = true;
+
     } catch (error) {
       console.error('❌ AGENT ORCHESTRATION: Failed to load hierarchical paths:', error);
       hierarchicalPathsError = error.message || 'Failed to load content filter data';
       hierarchicalPaths = [];
+      // Still mark as loaded so UI doesn't show loading forever
+      hierarchicalPathsLoaded = true;
     } finally {
       hierarchicalPathsLoading = false;
     }
@@ -1001,7 +1008,7 @@
               bulkModelData={bulkModelData}
               modelsLoaded={modelsLoaded}
               hierarchicalPaths={hierarchicalPaths}
-              hierarchicalPathsLoaded={!hierarchicalPathsLoading && hierarchicalPaths.length > 0}
+              hierarchicalPathsLoaded={hierarchicalPathsLoaded}
               on:workflowUpdate={(e) => handleWorkflowUpdate(e.detail)}
             />
           {:catch error}

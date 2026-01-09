@@ -23,6 +23,10 @@ class PublicChatRequest(models.Model):
     origin_domain = models.CharField(max_length=200, blank=True)  # CORS origin tracking
     
     # Request details (privacy-safe)
+    message = models.TextField(
+        blank=True,
+        help_text="Full message content"
+    )
     message_preview = models.CharField(
         max_length=100, 
         validators=[MinLengthValidator(1), MaxLengthValidator(100)],

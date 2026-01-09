@@ -45,7 +45,7 @@ def export_as_csv(modeladmin, request, queryset):
     """Export selected chat requests as CSV"""
     field_names = [
         'id', 'request_id', 'session_id', 'ip_address', 'user_agent',
-        'origin_domain', 'message_preview', 'message_length', 'message_hash',
+        'origin_domain', 'message', 'message_preview', 'message_length', 'message_hash',
         'response_generated', 'response_length', 'response_time_ms',
         'chroma_search_time_ms', 'chroma_results_found', 'chroma_context_used',
         'llm_provider_used', 'llm_model_used', 'llm_tokens_used', 'llm_cost_estimate',
@@ -65,11 +65,13 @@ def export_as_csv(modeladmin, request, queryset):
     for obj in queryset:
         row = []
         for field in field_names:
-            value = getattr(obj, field)
-            if value is None:
-                row.append('')
+            # For message field, use full message if available, otherwise fall back to preview
+            if field == 'message':
+                full_message = getattr(obj, 'message', '') or getattr(obj, 'message_preview', '')
+                row.append(str(full_message) if full_message else '')
             else:
-                row.append(str(value))
+                value = getattr(obj, field)
+                row.append(str(value) if value is not None else '')
         writer.writerow(row)
     
     return response
@@ -98,6 +100,7 @@ def export_as_json(modeladmin, request, queryset):
             'ip_address': obj.ip_address,
             'user_agent': obj.user_agent,
             'origin_domain': obj.origin_domain,
+            'message': obj.message or obj.message_preview,  # Use full message if available
             'message_preview': obj.message_preview,
             'message_length': obj.message_length,
             'message_hash': obj.message_hash,
@@ -150,7 +153,7 @@ class PublicChatRequestAdmin(admin.ModelAdmin):
     ]
     search_fields = ['request_id', 'ip_address', 'message_preview']
     readonly_fields = [
-        'request_id', 'message_hash', 'created_at', 'completed_at',
+        'request_id', 'message', 'message_hash', 'created_at', 'completed_at',
         'response_time_ms', 'chroma_search_time_ms', 'chroma_results_found',
         'llm_cost_estimate', 'message_length', 'response_length'
     ]
@@ -166,7 +169,7 @@ class PublicChatRequestAdmin(admin.ModelAdmin):
             'fields': ('ip_address', 'user_agent', 'origin_domain')
         }),
         ('Message', {
-            'fields': ('message_preview', 'message_length', 'message_hash')
+            'fields': ('message', 'message_preview', 'message_length', 'message_hash')
         }),
         ('Response', {
             'fields': (
