@@ -90,12 +90,7 @@ export async function generateSystemPrompt(
     };
   }
   
-  if (request.description.length > 500) {
-    return {
-      success: false,
-      error: 'Description must be less than 500 characters'
-    };
-  }
+  // Note: Maximum length validation (10,000 characters) is handled by the backend
   
   // Check cache
   const cacheKey = generateCacheKey(request);
