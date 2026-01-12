@@ -1060,6 +1060,7 @@ class ChatManager:
             # Add debugging for the actual API call
             logger.info(f"🤝 DELEGATE: API Key available: {bool(delegate_llm)}")
             
+            logger.info(f"🤝 DELEGATE: Prompt length for {delegate_name}: {len(delegate_prompt)} chars")
             delegate_response = await delegate_llm.generate_response(
                 prompt=delegate_prompt
             )
@@ -1079,8 +1080,22 @@ class ChatManager:
                 return f"ERROR: {error_msg}"
             
             if not delegate_response.text:
+                error_details = []
+                if hasattr(delegate_response, 'error') and delegate_response.error:
+                    error_details.append(f"LLM Error: {delegate_response.error}")
+                if hasattr(delegate_response, 'response_time_ms'):
+                    error_details.append(f"Response Time: {delegate_response.response_time_ms}ms")
+                if hasattr(delegate_response, 'model'):
+                    error_details.append(f"Model: {delegate_response.model}")
+                if hasattr(delegate_response, 'provider'):
+                    error_details.append(f"Provider: {delegate_response.provider}")
+                
                 error_msg = f"Delegate {delegate_name} received empty response from LLM"
+                if error_details:
+                    error_msg += f" - {' | '.join(error_details)}"
+                
                 logger.error(f"❌ DELEGATE: {error_msg}")
+                logger.error(f"❌ DELEGATE: Prompt length: {len(delegate_prompt)} chars")
                 return f"ERROR: {error_msg}"
             
             response_text = delegate_response.text.strip()
