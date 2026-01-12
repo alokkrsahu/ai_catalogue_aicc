@@ -49,6 +49,18 @@ class OpenAIProvider(LLMProvider):
             # Ensure text is a string
             text = str(text) if text is not None else ""
             
+            # Explicitly handle empty string content (not just None)
+            if text == "":
+                finish_reason = choices[0].get("finish_reason")
+                if finish_reason == "length":
+                    raise ValueError("Response was truncated due to max_tokens limit")
+                elif finish_reason == "content_filter":
+                    raise ValueError("Response was filtered by content safety filters")
+                elif finish_reason:
+                    raise ValueError(f"Response incomplete: finish_reason={finish_reason}")
+                else:
+                    raise ValueError("Response content is empty string without finish_reason")
+            
         except (KeyError, IndexError, ValueError) as e:
             raise ValueError(f"Failed to parse OpenAI response: {e}. Response data: {response_data}")
         
@@ -78,13 +90,34 @@ class OpenAIProvider(LLMProvider):
                     
                     if response.status == 200:
                         data = await response.json()
+                        logger.debug(f"🔍 OPENAI: Raw API response for model {self.model}: {data}")
+                        
                         try:
                             text, token_count = self.parse_response(data)
+                            logger.info(f"🔍 OPENAI: Parsed response - text length: {len(text) if text else 0}, token_count: {token_count}")
                             
                             # Double-check that text is not empty after parsing
                             if not text or not text.strip():
-                                error_msg = "OpenAI API returned empty response content"
-                                logger.warning(f"⚠️ OPENAI: {error_msg}. Response data: {data}")
+                                # Log detailed response structure for debugging
+                                choices = data.get("choices", [])
+                                finish_reason = choices[0].get("finish_reason") if choices else None
+                                usage = data.get("usage", {})
+                                
+                                error_msg = f"OpenAI API returned empty response content (finish_reason: {finish_reason}, tokens: {usage})"
+                                logger.error(f"❌ OPENAI: {error_msg}")
+                                logger.error(f"❌ OPENAI: Full response data: {data}")
+                                return LLMResponse(
+                                    text="",
+                                    model=self.model,
+                                    provider="openai",
+                                    response_time_ms=response_time_ms,
+                                    error=error_msg
+                                )
+                            
+                            # Additional safety check: if text is empty after strip, treat as error
+                            if not text.strip():
+                                error_msg = "OpenAI API returned whitespace-only response content"
+                                logger.error(f"❌ OPENAI: {error_msg}")
                                 return LLMResponse(
                                     text="",
                                     model=self.model,
