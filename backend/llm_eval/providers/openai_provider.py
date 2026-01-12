@@ -136,12 +136,15 @@ class OpenAIProvider(LLMProvider):
                             )
                         except ValueError as parse_error:
                             # parse_response raised an error - return it as error
+                            error_msg = str(parse_error)
+                            logger.error(f"❌ OPENAI: parse_response raised ValueError: {error_msg}")
+                            logger.error(f"❌ OPENAI: Response data that caused error: {data}")
                             return LLMResponse(
                                 text="",
                                 model=self.model,
                                 provider="openai",
                                 response_time_ms=response_time_ms,
-                                error=str(parse_error)
+                                error=error_msg
                             )
                     else:
                         error_data = await response.json()
