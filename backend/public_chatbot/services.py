@@ -7,6 +7,7 @@ import logging
 import threading
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+from pathlib import Path
 import os
 
 # ChromaDB imports (isolated dependency)
@@ -139,11 +140,30 @@ class PublicKnowledgeService:
                 )
             
             # Initialize embedding function (reuse same model as your system)
+            # CRITICAL: Set HuggingFace timeout before initialization to prevent timeout errors
+            os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '300')  # 5 minutes
+            
             if SENTENCE_TRANSFORMERS_AVAILABLE:
-                self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-                    model_name="all-MiniLM-L6-v2"  # Same as your existing system
-                )
-                logger.info("✅ CHROMA: Using SentenceTransformer embeddings")
+                # Check if model is cached first (similar to main system approach)
+                model_name = "all-MiniLM-L6-v2"
+                cache_dir = Path.home() / '.cache' / 'torch' / 'sentence_transformers'
+                model_cache_path = cache_dir / model_name.replace('/', '_')
+                
+                if model_cache_path.exists() and any(model_cache_path.iterdir()):
+                    logger.info(f"✅ CHROMA: Found cached model at {model_cache_path}, using cached version")
+                else:
+                    logger.info(f"📥 CHROMA: Model not in cache, will download (this may take a few minutes)")
+                    logger.info(f"💡 TIP: Pre-download model using: python manage.py download_embedder_model")
+                
+                try:
+                    self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
+                        model_name=model_name  # Same as your existing system
+                    )
+                    logger.info("✅ CHROMA: Using SentenceTransformer embeddings")
+                except Exception as embed_error:
+                    logger.error(f"❌ CHROMA: Failed to initialize SentenceTransformer: {embed_error}")
+                    logger.warning("⚠️ CHROMA: Falling back to default embeddings")
+                    self.embedding_function = embedding_functions.DefaultEmbeddingFunction()
             else:
                 # Fallback to default embeddings
                 self.embedding_function = embedding_functions.DefaultEmbeddingFunction()

@@ -7,6 +7,7 @@ from django.core.management.base import BaseCommand
 from django.core.management import call_command
 from users.models import DashboardIcon
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,13 @@ class Command(BaseCommand):
         # Verify-only mode
         if options['verify_only']:
             return self.verify_data_only()
+        
+        # Pre-download embedding model for ChromaDB (prevents timeout errors)
+        if not self.setup_embedding_model():
+            self.stdout.write(
+                self.style.WARNING('⚠️  Embedding model setup failed, but continuing...')
+            )
+            # Don't fail the entire setup if model download fails
         
         # Setup dashboard icons
         if not self.setup_dashboard_icons(options['force_recreate']):
@@ -153,6 +161,74 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.WARNING('💡 Run without --verify-only to setup missing data')
             )
+    
+    def setup_embedding_model(self):
+        """Pre-download SentenceTransformer model to prevent timeout errors"""
+        try:
+            self.stdout.write('📦 Setting up embedding model for ChromaDB...')
+            
+            # Check if sentence-transformers is available
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError:
+                self.stdout.write(
+                    self.style.WARNING('⚠️  sentence-transformers not available, skipping model download')
+                )
+                return True  # Not a critical failure
+            
+            # Set HuggingFace timeout environment variable
+            os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '300')  # 5 minutes
+            
+            from pathlib import Path
+            model_name = 'all-MiniLM-L6-v2'
+            cache_dir = Path.home() / '.cache' / 'torch' / 'sentence_transformers'
+            model_cache_path = cache_dir / model_name.replace('/', '_')
+            
+            # Check if model is already cached
+            if model_cache_path.exists() and any(model_cache_path.iterdir()):
+                self.stdout.write(
+                    self.style.SUCCESS(f'✅ Embedding model already cached at {model_cache_path}')
+                )
+                
+                # Test the cached model
+                try:
+                    model = SentenceTransformer(model_name, cache_folder=str(cache_dir))
+                    test_embedding = model.encode("test", convert_to_numpy=True)
+                    self.stdout.write(
+                        self.style.SUCCESS(f'✅ Cached model verified (dimension: {len(test_embedding)})')
+                    )
+                    return True
+                except Exception as e:
+                    self.stdout.write(
+                        self.style.WARNING(f'⚠️  Cached model test failed: {e}, will re-download...')
+                    )
+            
+            # Download the model with increased timeout
+            self.stdout.write(f'📥 Downloading embedding model: {model_name}...')
+            self.stdout.write('   ⏳ This may take a few minutes on first run...')
+            
+            try:
+                model = SentenceTransformer(model_name, cache_folder=str(cache_dir))
+                test_embedding = model.encode("test", convert_to_numpy=True)
+                self.stdout.write(
+                    self.style.SUCCESS(f'✅ Embedding model downloaded and verified (dimension: {len(test_embedding)})')
+                )
+                self.stdout.write(f'💾 Model cached at: {model_cache_path}')
+                return True
+            except Exception as e:
+                self.stdout.write(
+                    self.style.ERROR(f'❌ Failed to download embedding model: {e}')
+                )
+                self.stdout.write(
+                    self.style.WARNING('⚠️  ChromaDB will attempt to download on first use (may timeout)')
+                )
+                return False
+                
+        except Exception as e:
+            self.stdout.write(
+                self.style.ERROR(f'❌ Embedding model setup error: {e}')
+            )
+            return False
     
     def show_access_info(self):
         """Show access information for the application"""

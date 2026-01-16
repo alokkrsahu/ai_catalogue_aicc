@@ -175,6 +175,10 @@ services:
       CHROMADB_HOST: chromadb
       CHROMADB_PORT: 8000
       
+      # HuggingFace Model Download Configuration (prevents timeout errors)
+      HF_HUB_DOWNLOAD_TIMEOUT: "300"
+      HF_HUB_CACHE: "/home/appuser/.cache/huggingface"
+      
       # Security Configuration
       # CRITICAL: PROJECT_API_KEY_ENCRYPTION_KEY must be set in .env file
       # This key encrypts/decrypts project-specific API keys stored in database
