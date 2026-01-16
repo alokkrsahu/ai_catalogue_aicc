@@ -7,6 +7,8 @@ existing embedding infrastructure.
 """
 
 import logging
+import os
+from pathlib import Path
 from typing import List, Optional, Dict, Any
 from sentence_transformers import SentenceTransformer
 from django.conf import settings
@@ -29,13 +31,31 @@ class DocAwareEmbeddingService:
         self._load_model()
     
     def _load_model(self):
-        """Load the embedding model"""
+        """Load the embedding model with cache checking and timeout handling"""
         try:
+            # CRITICAL: Set HuggingFace timeout before initialization to prevent timeout errors
+            os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '300')  # 5 minutes
+            
             logger.info(f"📊 EMBEDDING: Loading model {self.model_name}")
-            self.model = SentenceTransformer(self.model_name)
+            
+            # Check if model is cached first (similar to main system approach)
+            cache_dir = Path.home() / '.cache' / 'torch' / 'sentence_transformers'
+            model_cache_path = cache_dir / self.model_name.replace('/', '_')
+            
+            if model_cache_path.exists() and any(model_cache_path.iterdir()):
+                logger.info(f"✅ EMBEDDING: Found cached model at {model_cache_path}, using cached version")
+                # Load from cache explicitly
+                self.model = SentenceTransformer(self.model_name, cache_folder=str(cache_dir))
+            else:
+                logger.info(f"📥 EMBEDDING: Model not in cache, will download (this may take a few minutes)")
+                logger.info(f"💡 TIP: Pre-download model using: python manage.py download_embedder_model")
+                # Download with timeout
+                self.model = SentenceTransformer(self.model_name, cache_folder=str(cache_dir))
+            
             logger.info(f"✅ EMBEDDING: Model loaded successfully")
         except Exception as e:
             logger.error(f"❌ EMBEDDING: Failed to load model {self.model_name}: {e}")
+            logger.error(f"❌ EMBEDDING: Error details: {type(e).__name__}: {str(e)}")
             raise
     
     def encode_query(self, query: str, normalize: bool = True) -> List[float]:
