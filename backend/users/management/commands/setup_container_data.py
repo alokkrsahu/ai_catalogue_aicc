@@ -180,12 +180,14 @@ class Command(BaseCommand):
             os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '300')  # 5 minutes
             
             from pathlib import Path
-            model_name = 'all-MiniLM-L6-v2'
+            # Use full model name with organization for proper cache detection
+            model_name = 'sentence-transformers/all-MiniLM-L6-v2'
             cache_dir = Path.home() / '.cache' / 'torch' / 'sentence_transformers'
-            model_cache_path = cache_dir / model_name.replace('/', '_')
             
             # Check for both old and new HuggingFace cache formats
-            old_format_path = model_cache_path
+            # Old format: sentence-transformers_all-MiniLM-L6-v2
+            # New format: models--sentence-transformers--all-MiniLM-L6-v2
+            old_format_path = cache_dir / model_name.replace('/', '_')
             new_format_path = cache_dir / f"models--{model_name.replace('/', '--')}"
             
             model_cached = False

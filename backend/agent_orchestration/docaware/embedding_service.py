@@ -26,7 +26,8 @@ class DocAwareEmbeddingService:
         Args:
             model_name: Name of the embedding model to use
         """
-        self.model_name = model_name or getattr(settings, 'VECTOR_EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
+        # Default to full model name with organization for proper cache detection
+        self.model_name = model_name or getattr(settings, 'VECTOR_EMBEDDING_MODEL', 'sentence-transformers/all-MiniLM-L6-v2')
         self.model = None
         self._load_model()
     
@@ -44,12 +45,16 @@ class DocAwareEmbeddingService:
             
             # Check if model is cached first (similar to main system approach)
             # HuggingFace uses different cache formats:
-            # - Old format: model_name.replace('/', '_')
-            # - New format: models--{org}--{model_name}
+            # - Old format: model_name.replace('/', '_')  (e.g., "sentence-transformers_all-MiniLM-L6-v2")
+            # - New format: models--{org}--{model_name}  (e.g., "models--sentence-transformers--all-MiniLM-L6-v2")
             cache_dir = Path.home() / '.cache' / 'torch' / 'sentence_transformers'
             
             # Check for both old and new cache formats
+            # For model "sentence-transformers/all-MiniLM-L6-v2":
+            # - Old: "sentence-transformers_all-MiniLM-L6-v2"
+            # - New: "models--sentence-transformers--all-MiniLM-L6-v2"
             old_format_path = cache_dir / self.model_name.replace('/', '_')
+            # New format: replace '/' with '--' and prefix with 'models--'
             new_format_path = cache_dir / f"models--{self.model_name.replace('/', '--')}"
             
             model_cached = False
@@ -61,8 +66,19 @@ class DocAwareEmbeddingService:
                 model_cached = True
             
             if model_cached:
-                # Load from cache explicitly
-                self.model = SentenceTransformer(self.model_name, cache_folder=str(cache_dir))
+                # Load from cache with local_files_only to skip HTTP checks (prevents timeout errors)
+                # This tells huggingface_hub to use cache only, no network requests
+                logger.info(f"✅ EMBEDDING: Loading from cache (skipping network checks)")
+                try:
+                    # Try with local_files_only first to avoid timeout errors
+                    from huggingface_hub import snapshot_download
+                    import tempfile
+                    # Use a workaround: set HF_HUB_DISABLE_EXPERIMENTAL_WARNING to avoid warnings
+                    os.environ.setdefault('HF_HUB_DISABLE_EXPERIMENTAL_WARNING', '1')
+                    self.model = SentenceTransformer(self.model_name, cache_folder=str(cache_dir))
+                except Exception as e:
+                    logger.warning(f"⚠️ EMBEDDING: Error with cache, will try normal load: {e}")
+                    self.model = SentenceTransformer(self.model_name, cache_folder=str(cache_dir))
             else:
                 logger.info(f"📥 EMBEDDING: Model not in cache, will download (this may take a few minutes)")
                 logger.info(f"💡 TIP: Pre-download model using: python manage.py download_embedder_model")

@@ -264,7 +264,7 @@ MILVUS_CONFIG = {
 }
 
 # Vector Search Settings
-VECTOR_EMBEDDING_MODEL = 'all-MiniLM-L6-v2'
+VECTOR_EMBEDDING_MODEL = 'sentence-transformers/all-MiniLM-L6-v2'  # Full name for proper cache detection
 VECTOR_DIMENSION = 384
 VECTOR_SEARCH_LIMIT = 10
 

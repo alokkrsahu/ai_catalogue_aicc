@@ -151,11 +151,14 @@ class PublicKnowledgeService:
                 
                 # Check if model is cached first (similar to main system approach)
                 # HuggingFace uses different cache formats:
-                # - Old format: model_name.replace('/', '_')
-                # - New format: models--{org}--{model_name}
-                model_name = "all-MiniLM-L6-v2"
+                # - Old format: model_name.replace('/', '_')  (e.g., "sentence-transformers_all-MiniLM-L6-v2")
+                # - New format: models--{org}--{model_name}  (e.g., "models--sentence-transformers--all-MiniLM-L6-v2")
+                # Use full model name with organization for proper cache detection
+                model_name = "sentence-transformers/all-MiniLM-L6-v2"
                 cache_dir = Path.home() / '.cache' / 'torch' / 'sentence_transformers'
                 
+                # Old format: sentence-transformers_all-MiniLM-L6-v2
+                # New format: models--sentence-transformers--all-MiniLM-L6-v2
                 old_format_path = cache_dir / model_name.replace('/', '_')
                 new_format_path = cache_dir / f"models--{model_name.replace('/', '--')}"
                 
