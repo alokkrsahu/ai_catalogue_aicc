@@ -67,28 +67,52 @@ class ModelService:
             return []
     
     @staticmethod
-    def get_claude_models() -> List[Dict[str, str]]:
-        """List known Claude models (Anthropic doesn't provide a public models endpoint).
-        
-        Note: This list is manually maintained. When new Claude models are released,
-        they should be added here. The models are ordered by release date (newest first).
+    def get_claude_models(api_key: str) -> List[Dict[str, Any]]:
         """
-        return [
-            # Claude 4 and future models (add new models at the top)
-            {'id': 'claude-sonnet-4-20250514', 'name': 'claude-sonnet-4-20250514', 'displayName': 'Claude Sonnet 4 (Latest)'},
-            # Claude 3.5 models
-            {'id': 'claude-3-5-sonnet-20241022', 'name': 'claude-3-5-sonnet-20241022', 'displayName': 'Claude 3.5 Sonnet'},
-            {'id': 'claude-3-5-haiku-20241022', 'name': 'claude-3-5-haiku-20241022', 'displayName': 'Claude 3.5 Haiku'},
-            # Claude 3 models
-            {'id': 'claude-3-opus-20240229', 'name': 'claude-3-opus-20240229', 'displayName': 'Claude 3 Opus'},
-            {'id': 'claude-3-sonnet-20240229', 'name': 'claude-3-sonnet-20240229', 'displayName': 'Claude 3 Sonnet'},
-            {'id': 'claude-3-haiku-20240307', 'name': 'claude-3-haiku-20240307', 'displayName': 'Claude 3 Haiku'},
-            # Claude 2 models (legacy)
-            {'id': 'claude-2.1', 'name': 'claude-2.1', 'displayName': 'Claude 2.1'},
-            {'id': 'claude-2.0', 'name': 'claude-2.0', 'displayName': 'Claude 2.0'},
-            # Claude Instant models (legacy)
-            {'id': 'claude-instant-1.2', 'name': 'claude-instant-1.2', 'displayName': 'Claude Instant 1.2'},
-        ]
+        Fetch available Claude models from Anthropic API.
+        
+        Uses: GET https://api.anthropic.com/v1/models
+        Headers: anthropic-version: 2023-06-01, X-Api-Key: {api_key}
+        
+        Returns empty list on error (no hardcoded fallback).
+        This ensures the frontend can see the full list of Claude models
+        that the account is allowed to use, instead of being limited to a
+        hardcoded subset.
+        """
+        try:
+            headers = {
+                'anthropic-version': '2023-06-01',
+                'X-Api-Key': api_key,
+                'Content-Type': 'application/json'
+            }
+            response = requests.get(
+                'https://api.anthropic.com/v1/models',
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            # Format models consistently
+            models = []
+            for model in data.get('data', []):
+                model_id = model.get('id', '')
+                if model_id:
+                    models.append({
+                        'id': model_id,
+                        'name': model_id,
+                        'displayName': model_id.replace('-', ' ').title()
+                    })
+            
+            return sorted(models, key=lambda x: x['id'])
+        except Exception as e:
+            # IMPORTANT: do not hide failures behind a hardcoded list.
+            # Returning [] allows DynamicModelsService.test_api_key(...) to
+            # accurately detect that something is wrong with this API key or
+            # network environment, so the UI can show a clear warning instead
+            # of only exposing a partial list.
+            print(f"Error fetching Claude models: {e}")
+            return []
     
     @staticmethod
     def get_gemini_models(api_key: str) -> List[Dict[str, Any]]:
@@ -123,33 +147,22 @@ class ModelService:
             print(f"🎉 Found {len(generation_models)} generation models")
             return generation_models
             
-        except requests.exceptions.RequestException as e:
-            print(f"🌐 Network error fetching Gemini models: {e}")
-            # Return default models if API call fails
-            return [
-                {'id': 'gemini-pro', 'name': 'gemini-pro', 'displayName': 'Gemini Pro'},
-                {'id': 'gemini-pro-vision', 'name': 'gemini-pro-vision', 'displayName': 'Gemini Pro Vision'},
-                {'id': 'gemini-1.5-pro', 'name': 'gemini-1.5-pro', 'displayName': 'Gemini 1.5 Pro'},
-                {'id': 'gemini-1.5-flash', 'name': 'gemini-1.5-flash', 'displayName': 'Gemini 1.5 Flash'},
-            ]
         except Exception as e:
-            print(f"❌ Error fetching Gemini models: {e}")
-            print(f"🔍 Error type: {type(e).__name__}")
-            # Return default models if API call fails
-            return [
-                {'id': 'gemini-pro', 'name': 'gemini-pro', 'displayName': 'Gemini Pro'},
-                {'id': 'gemini-pro-vision', 'name': 'gemini-pro-vision', 'displayName': 'Gemini Pro Vision'},
-                {'id': 'gemini-1.5-pro', 'name': 'gemini-1.5-pro', 'displayName': 'Gemini 1.5 Pro'},
-                {'id': 'gemini-1.5-flash', 'name': 'gemini-1.5-flash', 'displayName': 'Gemini 1.5 Flash'},
-            ]
+            # IMPORTANT: do not hide failures behind a hardcoded list.
+            # Returning [] allows DynamicModelsService.test_api_key(...) to
+            # accurately detect that something is wrong with this API key or
+            # network environment, so the UI can show a clear warning instead
+            # of only exposing a partial list.
+            print(f"Error fetching Gemini models: {e}")
+            return []
     
     @staticmethod
     def get_models_for_provider(provider_type: str, api_key: str = None) -> List[Dict[str, Any]]:
         """Get available models for a specific provider"""
         if provider_type == 'openai' and api_key:
             return ModelService.get_openai_models(api_key)
-        elif provider_type == 'claude':
-            return ModelService.get_claude_models()
+        elif provider_type == 'claude' and api_key:
+            return ModelService.get_claude_models(api_key)
         elif provider_type == 'gemini' and api_key:
             return ModelService.get_gemini_models(api_key)
         else:

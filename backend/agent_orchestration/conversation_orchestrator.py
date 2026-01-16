@@ -162,10 +162,13 @@ class ConversationOrchestrator:
         """
         return self.docaware_handler.is_docaware_enabled(agent_node)
     
-    async def craft_conversation_prompt(self, conversation_history: str, agent_node: Dict[str, Any], project_id: Optional[str] = None) -> str:
+    async def craft_conversation_prompt(self, conversation_history: str, agent_node: Dict[str, Any], project_id: Optional[str] = None) -> List[Dict[str, str]]:
         """
-        Craft conversation prompt for an agent including full conversation history
+        Craft conversation messages array for an agent including full conversation history
         Delegates to ChatManager for actual implementation
+        
+        Returns:
+            List of message dicts with 'role' and 'content' keys
         """
         return await self.chat_manager.craft_conversation_prompt(conversation_history, agent_node, project_id)
     

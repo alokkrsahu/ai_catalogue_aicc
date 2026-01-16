@@ -755,19 +755,21 @@ class WorkflowExecutor:
                                 # Use multi-input processing
                                 logger.info(f"📥 ORCHESTRATOR: Agent {node_name} has {len(input_sources)} input sources - using multi-input mode")
                                 aggregated_context = self.workflow_parser.aggregate_multiple_inputs(input_sources, executed_nodes)
-                                prompt = await self.chat_manager.craft_conversation_prompt_with_docaware(
+                                llm_messages = await self.chat_manager.craft_conversation_prompt_with_docaware(
                                     aggregated_context, node, str(project_id), conversation_history
                                 )
                             else:
                                 # Use traditional single-input processing
                                 logger.info(f"📥 ORCHESTRATOR: Agent {node_name} has {len(input_sources)} input source - using single-input mode")
-                                prompt = await self.chat_manager.craft_conversation_prompt(
+                                llm_messages = await self.chat_manager.craft_conversation_prompt(
                                     conversation_history, node, str(project_id)
                                 )
                             
-                            # Execute the agent
+                            # CRITICAL FIX: Use separate variable for LLM-formatted messages
+                            # These are for LLM API calls only, NOT for storage in messages_data
+                            # Execute the agent with structured messages
                             agent_response = await llm_provider.generate_response(
-                                prompt=prompt
+                                messages=llm_messages
                             )
                             
                             if agent_response.error:
@@ -787,6 +789,7 @@ class WorkflowExecutor:
                             
                             # CRITICAL FIX: Save agent message BEFORE reflection processing
                             # This ensures the message is recorded even if workflow pauses for reflection
+                            # NOTE: Use 'messages' array (structured messages for storage), NOT 'llm_messages' (LLM-formatted)
                             messages.append({
                                 'sequence': message_sequence,
                                 'agent_name': node_name,
@@ -1115,32 +1118,113 @@ class WorkflowExecutor:
             stored_messages = execution_record.messages_data or []
             logger.info(f"🔍 ORCHESTRATOR: Retrieved {len(stored_messages)} stored messages from database")
             
-            # Find the highest sequence number in stored messages
-            max_stored_sequence = max([msg.get('sequence', -1) for msg in stored_messages], default=-1)
+            # CRITICAL FIX: Clean stored messages - remove or fix messages with "Unknown" agent_name
+            cleaned_stored_messages = []
+            for stored_msg in stored_messages:
+                if not isinstance(stored_msg, dict):
+                    logger.warning(f"⚠️ ORCHESTRATOR: Skipping non-dict stored message: {type(stored_msg)}")
+                    continue
+                
+                agent_name = stored_msg.get('agent_name', '')
+                # Skip messages with "Unknown" or empty agent_name - these are likely malformed
+                if not agent_name or agent_name.strip() == '' or agent_name == 'Unknown':
+                    # Try to infer from agent_type or content
+                    agent_type = stored_msg.get('agent_type', '')
+                    if agent_type and agent_type != 'Unknown':
+                        stored_msg['agent_name'] = agent_type
+                        logger.debug(f"🔧 ORCHESTRATOR: Fixed stored message - inferred agent_name '{agent_type}' from agent_type")
+                    else:
+                        # Skip messages that can't be fixed
+                        logger.warning(f"⚠️ ORCHESTRATOR: Skipping stored message with invalid agent_name: {stored_msg.get('content', '')[:50]}")
+                        continue
+                
+                cleaned_stored_messages.append(stored_msg)
+            
+            logger.info(f"🔍 ORCHESTRATOR: Cleaned {len(stored_messages)} stored messages to {len(cleaned_stored_messages)} valid messages")
+            
+            # Find the highest sequence number in cleaned stored messages
+            max_stored_sequence = max([msg.get('sequence', -1) for msg in cleaned_stored_messages], default=-1)
             logger.info(f"🔍 ORCHESTRATOR: Max stored sequence: {max_stored_sequence}")
             
-            # Merge messages: Start with stored messages, then add any new messages with updated sequences
-            final_messages = stored_messages.copy()
+            # Merge messages: Start with cleaned stored messages, then add any new messages with updated sequences
+            final_messages = cleaned_stored_messages.copy()
             
             # Add workflow messages that aren't already stored, updating their sequences if needed
             for message in messages:
+                # CRITICAL FIX: Skip messages that are LLM-formatted (only have 'role' and 'content')
+                # These are for LLM consumption only, not for storage in messages_data
+                if isinstance(message, dict) and 'role' in message and 'content' in message:
+                    # Check if this is an LLM-formatted message (missing agent_name, agent_type, etc.)
+                    if 'agent_name' not in message and 'agent_type' not in message:
+                        logger.debug(f"⏭️ ORCHESTRATOR: Skipping LLM-formatted message (role: {message.get('role')}) - not for storage")
+                        continue
+                
                 message_sequence = message.get('sequence', -1)
                 
-                # Check if this message already exists in stored messages
+                # Check if this message already exists in cleaned stored messages
                 already_stored = any(
                     stored_msg.get('sequence') == message_sequence and 
                     stored_msg.get('agent_name') == message.get('agent_name') and
                     stored_msg.get('message_type') == message.get('message_type')
-                    for stored_msg in stored_messages
+                    for stored_msg in cleaned_stored_messages
                 )
                 
                 if not already_stored:
+                    # Ensure message has all required fields before adding
+                    if not isinstance(message, dict):
+                        logger.warning(f"⚠️ ORCHESTRATOR: Skipping non-dict message: {type(message)}")
+                        continue
+                    
+                    # CRITICAL FIX: Require proper agent_name - skip messages without it or with "Unknown"
+                    # Messages without agent_name are likely LLM-formatted or malformed
+                    agent_name = message.get('agent_name')
+                    
+                    # Check if agent_name is missing, empty, or "Unknown"
+                    if not agent_name or not isinstance(agent_name, str) or agent_name.strip() == '' or agent_name.strip() == 'Unknown':
+                        # Try to infer from agent_type if available
+                        agent_type = message.get('agent_type', '')
+                        if agent_type and agent_type != 'Unknown' and agent_type.strip() != '':
+                            agent_name = agent_type
+                            logger.debug(f"🔧 ORCHESTRATOR: Inferred agent_name '{agent_name}' from agent_type")
+                        else:
+                            # Skip messages without proper agent_name - these shouldn't be stored
+                            logger.warning(f"⚠️ ORCHESTRATOR: Skipping message without proper agent_name (agent_type: {agent_type}): {message.get('content', '')[:50]}")
+                            continue
+                    
+                    # Final check: reject "Unknown" even after inference
+                    if agent_name.strip() == 'Unknown':
+                        logger.warning(f"⚠️ ORCHESTRATOR: Skipping message with 'Unknown' agent_name: {message.get('content', '')[:50]}")
+                        continue
+                    
+                    # Ensure required fields have proper values (not "Unknown" defaults)
+                    message['agent_name'] = agent_name.strip()
+                    if 'agent_type' not in message or not message.get('agent_type') or message.get('agent_type') == 'Unknown':
+                        # Try to infer from agent_name if it's a known node type
+                        if 'Start' in agent_name or agent_name == 'Start':
+                            message['agent_type'] = 'StartNode'
+                        elif 'End' in agent_name or agent_name == 'End':
+                            message['agent_type'] = 'EndNode'
+                        else:
+                            message['agent_type'] = 'AssistantAgent'  # Default to AssistantAgent instead of Unknown
+                    if 'message_type' not in message or message.get('message_type') is None:
+                        message['message_type'] = 'chat'
+                    if 'content' not in message:
+                        message['content'] = ''
+                    if 'timestamp' not in message:
+                        message['timestamp'] = timezone.now().isoformat()
+                    
                     # If this is a workflow message (like EndNode) that needs to be added after reflection
                     if message_sequence <= max_stored_sequence:
                         # Update sequence to come after all stored messages
                         message['sequence'] = max_stored_sequence + 1
                         max_stored_sequence += 1
                         logger.info(f"➕ ORCHESTRATOR: Updated sequence for {message.get('agent_name')} to {message['sequence']}")
+                    
+                    # Final validation before adding - ensure agent_name is not "Unknown"
+                    if message.get('agent_name', '').strip() == 'Unknown':
+                        logger.error(f"❌ ORCHESTRATOR: CRITICAL - Attempted to add message with 'Unknown' agent_name! Content: {message.get('content', '')[:50]}")
+                        logger.error(f"❌ ORCHESTRATOR: Message data: {message}")
+                        continue
                     
                     final_messages.append(message)
                     logger.info(f"➕ ORCHESTRATOR: Added missing message: {message.get('agent_name')} ({message.get('message_type')}) seq:{message.get('sequence')}")
@@ -1190,7 +1274,7 @@ class WorkflowExecutor:
                 'messages': final_messages,
                 'result_summary': f"Successfully executed {len(execution_sequence)} nodes with {len(agents_involved)} agents"
             }
-
+            
             logger.info(f"✅ ORCHESTRATOR: REAL workflow execution completed successfully - {len(final_messages)} total messages logged")
             logger.info(f"📊 MESSAGE COUNT VERIFICATION: Expected ~{len(execution_sequence)} nodes, logged {len(final_messages)} messages")
 
@@ -1275,8 +1359,8 @@ class WorkflowExecutor:
                 logger.error(f"❌ EXP_METRIC_WORKFLOW_EXECUTION: Failed to log metrics: {metric_error}")
             
             # Debug: Log all message types for verification
-            message_types = [msg['message_type'] for msg in final_messages]
-            agent_names = [msg['agent_name'] for msg in final_messages]
+            message_types = [msg.get('message_type', 'unknown') for msg in final_messages if isinstance(msg, dict)]
+            agent_names = [msg.get('agent_name', 'N/A') for msg in final_messages if isinstance(msg, dict)]
             logger.info(f"📋 MESSAGE TYPES: {message_types}")
             logger.info(f"👥 AGENT NAMES: {agent_names}")
             
@@ -1571,22 +1655,25 @@ class WorkflowExecutor:
                         logger.info(f"📥 CONTINUE WORKFLOW: Agent {node_name} has {len(input_sources)} input sources - using multi-input mode")
                         aggregated_context = self.workflow_parser.aggregate_multiple_inputs(input_sources, executed_nodes)
                         # CRITICAL FIX: Use craft_conversation_prompt_with_docaware for multi-input (same as main execution)
-                        combined_prompt = await self.chat_manager.craft_conversation_prompt_with_docaware(
+                        llm_messages = await self.chat_manager.craft_conversation_prompt_with_docaware(
                             aggregated_context, node, str(project.project_id), conversation_history
                         )
                     else:
                         # Single-input mode - CRITICAL FIX: Use proper prompt crafting
                         logger.info(f"📥 CONTINUE WORKFLOW: Agent {node_name} has {len(input_sources)} input source - using single-input mode")
-                        combined_prompt = await self.chat_manager.craft_conversation_prompt(
+                        llm_messages = await self.chat_manager.craft_conversation_prompt(
                             conversation_history, node, str(project.project_id)
                         )
                     
-                    # DEBUG: Log prompt content for troubleshooting
-                    logger.info(f"🔍 CONTINUE WORKFLOW: Agent {node_name} prompt preview: {combined_prompt[:300]}...")
+                    # CRITICAL FIX: Use separate variable for LLM-formatted messages
+                    # These are for LLM API calls only, NOT for storage in messages_data
+                    # DEBUG: Log messages content for troubleshooting
+                    messages_preview = f"{len(llm_messages)} messages" + (f", first message: {llm_messages[0].get('content', '')[:100]}..." if llm_messages else "")
+                    logger.info(f"🔍 CONTINUE WORKFLOW: Agent {node_name} messages: {messages_preview}")
                     
-                    # Make LLM call
+                    # Make LLM call with structured messages
                     start_time = timezone.now()
-                    llm_response = await llm_provider.generate_response(prompt=combined_prompt)
+                    llm_response = await llm_provider.generate_response(messages=llm_messages)
                     end_time = timezone.now()
                     
                     if llm_response.error:
@@ -1812,37 +1899,51 @@ class WorkflowExecutor:
         skipped_count = 0
         
         for message in messages:
+            # Skip messages without required fields
+            if not isinstance(message, dict):
+                logger.warning(f"⚠️ SAVE MESSAGE: Skipping non-dict message: {type(message)}")
+                continue
+            
+            # Ensure message has a sequence key - use get() with default
+            message_sequence = message.get('sequence')
+            if message_sequence is None:
+                # Try to assign a sequence based on existing sequences
+                message_sequence = max(existing_sequences, default=-1) + 1
+                message['sequence'] = message_sequence
+                logger.warning(f"⚠️ SAVE MESSAGE: Message missing sequence, assigned {message_sequence}")
+            
             # Skip messages that already exist in database
-            if message['sequence'] in existing_sequences:
+            if message_sequence in existing_sequences:
                 skipped_count += 1
-                logger.debug(f"⏭️ SAVE MESSAGE: Skipping duplicate sequence {message['sequence']} ({message['agent_name']})")
+                logger.debug(f"⏭️ SAVE MESSAGE: Skipping duplicate sequence {message_sequence} ({message.get('agent_name', 'Unknown')})")
                 continue
                 
             # Parse timestamp from message
             try:
-                message_timestamp = datetime.fromisoformat(message['timestamp'].replace('Z', '+00:00'))
+                message_timestamp = datetime.fromisoformat(message.get('timestamp', '').replace('Z', '+00:00'))
                 if message_timestamp.tzinfo is None:
                     message_timestamp = timezone.make_aware(message_timestamp)
-            except (KeyError, ValueError):
+            except (KeyError, ValueError, AttributeError):
                 message_timestamp = timezone.now()
             
             try:
                 await sync_to_async(WorkflowExecutionMessage.objects.create)(
                     execution=execution_record,
-                    sequence=message['sequence'],
-                    agent_name=message['agent_name'],
-                    agent_type=message['agent_type'],
-                    content=message['content'],
-                    message_type=message['message_type'],
+                    sequence=message_sequence,
+                    agent_name=message.get('agent_name') or 'System',
+                    agent_type=message.get('agent_type') or 'System',
+                    content=message.get('content', ''),
+                    message_type=message.get('message_type', 'chat'),
                     timestamp=message_timestamp,
-                    response_time_ms=message['response_time_ms'],
+                    response_time_ms=message.get('response_time_ms', 0),
                     token_count=message.get('token_count'),
                     metadata=message.get('metadata', {})
                 )
                 saved_count += 1
-                logger.debug(f"💾 SAVE MESSAGE: Saved sequence {message['sequence']} ({message['agent_name']})")
+                existing_sequences.add(message_sequence)  # Add to set to prevent duplicates in same batch
+                logger.debug(f"💾 SAVE MESSAGE: Saved sequence {message_sequence} ({message.get('agent_name', 'Unknown')})")
             except Exception as save_error:
-                logger.error(f"❌ SAVE MESSAGE: Failed to save message {message['sequence']}: {save_error}")
+                logger.error(f"❌ SAVE MESSAGE: Failed to save message {message_sequence}: {save_error}")
         
         logger.info(f"💾 SAVE MESSAGE: Saved {saved_count} new messages, skipped {skipped_count} duplicates")
     
@@ -2008,16 +2109,18 @@ class WorkflowExecutor:
                 # This is correct - each node sees the state before parallel execution started
                 if len(input_sources) > 1:
                     aggregated_context = self.workflow_parser.aggregate_multiple_inputs(input_sources, executed_nodes)
-                    prompt = await self.chat_manager.craft_conversation_prompt_with_docaware(
+                    llm_messages = await self.chat_manager.craft_conversation_prompt_with_docaware(
                         aggregated_context, node, str(project_id), conversation_history
                     )
                 else:
-                    prompt = await self.chat_manager.craft_conversation_prompt(
+                    llm_messages = await self.chat_manager.craft_conversation_prompt(
                         conversation_history, node, str(project_id)
                     )
                 
-                # Execute LLM call
-                agent_response = await llm_provider.generate_response(prompt=prompt)
+                # CRITICAL FIX: Use separate variable for LLM-formatted messages
+                # These are for LLM API calls only, NOT for storage in messages_data
+                # Execute LLM call with structured messages
+                agent_response = await llm_provider.generate_response(messages=llm_messages)
                 
                 if agent_response.error:
                     raise Exception(f"Agent {node_name} error: {agent_response.error}")

@@ -426,6 +426,15 @@
       
       console.log(`✅ WORKFLOW DESIGNER: Loaded ${nodes.length} nodes, ${edges.length} edges`);
       
+      // Auto-center view on loaded nodes
+      if (nodes.length > 0) {
+        // Small delay to ensure canvas is rendered and nodes are positioned
+        setTimeout(() => {
+          centerView();
+          console.log('🎯 WORKFLOW DESIGNER: Auto-centered view on loaded nodes');
+        }, 150);
+      }
+      
     } catch (error) {
       console.error('❌ WORKFLOW DESIGNER: Failed to load graph:', error);
       if (toasts && toasts.error) {

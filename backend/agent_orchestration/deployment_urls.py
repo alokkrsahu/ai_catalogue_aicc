@@ -3,7 +3,7 @@ URL routing for workflow deployment endpoints
 """
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .deployment_views import DeploymentViewSet, public_chat_endpoint, embed_chatbot_html, submit_deployment_human_input
+from .deployment_views import DeploymentViewSet, public_chat_endpoint, public_chat_endpoint_stream, embed_chatbot_html, submit_deployment_human_input
 
 # Create router for deployment management endpoints
 router = DefaultRouter()
@@ -16,6 +16,9 @@ router.register(
 urlpatterns = [
     # Public endpoint (unauthenticated)
     path('api/workflow-deploy/<uuid:project_id>/', public_chat_endpoint, name='workflow-deploy-public'),
+    
+    # Public streaming endpoint (unauthenticated)
+    path('api/workflow-deploy/<uuid:project_id>/stream/', public_chat_endpoint_stream, name='workflow-deploy-public-stream'),
     
     # Submit human input endpoint (for UserProxyAgent in deployment)
     path('api/workflow-deploy/<uuid:project_id>/submit-input/', submit_deployment_human_input, name='workflow-deploy-submit-input'),

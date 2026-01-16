@@ -129,8 +129,8 @@ class DynamicModelsService:
                 return len(models) > 0
                 
             elif provider == 'anthropic':
-                # Test with Claude models (may not have API endpoint, assume valid if key exists)
-                models = ModelService.get_claude_models()
+                # Test with Claude models API endpoint
+                models = ModelService.get_claude_models(api_key)
                 return len(models) > 0
                 
             elif provider == 'google':
@@ -281,7 +281,7 @@ class DynamicModelsService:
                 logger.info(f"✅ DYNAMIC MODELS: Fetched {len(models)} Google models from API")
                 
             elif provider == 'anthropic':
-                models_data = ModelService.get_claude_models()
+                models_data = ModelService.get_claude_models(api_key)
                 
                 for model_data in models_data:
                     model_info = ModelInfo(

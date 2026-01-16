@@ -10,7 +10,7 @@ import threading
 from datetime import datetime
 from typing import Dict, Any, Optional
 
-from django.http import JsonResponse
+from django.http import JsonResponse, StreamingHttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.utils import timezone
@@ -37,6 +37,19 @@ from .deployment_executor import WorkflowDeploymentExecutor
 from .deployment_rate_limiter import WorkflowDeploymentRateLimiter
 
 logger = logging.getLogger('workflow_deployment')
+
+
+def _add_cors_headers(response, request):
+    """Add CORS headers to response"""
+    origin = request.META.get('HTTP_ORIGIN', '')
+    if origin:
+        response['Access-Control-Allow-Origin'] = origin
+        response['Access-Control-Allow-Credentials'] = 'true'
+    else:
+        response['Access-Control-Allow-Origin'] = '*'
+    response['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    return response
 
 
 def _save_deployment_data_async(
@@ -919,6 +932,218 @@ def public_chat_endpoint(request, project_id):
 @csrf_exempt
 @require_http_methods(["POST", "OPTIONS"])
 @never_cache
+def public_chat_endpoint_stream(request, project_id):
+    """
+    Public streaming chat endpoint for deployed workflows
+    
+    POST /api/workflow-deploy/{project_id}/stream/
+    Returns Server-Sent Events (SSE) stream
+    """
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        response = JsonResponse({'status': 'ok'})
+        _add_cors_headers(response, request)
+        return response
+    
+    def generate_stream():
+        """Generator function for SSE streaming"""
+        try:
+            # Generate unique request ID
+            origin = request.META.get('HTTP_ORIGIN', '')
+            timestamp = timezone.now().strftime('%Y%m%d_%H%M%S')
+            request_id = f"deploy_stream_{timestamp}_{hash(origin) % 10000:04d}_{uuid.uuid4().hex[:8]}"
+            
+            start_time = timezone.now()
+            
+            # Send initial connection message
+            yield f"data: {json.dumps({'type': 'connected', 'request_id': request_id})}\n\n"
+            
+            # Get project and deployment
+            try:
+                project = IntelliDocProject.objects.get(project_id=project_id)
+            except IntelliDocProject.DoesNotExist:
+                yield f"data: {json.dumps({'type': 'error', 'error': 'Project not found', 'request_id': request_id})}\n\n"
+                return
+            
+            deployment = WorkflowDeployment.objects.filter(
+                project=project,
+                is_active=True
+            ).first()
+            
+            if not deployment:
+                yield f"data: {json.dumps({'type': 'error', 'error': 'No active deployment found', 'request_id': request_id})}\n\n"
+                return
+            
+            if not deployment.workflow:
+                yield f"data: {json.dumps({'type': 'error', 'error': 'Deployment has no workflow configured', 'request_id': request_id})}\n\n"
+                return
+            
+            # Parse request body
+            try:
+                data = json.loads(request.body) if request.body else {}
+            except json.JSONDecodeError:
+                yield f"data: {json.dumps({'type': 'error', 'error': 'Invalid JSON format', 'request_id': request_id})}\n\n"
+                return
+            
+            # Extract user query and session_id
+            user_query = data.get('user_query', '').strip()
+            if not user_query:
+                user_query = data.get('message', '').strip()
+            session_id = data.get('session_id', '').strip()
+            
+            if not user_query or not session_id:
+                yield f"data: {json.dumps({'type': 'error', 'error': 'User query and session ID are required', 'request_id': request_id})}\n\n"
+                return
+            
+            # Get or create deployment session
+            try:
+                deployment_session, created = DeploymentSession.objects.get_or_create(
+                    deployment=deployment,
+                    session_id=session_id,
+                    defaults={
+                        'conversation_history': [],
+                        'message_count': 0,
+                        'is_active': True
+                    }
+                )
+                
+                conversation_history = deployment_session.conversation_history or []
+                
+                if created:
+                    initial_greeting = getattr(deployment, 'initial_greeting', 'Hi! I am your AI assistant.')
+                    conversation_history.append({
+                        'role': 'assistant',
+                        'content': initial_greeting,
+                        'timestamp': timezone.now().isoformat()
+                    })
+                
+                # Add user query to conversation history
+                conversation_history.append({
+                    'role': 'user',
+                    'content': user_query,
+                    'timestamp': timezone.now().isoformat()
+                })
+                
+                # Build conversation history string
+                conversation_text_parts = []
+                for msg in conversation_history:
+                    role_label = 'User' if msg['role'] == 'user' else 'Assistant'
+                    conversation_text_parts.append(f"{role_label}: {msg['content']}")
+                
+                full_conversation = '\n'.join(conversation_text_parts)
+                
+            except Exception as e:
+                logger.error(f"❌ DEPLOYMENT STREAM: Error managing session: {e}", exc_info=True)
+                yield f"data: {json.dumps({'type': 'error', 'error': 'Failed to manage session', 'request_id': request_id})}\n\n"
+                return
+            
+            # Check rate limit
+            rate_limiter = WorkflowDeploymentRateLimiter()
+            is_allowed, retry_after = rate_limiter.check_rate_limit(deployment, origin)
+            
+            if not is_allowed:
+                yield f"data: {json.dumps({'type': 'error', 'error': 'Rate limit exceeded', 'retry_after': retry_after, 'request_id': request_id})}\n\n"
+                return
+            
+            # Send thinking indicator
+            yield f"data: {json.dumps({'type': 'thinking'})}\n\n"
+            
+            # Execute workflow
+            executor = WorkflowDeploymentExecutor()
+            execution_id = f"deploy_exec_{timezone.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+            
+            try:
+                execution_result = asyncio.run(
+                    executor.execute_deployment_workflow(
+                        deployment,
+                        full_conversation,
+                        session_id,
+                        execution_id,
+                        current_user_query=user_query
+                    )
+                )
+            except Exception as e:
+                logger.error(f"❌ DEPLOYMENT STREAM: Error executing workflow: {e}", exc_info=True)
+                yield f"data: {json.dumps({'type': 'error', 'error': 'Workflow execution failed', 'request_id': request_id})}\n\n"
+                return
+            
+            execution_time_ms = int((timezone.now() - start_time).total_seconds() * 1000)
+            
+            # Handle different execution results
+            if execution_result.get('status') == 'awaiting_human_input':
+                yield f"data: {json.dumps({'type': 'awaiting_human_input', 'title': execution_result.get('title', 'USER INPUT REQUIRED'), 'last_conversation_message': execution_result.get('last_conversation_message', ''), 'agent_name': execution_result.get('agent_name', ''), 'execution_id': execution_result.get('execution_id', ''), 'session_id': session_id, 'request_id': request_id})}\n\n"
+                return
+            
+            if execution_result.get('status') != 'success':
+                yield f"data: {json.dumps({'type': 'error', 'error': execution_result.get('error', 'Workflow execution failed'), 'request_id': request_id})}\n\n"
+                return
+            
+            # Extract assistant response
+            assistant_response = execution_result.get('response', '')
+            
+            if not assistant_response:
+                yield f"data: {json.dumps({'type': 'error', 'error': 'No response generated', 'request_id': request_id})}\n\n"
+                return
+            
+            # Stream the response word by word for smooth appearance
+            words = assistant_response.split(' ')
+            accumulated = ""
+            
+            for i, word in enumerate(words):
+                accumulated += word
+                if i < len(words) - 1:
+                    accumulated += " "
+                
+                # Send chunk
+                yield f"data: {json.dumps({'type': 'content', 'content': word + (' ' if i < len(words) - 1 else ''), 'request_id': request_id})}\n\n"
+                
+                # Small delay for smooth streaming (optional)
+                import time
+                time.sleep(0.02)  # 20ms delay between words
+            
+            # Add assistant response to conversation history for background save
+            conversation_history.append({
+                'role': 'assistant',
+                'content': assistant_response,
+                'timestamp': timezone.now().isoformat()
+            })
+            
+            # Start background save
+            background_thread = threading.Thread(
+                target=_save_deployment_data_async,
+                args=(
+                    deployment_session,
+                    conversation_history,
+                    assistant_response,
+                    execution_id,
+                    None,  # deployment_request (None for streaming)
+                    execution_result,
+                    execution_time_ms,
+                    execution_result.get('execution_id'),
+                    user_query
+                ),
+                daemon=True,
+                name=f"deploy-stream-save-{execution_id[:8]}"
+            )
+            background_thread.start()
+            
+            # Send completion
+            yield f"data: {json.dumps({'type': 'done', 'request_id': request_id, 'execution_time_ms': execution_time_ms})}\n\n"
+            
+        except Exception as e:
+            logger.error(f"❌ DEPLOYMENT STREAM: Error in stream generation: {e}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+    
+    response = StreamingHttpResponse(generate_stream(), content_type='text/event-stream')
+    response['Cache-Control'] = 'no-cache'
+    response['X-Accel-Buffering'] = 'no'  # Disable buffering in nginx
+    _add_cors_headers(response, request)
+    return response
+
+
+@csrf_exempt
+@require_http_methods(["POST", "OPTIONS"])
+@never_cache
 def submit_deployment_human_input(request, project_id):
     """
     Submit human input for a paused deployment workflow execution.
@@ -1288,6 +1513,23 @@ def embed_chatbot_html(request, project_id):
     .human-input-buttons .submit-btn {{ background:#0b3b66; color:#fff; }}
     .human-input-buttons .submit-btn:disabled {{ opacity:0.6; cursor:not-allowed; }}
     .human-input-buttons .cancel-btn {{ background:#f3f4f6; color:#374151; }}
+    .thinking-indicator {{ display:flex; align-items:center; gap:6px; padding:8px 11px; }}
+    .thinking-dots {{ display:flex; gap:4px; }}
+    .thinking-dot {{ width:6px; height:6px; background:#9ca3af; border-radius:50%; animation:thinking 1.4s infinite; }}
+    .thinking-dot:nth-child(2) {{ animation-delay:0.2s; }}
+    .thinking-dot:nth-child(3) {{ animation-delay:0.4s; }}
+    @keyframes thinking {{
+      0%, 60%, 100% {{ opacity:0.3; transform:scale(0.8); }}
+      30% {{ opacity:1; transform:scale(1); }}
+    }}
+    .bubble markdown {{ display:block; }}
+    .bubble markdown strong {{ font-weight:600; }}
+    .bubble markdown em {{ font-style:italic; }}
+    .bubble markdown code {{ background:#f3f4f6; padding:2px 4px; border-radius:3px; font-family:monospace; font-size:0.9em; }}
+    .bubble markdown pre {{ background:#f3f4f6; padding:8px; border-radius:6px; overflow-x:auto; }}
+    .bubble markdown pre code {{ background:none; padding:0; }}
+    .bubble markdown ul, .bubble markdown ol {{ margin:4px 0; padding-left:20px; }}
+    .bubble markdown li {{ margin:2px 0; }}
   </style>
 </head>
 <body>
@@ -1323,8 +1565,38 @@ def embed_chatbot_html(request, project_id):
 
 <script>
   const ENDPOINT_URL = {json.dumps(endpoint_url)};
+  const STREAM_URL = ENDPOINT_URL.replace(/\/$/, '') + '/stream/';
   const SUBMIT_INPUT_URL = ENDPOINT_URL.replace(/\/$/, '') + '/submit-input/';
   const INITIAL_GREETING = {json.dumps(initial_greeting)};
+  
+  // Simple markdown renderer
+  function renderMarkdown(text) {{
+    if (!text) return '';
+    // Escape HTML first
+    let html = text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    
+    // Bold
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/__(.+?)__/g, '<strong>$1</strong>');
+    
+    // Italic
+    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+    html = html.replace(/_(.+?)_/g, '<em>$1</em>');
+    
+    // Code blocks
+    html = html.replace(/```([\\s\\S]*?)```/g, '<pre><code>$1</code></pre>');
+    
+    // Inline code
+    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+    
+    // Line breaks
+    html = html.replace(/\\n/g, '<br>');
+    
+    return html;
+  }}
 
   const messages = [];
   const sessionId = 'sess_' + Math.random().toString(36).slice(2);
@@ -1342,15 +1614,44 @@ def embed_chatbot_html(request, project_id):
   const humanInputSubmit = document.getElementById('humanInputSubmit');
   const humanInputCancel = document.getElementById('humanInputCancel');
 
-  function appendMessage(role, text) {{
+  function appendMessage(role, text, isStreaming = false) {{
     const msg = document.createElement('div');
     msg.className = 'msg ' + (role === 'user' ? 'user' : 'assistant');
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
+    
+    if (role === 'assistant' && !isStreaming) {{
+      // Render markdown for assistant messages
+      const markdownEl = document.createElement('markdown');
+      markdownEl.innerHTML = renderMarkdown(text);
+      bubble.appendChild(markdownEl);
+    }} else {{
     bubble.textContent = text;
+    }}
+    
     msg.appendChild(bubble);
     messagesEl.appendChild(msg);
     messagesEl.scrollTop = messagesEl.scrollHeight;
+    return bubble;
+  }}
+  
+  function showThinkingIndicator() {{
+    const msg = document.createElement('div');
+    msg.className = 'msg assistant';
+    msg.id = 'thinking-indicator';
+    const indicator = document.createElement('div');
+    indicator.className = 'thinking-indicator';
+    indicator.innerHTML = '<div class="thinking-dots"><div class="thinking-dot"></div><div class="thinking-dot"></div><div class="thinking-dot"></div></div>';
+    msg.appendChild(indicator);
+    messagesEl.appendChild(msg);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }}
+  
+  function hideThinkingIndicator() {{
+    const indicator = document.getElementById('thinking-indicator');
+    if (indicator) {{
+      indicator.remove();
+    }}
   }}
 
   function showHumanInputModal(title, message) {{
@@ -1447,10 +1748,14 @@ def embed_chatbot_html(request, project_id):
 
     inputEl.value = '';
     sendBtn.disabled = true;
-    statusEl.textContent = 'Contacting workflow...';
+    statusEl.textContent = '';
+    
+    // Show thinking indicator
+    showThinkingIndicator();
 
     try {{
-      const resp = await fetch(ENDPOINT_URL, {{
+      // Use streaming endpoint
+      const resp = await fetch(STREAM_URL, {{
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json' }},
         body: JSON.stringify({{
@@ -1460,28 +1765,76 @@ def embed_chatbot_html(request, project_id):
       }});
 
       if (!resp.ok) {{
-        const err = await resp.json().catch(() => ({{}}));
-        throw new Error(err.error || 'HTTP ' + resp.status);
+        const err = await resp.text().catch(() => '');
+        throw new Error(err || 'HTTP ' + resp.status);
       }}
 
-      const data = await resp.json();
+      // Hide thinking indicator
+      hideThinkingIndicator();
       
-      if (data.status === 'awaiting_human_input') {{
-        // UserProxyAgent requires human input
+      // Create streaming message bubble
+      const msg = document.createElement('div');
+      msg.className = 'msg assistant';
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      const markdownEl = document.createElement('markdown');
+      bubble.appendChild(markdownEl);
+      msg.appendChild(bubble);
+      messagesEl.appendChild(msg);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      
+      let accumulatedContent = '';
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      
+      while (true) {{
+        const {{ done, value }} = await reader.read();
+        if (done) break;
+        
+        const chunk = decoder.decode(value, {{ stream: true }});
+        const lines = chunk.split('\\n');
+        
+        for (const line of lines) {{
+          if (line.startsWith('data: ')) {{
+            try {{
+              const data = JSON.parse(line.slice(6));
+              
+              if (data.type === 'connected') {{
+                // Connection established
+              }} else if (data.type === 'thinking') {{
+                // Keep thinking indicator
+              }} else if (data.type === 'content') {{
+                accumulatedContent += data.content;
+                markdownEl.innerHTML = renderMarkdown(accumulatedContent);
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+              }} else if (data.type === 'awaiting_human_input') {{
+                hideThinkingIndicator();
         showHumanInputModal(data.title, data.last_conversation_message);
         currentExecutionId = data.execution_id;
         statusEl.textContent = 'Waiting for your input...';
-      }} else if (data.status === 'success') {{
-        const reply = data.response || '(No response)';
-        appendMessage('assistant', reply);
-        messages.push({{ role: 'assistant', content: reply }});
-        statusEl.textContent = '';
-      }} else {{
+                msg.remove(); // Remove streaming message
+                return;
+              }} else if (data.type === 'error') {{
+                hideThinkingIndicator();
+                msg.remove();
         appendMessage('assistant', 'Error: ' + (data.error || 'Unexpected error'));
         statusEl.textContent = 'Error from workflow endpoint';
+                return;
+              }} else if (data.type === 'done') {{
+                // Streaming complete
+                messages.push({{ role: 'assistant', content: accumulatedContent }});
+                statusEl.textContent = '';
+                return;
+              }}
+            }} catch (e) {{
+              console.error('Error parsing SSE data:', e);
+            }}
+          }}
+        }}
       }}
     }} catch (e) {{
       console.error('Chat error:', e);
+      hideThinkingIndicator();
       appendMessage('assistant', 'Sorry, there was a problem talking to the workflow.');
       statusEl.textContent = e.message || 'Network error';
     }} finally {{

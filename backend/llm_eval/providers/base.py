@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, AsyncGenerator
 import asyncio
 import aiohttp
 import time
@@ -26,8 +26,26 @@ class LLMProvider(ABC):
         self.provider_name = self.__class__.__name__.replace('Provider', '').lower()
     
     @abstractmethod
-    async def generate_response(self, prompt: str, **kwargs) -> LLMResponse:
-        """Generate response from the LLM provider"""
+    async def generate_response(
+        self, 
+        prompt: Optional[str] = None, 
+        messages: Optional[List[Dict[str, str]]] = None,
+        **kwargs
+    ) -> LLMResponse:
+        """
+        Generate response from the LLM provider.
+        
+        Args:
+            prompt: Optional prompt string (for backward compatibility)
+            messages: Optional structured messages array [{"role": "...", "content": "..."}]
+            **kwargs: Additional provider-specific parameters
+            
+        Returns:
+            LLMResponse object
+            
+        Note: Either prompt or messages should be provided, not both.
+        If messages is provided, it takes precedence over prompt.
+        """
         pass
     
     @abstractmethod
@@ -36,8 +54,26 @@ class LLMProvider(ABC):
         pass
     
     @abstractmethod
-    def format_request_body(self, prompt: str, **kwargs) -> Dict[str, Any]:
-        """Format the request body for the provider's API"""
+    def format_request_body(
+        self, 
+        prompt: Optional[str] = None, 
+        messages: Optional[List[Dict[str, str]]] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Format the request body for the provider's API.
+        
+        Args:
+            prompt: Optional prompt string (for backward compatibility)
+            messages: Optional structured messages array
+            **kwargs: Additional parameters
+            
+        Returns:
+            Formatted request body dict
+            
+        Note: Either prompt or messages should be provided.
+        If messages is provided, it takes precedence over prompt.
+        """
         pass
     
     @abstractmethod
@@ -48,3 +84,31 @@ class LLMProvider(ABC):
     def estimate_cost(self, token_count: Optional[int]) -> Optional[float]:
         """Estimate cost based on token count - override in subclasses"""
         return None
+    
+    async def generate_response_stream(
+        self,
+        prompt: Optional[str] = None,
+        messages: Optional[List[Dict[str, str]]] = None,
+        **kwargs
+    ) -> AsyncGenerator[str, None]:
+        """
+        Generate streaming response from the LLM provider.
+        
+        Args:
+            prompt: Optional prompt string (for backward compatibility)
+            messages: Optional structured messages array
+            **kwargs: Additional provider-specific parameters
+            
+        Yields:
+            Text chunks as they are generated
+            
+        Note: Default implementation falls back to non-streaming.
+        Override in subclasses for native streaming support.
+        """
+        # Default implementation: fall back to non-streaming
+        response = await self.generate_response(prompt=prompt, messages=messages, **kwargs)
+        if response.error:
+            yield f"Error: {response.error}"
+        else:
+            # Yield the full response as a single chunk
+            yield response.text

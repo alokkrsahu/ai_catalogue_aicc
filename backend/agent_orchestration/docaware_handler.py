@@ -334,11 +334,11 @@ class DocAwareHandler:
             line = line.strip()
             if not line:
                 continue
-
+            
             # Check if this is a user message
             # Patterns: "User:", "user:", or lines that don't start with assistant/agent names
             line_lower = line.lower()
-
+            
             # SPECIAL CASE: "Start Node:" contains the user's initial query
             if line_lower.startswith('start node:'):
                 user_query = line.split(':', 1)[1].strip() if ':' in line else line

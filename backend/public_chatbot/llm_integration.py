@@ -4,7 +4,7 @@ Safely uses existing LLM infrastructure without impacting main system
 """
 import logging
 import os
-from typing import Dict, Any, Optional, Generator
+from typing import Dict, Any, Optional, Generator, List
 from datetime import datetime
 import json
 
@@ -108,7 +108,8 @@ class PublicLLMService:
     
     def generate_response(
         self, 
-        prompt: str, 
+        prompt: Optional[str] = None, 
+        messages: Optional[List[Dict[str, str]]] = None,
         provider: str = 'openai', 
         model: str = 'gpt-3.5-turbo',
         max_tokens: int = 300,
@@ -121,36 +122,52 @@ class PublicLLMService:
         Generate response using specified LLM provider
         
         Args:
-            prompt: Enhanced prompt with context
+            prompt: Enhanced prompt with context (for backward compatibility)
+            messages: Structured messages array [{"role": "...", "content": "..."}] (preferred)
             provider: LLM provider to use (openai, gemini, anthropic)
             model: Specific model to use
             max_tokens: Maximum response tokens
             temperature: Response creativity (0-1)
-            system_prompt: Custom system prompt (if None, uses default)
+            system_prompt: Custom system prompt (if None, uses default or from messages)
             request_id: Request tracking ID
             stream: Whether to return streaming response (OpenAI only)
             
         Returns:
             Dict with response and metadata or streaming generator
+            
+        Note: Either prompt or messages should be provided. If messages is provided, it takes precedence.
         """
         start_time = datetime.now()
+        
+        # Validate input
+        if not prompt and not messages:
+            return {
+                'success': False,
+                'error': 'Either prompt or messages must be provided',
+                'error_type': 'validation_error',
+                'response': 'I apologize, but there was an error processing your request.',
+                'provider': provider,
+                'model': model,
+                'tokens_used': 0,
+                'response_time_ms': 0
+            }
         
         try:
             # Route to appropriate provider
             if provider == 'openai':
-                return self._generate_openai_response(prompt, model, max_tokens, temperature, system_prompt, request_id, stream)
+                return self._generate_openai_response(prompt, messages, model, max_tokens, temperature, system_prompt, request_id, stream)
             elif provider == 'gemini':
                 if stream:
                     logger.warning(f"Streaming not supported for Gemini, falling back to non-streaming")
-                return self._generate_gemini_response(prompt, model, max_tokens, temperature, system_prompt, request_id)
+                return self._generate_gemini_response(prompt, messages, model, max_tokens, temperature, system_prompt, request_id)
             elif provider == 'anthropic':
                 if stream:
                     logger.warning(f"Streaming not supported for Anthropic, falling back to non-streaming")
-                return self._generate_anthropic_response(prompt, model, max_tokens, temperature, system_prompt, request_id)
+                return self._generate_anthropic_response(prompt, messages, model, max_tokens, temperature, system_prompt, request_id)
             else:
                 # Fallback to OpenAI
                 logger.warning(f"Unknown provider '{provider}', falling back to OpenAI")
-                return self._generate_openai_response(prompt, 'gpt-3.5-turbo', max_tokens, temperature, system_prompt, request_id, stream)
+                return self._generate_openai_response(prompt, messages, 'gpt-3.5-turbo', max_tokens, temperature, system_prompt, request_id, stream)
                 
         except Exception as e:
             end_time = datetime.now()
@@ -169,25 +186,38 @@ class PublicLLMService:
                 'response_time_ms': response_time
             }
     
-    def _generate_openai_response(self, prompt: str, model: str, max_tokens: int, temperature: float, system_prompt: str, request_id: str, stream: bool = False) -> Dict[str, Any]:
+    def _generate_openai_response(self, prompt: Optional[str], messages: Optional[List[Dict[str, str]]], model: str, max_tokens: int, temperature: float, system_prompt: Optional[str], request_id: str, stream: bool = False) -> Dict[str, Any]:
         """Generate response using OpenAI API"""
         if not self.openai_client:
             raise Exception("OpenAI client not available")
         
         start_time = datetime.now()
         
-        # System prompt must be provided - no fallbacks for public chatbot
-        if not system_prompt:
-            raise Exception("System prompt is required and must be provided from Django admin configuration")
+        # Build messages array
+        if messages:
+            # Use provided messages array (preferred)
+            api_messages = messages.copy()
+            # If system_prompt provided and no system message exists, prepend it
+            if system_prompt:
+                # Check if first message is already a system message
+                if not api_messages or api_messages[0].get('role') != 'system':
+                    api_messages.insert(0, {"role": "system", "content": system_prompt})
+        elif prompt:
+            # Fallback to prompt string (backward compatibility)
+            if not system_prompt:
+                raise Exception("System prompt is required and must be provided from Django admin configuration")
+            api_messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ]
+        else:
+            raise Exception("Either prompt or messages must be provided")
         
         try:
             # Use max_completion_tokens for newer models, max_tokens for older ones
             completion_params = {
                 "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
+                "messages": api_messages,
                 "timeout": 30,  # 30 second timeout
                 "stream": stream
             }
@@ -309,16 +339,46 @@ class PublicLLMService:
             'request_id': request_id
         }
     
-    def _generate_gemini_response(self, prompt: str, model: str, max_tokens: int, temperature: float, system_prompt: str, request_id: str) -> Dict[str, Any]:
+    def _generate_gemini_response(self, prompt: Optional[str], messages: Optional[List[Dict[str, str]]], model: str, max_tokens: int, temperature: float, system_prompt: Optional[str], request_id: str) -> Dict[str, Any]:
         """Generate response using Google Gemini API"""
         if not self.gemini_client:
             raise Exception("Gemini client not available")
         
         start_time = datetime.now()
         
-        # System prompt must be provided - no fallbacks for public chatbot
-        if not system_prompt:
-            raise Exception("System prompt is required and must be provided from Django admin configuration")
+        # Build prompt or convert messages
+        if messages:
+            # Convert messages to prompt format for Gemini (it doesn't support structured messages in the same way)
+            # Extract system message and prepend to first user message
+            system_content = ""
+            user_content_parts = []
+            
+            for msg in messages:
+                role = msg.get('role', 'user')
+                content = msg.get('content', '')
+                if role == 'system':
+                    system_content = content
+                elif role == 'user':
+                    user_content_parts.append(content)
+                elif role == 'assistant':
+                    # For Gemini, we can't include assistant messages in the prompt easily
+                    # Just skip them for now
+                    pass
+            
+            # Combine system and user content
+            if system_prompt:
+                system_content = system_prompt if not system_content else f"{system_prompt}\n\n{system_content}"
+            elif not system_content:
+                raise Exception("System prompt is required and must be provided from Django admin configuration")
+            
+            enhanced_prompt = f"{system_content}\n\n" + "\n\n".join(user_content_parts) if user_content_parts else system_content
+        elif prompt:
+            # Fallback to prompt string (backward compatibility)
+            if not system_prompt:
+                raise Exception("System prompt is required and must be provided from Django admin configuration")
+            enhanced_prompt = f"{system_prompt}\n\n{prompt}"
+        else:
+            raise Exception("Either prompt or messages must be provided")
         
         try:
             # Use gemini-pro model as default
@@ -333,9 +393,6 @@ class PublicLLMService:
                 generation_model = self.gemini_client.GenerativeModel(model_name)
             else:
                 raise Exception("Unsupported Gemini client API")
-            
-            # For Gemini, prepend system prompt to user prompt
-            enhanced_prompt = f"{system_prompt}\n\n{prompt}"
             
             # Handle both new and old Gemini APIs
             if hasattr(generation_model, 'generate_content'):
@@ -399,16 +456,44 @@ class PublicLLMService:
             logger.error(f"❌ GEMINI: API error [{request_id}]: {e}")
             raise Exception(f"Gemini API error: {e}")
     
-    def _generate_anthropic_response(self, prompt: str, model: str, max_tokens: int, temperature: float, system_prompt: str, request_id: str) -> Dict[str, Any]:
+    def _generate_anthropic_response(self, prompt: Optional[str], messages: Optional[List[Dict[str, str]]], model: str, max_tokens: int, temperature: float, system_prompt: Optional[str], request_id: str) -> Dict[str, Any]:
         """Generate response using Anthropic Claude API"""
         if not self.anthropic_client:
             raise Exception("Anthropic client not available")
         
         start_time = datetime.now()
         
-        # System prompt must be provided - no fallbacks for public chatbot
-        if not system_prompt:
-            raise Exception("System prompt is required and must be provided from Django admin configuration")
+        # Build messages array
+        if messages:
+            # Use provided messages array (preferred)
+            api_messages = []
+            extracted_system = None
+            
+            # Extract system message and build messages array
+            for msg in messages:
+                role = msg.get('role', 'user')
+                content = msg.get('content', '')
+                if role == 'system':
+                    extracted_system = content
+                else:
+                    # Map assistant to user for Anthropic (it uses 'assistant' role)
+                    api_messages.append({
+                        "role": role,  # user or assistant
+                        "content": content
+                    })
+            
+            # Use provided system_prompt or extracted system message
+            final_system = system_prompt or extracted_system
+            if not final_system:
+                raise Exception("System prompt is required and must be provided from Django admin configuration or in messages")
+        elif prompt:
+            # Fallback to prompt string (backward compatibility)
+            if not system_prompt:
+                raise Exception("System prompt is required and must be provided from Django admin configuration")
+            api_messages = [{"role": "user", "content": prompt}]
+            final_system = system_prompt
+        else:
+            raise Exception("Either prompt or messages must be provided")
         
         try:
             # Use claude-3-haiku as default for public API (cost-effective)
@@ -418,10 +503,8 @@ class PublicLLMService:
                 model=model_name,
                 max_tokens=max_tokens,
                 temperature=temperature,
-                system=system_prompt,  # Anthropic supports separate system parameter
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
+                system=final_system,  # Anthropic supports separate system parameter
+                messages=api_messages,
                 timeout=30
             )
             

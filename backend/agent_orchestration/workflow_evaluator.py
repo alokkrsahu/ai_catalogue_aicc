@@ -97,7 +97,7 @@ class WorkflowEvaluator:
                     row_data,
                     executed_by
                 )
-        
+                
         # Create tasks for all rows
         logger.info(f"🚀 EVALUATOR: Starting parallel execution of {total_rows} rows")
         tasks = [

@@ -46,6 +46,9 @@
   let providerStatus: ProviderStatus | null = null;
   let hasValidApiKeys = false;
   
+  // Request cancellation tracking to prevent stale updates
+  let currentLoadRequestId = 0;
+  
   // 📚 DocAware state
   let availableSearchMethods: SearchMethod[] = [];
   let loadingSearchMethods = false;
@@ -395,54 +398,86 @@
   
   // Load models for the current provider from bulk data
   function loadModelsForProvider(providerId: string, forceRefresh = false) {
+    // CRITICAL FIX: Request cancellation mechanism to prevent stale updates
+    // Increment request ID to cancel any previous pending requests
+    currentLoadRequestId++;
+    const requestId = currentLoadRequestId;
+    
+    // CRITICAL FIX: Ensure we're updating models for the correct node
+    // Store the node ID at the time of the call to prevent cross-instance updates
+    const currentNodeIdAtCall = node?.id;
+    
     if (!providerId) {
-      availableModels = [];
-      modelsError = 'No provider selected';
+      // Only update if this is still the current node and request is still valid
+      if (node?.id === currentNodeIdAtCall && requestId === currentLoadRequestId) {
+        availableModels = [];
+        modelsError = 'No provider selected';
+      }
       return;
     }
     
     if (!bulkModelData || !modelsLoaded) {
-      availableModels = [];
-      modelsError = 'Models not loaded yet. Please wait...';
-      loadingModels = false;
+      // Only update if this is still the current node and request is still valid
+      if (node?.id === currentNodeIdAtCall && requestId === currentLoadRequestId) {
+        availableModels = [];
+        modelsError = 'Models not loaded yet. Please wait...';
+        loadingModels = false;
+      }
       return;
     }
     
-    console.log(`🚀 BULK MODELS: Loading models for provider ${providerId} from bulk data`);
+    console.log(`🚀 BULK MODELS: Loading models for provider ${providerId} from bulk data (node: ${currentNodeIdAtCall?.slice(-4)}, requestId: ${requestId})`);
     
     // Get provider status from bulk data
     providerStatus = bulkModelData.provider_statuses[providerId];
     
     if (!providerStatus?.api_key_valid) {
-      availableModels = [];
-      modelsError = providerStatus?.message || 'No valid API key for this provider';
+      // Only update if this is still the current node and request is still valid
+      if (node?.id === currentNodeIdAtCall && requestId === currentLoadRequestId) {
+        availableModels = [];
+        modelsError = providerStatus?.message || 'No valid API key for this provider';
+      }
       console.log(`❌ BULK MODELS: Provider ${providerId} has no valid API key`);
       return;
     }
     
     // Get models from bulk data - INSTANT!
     const models = bulkModelData.provider_models[providerId] || [];
-    availableModels = models;
-    modelsError = null;
     
-    console.log(`✅ BULK MODELS: Loaded ${models.length} models for ${providerId} instantly!`, models.map(m => m.id));
-    
-    // If no models available
-    if (models.length === 0) {
-      modelsError = `No models available for ${providerId.toUpperCase()}. Please check your API key configuration.`;
-      return;
-    }
-    
-    // If current model is not in the list, reset to first available model
-    if (models.length > 0) {
-      const currentModel = nodeConfig.llm_model;
-      const modelExists = models.some(model => model.id === currentModel);
+    // CRITICAL FIX: Only update availableModels if this is still the current node and request is still valid
+    // This prevents models from appearing in the wrong agent's property panel
+    if (node?.id === currentNodeIdAtCall && requestId === currentLoadRequestId) {
+      availableModels = models;
+      modelsError = null;
       
-      if (!modelExists) {
-        console.log(`⚠️ BULK MODELS: Current model ${currentModel} not found, switching to ${models[0].id}`);
-        nodeConfig.llm_model = models[0].id;
-        updateNodeData();
+      console.log(`✅ BULK MODELS: Loaded ${models.length} models for ${providerId} instantly! (node: ${currentNodeIdAtCall?.slice(-4)}, requestId: ${requestId})`, models.map(m => m.id));
+      
+      // If no models available
+      if (models.length === 0) {
+        modelsError = `No models available for ${providerId.toUpperCase()}. Please check your API key configuration.`;
+        return;
       }
+      
+      // If current model is not in the list, reset to first available model
+      // CRITICAL: Re-verify node and request ID before updating nodeConfig
+      if (models.length > 0 && node?.id === currentNodeIdAtCall && requestId === currentLoadRequestId) {
+        const currentModel = nodeConfig.llm_model;
+        const modelExists = models.some(model => model.id === currentModel);
+        
+        if (!modelExists) {
+          // Final verification before updating nodeConfig
+          if (node?.id === currentNodeIdAtCall && requestId === currentLoadRequestId) {
+            console.log(`⚠️ BULK MODELS: Current model ${currentModel} not found, switching to ${models[0].id} (node: ${currentNodeIdAtCall?.slice(-4)}, requestId: ${requestId})`);
+            nodeConfig.llm_model = models[0].id;
+            // Only update node data if node is still valid
+            if (node?.id === currentNodeIdAtCall && requestId === currentLoadRequestId) {
+              updateNodeData();
+            }
+          }
+        }
+      }
+    } else {
+      console.log(`⏭️ BULK MODELS: Skipping update - node changed from ${currentNodeIdAtCall?.slice(-4)} to ${node?.id?.slice(-4)} or request cancelled (requestId: ${requestId}, current: ${currentLoadRequestId})`);
     }
   }
   
@@ -759,7 +794,15 @@
         console.log(`🔄 NODE PROPERTIES: Node changed, reset system_message from "${previousSystemMessage?.substring(0, 50) || 'empty'}..." to "${newSystemMessage?.substring(0, 50) || 'empty'}..."`);
       }
       
-      console.log('🔄 NODE PROPERTIES: Node changed, cleared all state and reset name/description/system_message');
+      // CRITICAL: Immediately reset model-related state to prevent models from slipping between panels
+      availableModels = [];
+      modelsError = null;
+      loadingModels = false;
+      lastProviderChange = '';
+      // Cancel any pending model load requests
+      currentLoadRequestId++;
+      
+      console.log('🔄 NODE PROPERTIES: Node changed, cleared all state and reset name/description/system_message/models');
     }
     updateLocalStateFromNode();
   }
@@ -1420,6 +1463,10 @@
           </div>
         {:else if availableModels.length === 0}
           <select disabled class="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-100 text-gray-500">
+            {#if nodeConfig.llm_model}
+              <option value={nodeConfig.llm_model} selected>{nodeConfig.llm_model}</option>
+              <option disabled>---</option>
+            {/if}
             <option>{dynamicModelsService.getNoApiKeyMessage(nodeConfig.llm_provider)}</option>
           </select>
         {:else}
@@ -1801,6 +1848,10 @@
             </div>
           {:else if availableModels.length === 0}
             <select disabled class="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-100 text-gray-500">
+              {#if nodeConfig.llm_model}
+                <option value={nodeConfig.llm_model} selected>{nodeConfig.llm_model}</option>
+                <option disabled>---</option>
+              {/if}
               <option>{dynamicModelsService.getNoApiKeyMessage(nodeConfig.llm_provider)}</option>
             </select>
           {:else}
@@ -1977,7 +2028,7 @@
                       </div>
                     {:else}
                       <div class="flex items-center">
-                        <i class="fas fa-info-circle mr-2"></i>
+                  <i class="fas fa-info-circle mr-2"></i>
                         <span>You have {documentsInfo.total_documents} document{documentsInfo.total_documents === 1 ? '' : 's'} uploaded, but they haven't been processed yet. Please process documents first to enable content filtering.</span>
                       </div>
                     {/if}
@@ -2310,7 +2361,7 @@
                       </div>
                     {:else}
                       <div class="flex items-center">
-                        <i class="fas fa-info-circle mr-2"></i>
+                  <i class="fas fa-info-circle mr-2"></i>
                         <span>You have {documentsInfo.total_documents} document{documentsInfo.total_documents === 1 ? '' : 's'} uploaded, but they haven't been processed yet. Please process documents first to enable content filtering.</span>
                       </div>
                     {/if}

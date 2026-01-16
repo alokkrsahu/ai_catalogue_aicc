@@ -512,41 +512,43 @@ def _generate_llm_response(message: str, context_results: List[Dict], conversati
             
             chromadb_content = "\n".join(content_sections)
         
-        # Build conversation history for prompt
-        conversation_history = ""
+        # Build structured messages array
+        from agent_orchestration.message_converter import convert_messages_data_to_llm_format
+        
+        # Convert conversation_context to messages format
+        messages = []
+        
+        # Build system message with knowledge base
+        system_parts = [config.system_prompt]
+        if chromadb_content:
+            system_parts.append("\n=== KNOWLEDGE BASE ===")
+            system_parts.append(chromadb_content)
+            system_parts.append("=== END KNOWLEDGE BASE ===")
+        system_message = "\n".join(system_parts)
+        
+        # Convert conversation_context to messages
         if conversation_context and len(conversation_context) > 0:
             for msg in conversation_context:
-                role = msg.get('role', '').capitalize()
+                role = msg.get('role', 'user')
                 content = msg.get('content', '')
                 if role and content:
-                    conversation_history += f"{role}: {content}\n"
-        
-        # Create the new structured format prompt
-        if chromadb_content:
-            enhanced_prompt = f"""System: {config.system_prompt}
-
-Knowledge Base: {chromadb_content}
-
-{conversation_history}User: {message}
-
-Please provide a helpful response based on the available information and conversation context."""
+                    # Map to standard roles
+                    if role.lower() == 'assistant':
+                        messages.append({"role": "assistant", "content": content})
         else:
-            # Fallback when no ChromaDB results
-            enhanced_prompt = f"""System: {config.system_prompt}
+                        messages.append({"role": "user", "content": content})
 
-{conversation_history}User: {message}
-
-Please provide a helpful response."""
+        # Add current user message
+        messages.append({"role": "user", "content": message})
         
         # Use existing LLM infrastructure through isolated service
-        # Note: Using minimal system prompt since the full prompt is in the structured format
         llm_service = PublicLLMService()
         result = llm_service.generate_response(
-            prompt=enhanced_prompt,
+            messages=messages,
             provider=config.default_llm_provider,
             model=config.default_model,
             max_tokens=config.max_response_tokens,
-            system_prompt="You are a helpful assistant.",  # Minimal system prompt since full prompt is in structured format
+            system_prompt=system_message,
             request_id=request_id
         )
         
@@ -968,15 +970,6 @@ def _generate_streaming_llm_response(message: str, context_results: list, conver
                 content_sections.append(f"[{i+1}] {title} (Score: {similarity:.3f})\n{content}\n")
             chromadb_content = "\n".join(content_sections)
         
-        # Build conversation history
-        conversation_history = ""
-        if conversation_context:
-            for msg in conversation_context:
-                role = msg.get('role', '').capitalize()
-                content = msg.get('content', '')
-                if role and content:
-                    conversation_history += f"{role}: {content}\n"
-        
         # Validate config and system prompt
         if not config or not hasattr(config, 'system_prompt'):
             logger.error(f"❌ STREAM: Config or system_prompt missing [{request_id}]")
@@ -986,36 +979,48 @@ def _generate_streaming_llm_response(message: str, context_results: list, conver
                 'error': 'Configuration error: system_prompt not found'
             }
         
-        # Create enhanced prompt with structured format
-        if chromadb_content:
-            enhanced_prompt = f"""System: {config.system_prompt}
-
-Knowledge Base: {chromadb_content}
-
-{conversation_history}User: {message}
-
-Please provide a helpful response based on the available information and conversation context."""
-        else:
-            enhanced_prompt = f"""System: {config.system_prompt}
-
-{conversation_history}User: {message}
-
-Please provide a helpful response."""
+        # Build structured messages array
+        from agent_orchestration.message_converter import convert_messages_data_to_llm_format
         
-        logger.info(f"🌊 STREAM: Enhanced prompt created, length: {len(enhanced_prompt)} [{request_id}]")
+        # Convert conversation_context to messages format
+        messages = []
+        
+        # Build system message with knowledge base
+        system_parts = [config.system_prompt]
+        if chromadb_content:
+            system_parts.append("\n=== KNOWLEDGE BASE ===")
+            system_parts.append(chromadb_content)
+            system_parts.append("=== END KNOWLEDGE BASE ===")
+        system_message = "\n".join(system_parts)
+        
+        # Convert conversation_context to messages
+        if conversation_context:
+            for msg in conversation_context:
+                role = msg.get('role', 'user')
+                content = msg.get('content', '')
+                if role and content:
+                    # Map to standard roles
+                    if role.lower() == 'assistant':
+                        messages.append({"role": "assistant", "content": content})
+        else:
+                        messages.append({"role": "user", "content": content})
+
+        # Add current user message
+        messages.append({"role": "user", "content": message})
+
+        logger.info(f"🌊 STREAM: Created {len(messages)} structured messages [{request_id}]")
         
         # Use LLM service with streaming enabled
-        # Note: Using minimal system prompt since the full prompt is in the structured format
         llm_service = PublicLLMService()
         
         logger.info(f"🌊 STREAM: Calling LLM service with provider: {config.default_llm_provider} [{request_id}]")
         
         result = llm_service.generate_response(
-            prompt=enhanced_prompt,
+            messages=messages,
             provider=config.default_llm_provider,
             model=config.default_model,
             max_tokens=config.max_response_tokens,
-            system_prompt="You are a helpful assistant.",  # Minimal system prompt since full prompt is in structured format
+            system_prompt=system_message,
             request_id=request_id,
             stream=True
         )

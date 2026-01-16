@@ -458,52 +458,61 @@ class ChatManager:
                 import traceback
                 logger.error(f"❌ DOCAWARE: Traceback: {traceback.format_exc()}")
         
-        # Craft enhanced delegate prompt with multiple inputs and optional DocAware context
-        prompt_parts = []
-        prompt_parts.append(f"You are {delegate_name}, a specialized delegate agent.")
-        prompt_parts.append(f"")
-        prompt_parts.append(f"System Message: {delegate_data.get('system_message', 'You are a helpful specialized agent.')}")
+        # Build system message for delegate
+        from .message_converter import parse_conversation_history_to_messages
         
-        # Add DocAware document context if available
+        system_parts = []
+        system_parts.append(f"You are {delegate_name}, a specialized delegate agent.")
+        system_parts.append(f"System Message: {delegate_data.get('system_message', 'You are a helpful specialized agent.')}")
+        
+        # Add DocAware document context to system message if available
         if document_context:
-            prompt_parts.append("")
-            prompt_parts.append("=== RELEVANT DOCUMENTS ===")
-            prompt_parts.append(document_context)
-            prompt_parts.append("=== END DOCUMENTS ===")
+            system_parts.append("\n=== RELEVANT DOCUMENTS ===")
+            system_parts.append(document_context)
+            system_parts.append("=== END DOCUMENTS ===")
         
-        prompt_parts.extend([
-            f"",
-            f"Multiple Input Context ({aggregated_context['input_count']} sources):",
-            formatted_context,
-            f"",
-            f"Previous Delegate Conversations:",
-            f"{'; '.join(conversation_log[-3:]) if conversation_log else 'None'}",
-            f"",
-            f"Current Iteration: {status['iterations'] + 1}/{status['max_iterations']}",
-            f"",
-            f"Instructions:",
+        system_parts.extend([
+            f"\nInstructions:",
             f"- Analyze and synthesize information from ALL input sources"
         ])
         
         if document_context:
-            prompt_parts.append(f"- Use the relevant documents to provide accurate and contextual information")
-            prompt_parts.append(f"- Reference specific information from the documents when applicable")
+            system_parts.append(f"- Use the relevant documents to provide accurate and contextual information")
+            system_parts.append(f"- Reference specific information from the documents when applicable")
         
-        prompt_parts.extend([
+        system_parts.extend([
             f"- Provide specialized analysis based on your role and the multiple inputs",
             f"- Consider how different input sources relate to each other",
             f"- Be specific and actionable in your response",
             f"- If you have completed your analysis and want to terminate early, end your response with '{status['termination_condition']}'",
             f"- Consider the previous delegate conversations to avoid duplication",
-            f"",
-            f"Your response:"
+            f"\nCurrent Iteration: {status['iterations'] + 1}/{status['max_iterations']}"
         ])
         
-        delegate_prompt = "\n".join(prompt_parts)
+        system_message = "\n".join(system_parts)
+        
+        # Build user message with multi-input context and conversation history
+        user_parts = []
+        user_parts.append(f"Multiple Input Context ({aggregated_context['input_count']} sources):")
+        user_parts.append(formatted_context)
+        
+        if conversation_log:
+            user_parts.append(f"\nPrevious Delegate Conversations:")
+            user_parts.append("; ".join(conversation_log[-3:]))
+        
+        user_parts.append(f"\nPlease analyze the inputs and provide your response:")
+        
+        user_content = "\n".join(user_parts)
+        
+        # Build messages array
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_content}
+        ]
         
         logger.info(f"🤝 DELEGATE (MULTI-INPUT): Executing {delegate_name} iteration {status['iterations'] + 1}")
-        logger.info(f"🤝 DELEGATE (MULTI-INPUT): About to call LLM with prompt length: {len(delegate_prompt)} chars")
         logger.info(f"🤝 DELEGATE (MULTI-INPUT): Using provider type: {type(delegate_llm).__name__}")
+        logger.info(f"🤝 DELEGATE (MULTI-INPUT): Converted to {len(messages)} structured messages")
         
         try:
             # Enhanced diagnostic logging before LLM call
@@ -515,7 +524,7 @@ class ChatManager:
             logger.info(f"🤝 DELEGATE (MULTI-INPUT): About to call generate_response for {delegate_name}")
             
             delegate_response = await delegate_llm.generate_response(
-                prompt=delegate_prompt
+                messages=messages
             )
             logger.info(f"🤝 DELEGATE (MULTI-INPUT): LLM call completed for {delegate_name}")
             logger.info(f"🤝 DELEGATE (MULTI-INPUT): Response type: {type(delegate_response)}")
@@ -565,30 +574,31 @@ class ChatManager:
             logger.error(f"❌ DELEGATE (MULTI-INPUT): Traceback: {traceback.format_exc()}")
             return f"ERROR: {error_msg}"
 
-    async def craft_conversation_prompt(self, conversation_history: str, agent_node: Dict[str, Any], project_id: Optional[str] = None) -> str:
+    async def craft_conversation_prompt(self, conversation_history: str, agent_node: Dict[str, Any], project_id: Optional[str] = None) -> List[Dict[str, str]]:
         """
-        Craft conversation prompt for an agent including full conversation history
+        Craft conversation messages array for an agent including full conversation history
         Enhanced with DocAware RAG capabilities
+        
+        Returns:
+            List of message dicts with 'role' and 'content' keys
         """
+        from .message_converter import parse_conversation_history_to_messages
+        
         agent_name = agent_node.get('data', {}).get('name', 'Agent')
         agent_system_message = agent_node.get('data', {}).get('system_message', '')
         agent_instructions = agent_node.get('data', {}).get('instructions', '')
         
-        # Build the prompt with conversation context
-        prompt_parts = []
-        
-        # Add system message if available
+        # Build system message
+        system_parts = []
         if agent_system_message:
-            prompt_parts.append(f"System: {agent_system_message}")
-        
-        # Add agent-specific instructions
+            system_parts.append(agent_system_message)
         if agent_instructions:
-            prompt_parts.append(f"Instructions for {agent_name}: {agent_instructions}")
+            system_parts.append(f"Instructions for {agent_name}: {agent_instructions}")
         
-        # 📚 DOCAWARE INTEGRATION: Add document context if enabled (FIXED FOR SINGLE AGENTS)
+        # 📚 DOCAWARE INTEGRATION: Add document context if enabled
+        document_context = ""
         if self.docaware_handler.is_docaware_enabled(agent_node) and project_id:
             try:
-                # Use conversation history as search query for single agents
                 search_query = self.docaware_handler.extract_query_from_conversation(conversation_history)
                 
                 if search_query:
@@ -600,10 +610,7 @@ class ChatManager:
                     )
                     
                     if document_context:
-                        prompt_parts.append("\n=== RELEVANT DOCUMENTS ===")
-                        prompt_parts.append(document_context)
-                        prompt_parts.append("=== END DOCUMENTS ===\n")
-                        logger.info(f"📚 DOCAWARE: Added document context to single agent {agent_name} prompt ({len(document_context)} chars)")
+                        logger.info(f"📚 DOCAWARE: Added document context to single agent {agent_name} ({len(document_context)} chars)")
                 else:
                     logger.warning(f"📚 DOCAWARE: No search query could be extracted from conversation history for {agent_name}")
                     
@@ -612,19 +619,34 @@ class ChatManager:
                 import traceback
                 logger.error(f"❌ DOCAWARE: Traceback: {traceback.format_exc()}")
         
-        # Add conversation history
-        if conversation_history.strip():
-            prompt_parts.append("Conversation History:")
-            prompt_parts.append(conversation_history)
+        # Add document context to system message if available
+        if document_context:
+            system_parts.append("\n=== RELEVANT DOCUMENTS ===")
+            system_parts.append(document_context)
+            system_parts.append("=== END DOCUMENTS ===")
         
-        # Add agent prompt
-        prompt_parts.append(f"\n{agent_name}, please provide your response:")
+        # Build full system message
+        system_message = "\n".join(system_parts) if system_parts else None
         
-        return "\n".join(prompt_parts)
+        # Add final instruction to conversation history
+        enhanced_history = conversation_history
+        if enhanced_history.strip():
+            enhanced_history += f"\n{agent_name}: Please provide your response based on the conversation history above."
+        else:
+            enhanced_history = f"{agent_name}: Please provide your response."
+        
+        # Parse conversation history to messages array
+        messages = parse_conversation_history_to_messages(
+            conversation_history=enhanced_history,
+            system_message=system_message,
+            include_system=True
+        )
+        
+        return messages
     
-    async def craft_conversation_prompt_with_docaware(self, aggregated_context: Dict[str, Any], agent_node: Dict[str, Any], project_id: Optional[str] = None, conversation_history: str = "") -> str:
+    async def craft_conversation_prompt_with_docaware(self, aggregated_context: Dict[str, Any], agent_node: Dict[str, Any], project_id: Optional[str] = None, conversation_history: str = "") -> List[Dict[str, str]]:
         """
-        Enhanced conversation prompt crafting with DocAware using aggregated input as search query
+        Enhanced conversation messages crafting with DocAware using aggregated input as search query
         
         Args:
             aggregated_context: Output from aggregate_multiple_inputs containing all agent inputs
@@ -633,27 +655,25 @@ class ChatManager:
             conversation_history: Traditional conversation history (fallback)
         
         Returns:
-            Enhanced prompt with document context from aggregated input search
+            List of message dicts with 'role' and 'content' keys
         """
+        from .message_converter import parse_conversation_history_to_messages
+        
         agent_name = agent_node.get('data', {}).get('name', 'Agent')
         agent_system_message = agent_node.get('data', {}).get('system_message', '')
         agent_instructions = agent_node.get('data', {}).get('instructions', '')
         
-        # Build the prompt with conversation context
-        prompt_parts = []
-        
-        # Add system message if available
+        # Build system message
+        system_parts = []
         if agent_system_message:
-            prompt_parts.append(f"System: {agent_system_message}")
-        
-        # Add agent-specific instructions
+            system_parts.append(agent_system_message)
         if agent_instructions:
-            prompt_parts.append(f"Instructions for {agent_name}: {agent_instructions}")
+            system_parts.append(f"Instructions for {agent_name}: {agent_instructions}")
         
         # 📚 ENHANCED DOCAWARE INTEGRATION: Use aggregated input as search query
+        document_context = ""
         if self.docaware_handler.is_docaware_enabled(agent_node) and project_id:
             try:
-                # Use aggregated input as search query instead of conversation history
                 search_query = self.docaware_handler.extract_search_query_from_aggregated_input(aggregated_context)
                 
                 if search_query:
@@ -665,10 +685,7 @@ class ChatManager:
                     )
                     
                     if document_context:
-                        prompt_parts.append("\n=== RELEVANT DOCUMENTS ===")
-                        prompt_parts.append(document_context)
-                        prompt_parts.append("=== END DOCUMENTS ===\n")
-                        logger.info(f"📚 DOCAWARE: Added document context to {agent_name} prompt ({len(document_context)} chars)")
+                        logger.info(f"📚 DOCAWARE: Added document context to {agent_name} ({len(document_context)} chars)")
                 else:
                     logger.warning(f"📚 DOCAWARE: No search query could be extracted from aggregated input for {agent_name}")
                     
@@ -677,23 +694,43 @@ class ChatManager:
                 import traceback
                 logger.error(f"❌ DOCAWARE: Traceback: {traceback.format_exc()}")
         
+        # Add document context to system message if available
+        if document_context:
+            system_parts.append("\n=== RELEVANT DOCUMENTS ===")
+            system_parts.append(document_context)
+            system_parts.append("=== END DOCUMENTS ===")
+        
+        # Build full system message
+        system_message = "\n".join(system_parts) if system_parts else None
+        
+        # Build user message with aggregated input and conversation history
+        user_parts = []
+        
         # Add aggregated input context
         if aggregated_context['input_count'] > 0:
             formatted_context = self.workflow_parser.format_multiple_inputs_prompt(aggregated_context)
-            prompt_parts.append("=== INPUT FROM CONNECTED AGENTS ===")
-            prompt_parts.append(formatted_context)
-            prompt_parts.append("=== END INPUT ===")
+            user_parts.append("=== INPUT FROM CONNECTED AGENTS ===")
+            user_parts.append(formatted_context)
+            user_parts.append("=== END INPUT ===")
         
-        # Add conversation history if available (for context)
+        # Add conversation history if available
         if conversation_history.strip():
-            prompt_parts.append("\n=== CONVERSATION HISTORY ===")
-            prompt_parts.append(conversation_history)
-            prompt_parts.append("=== END HISTORY ===")
+            user_parts.append("\n=== CONVERSATION HISTORY ===")
+            user_parts.append(conversation_history)
+            user_parts.append("=== END HISTORY ===")
         
-        # Add agent prompt
-        prompt_parts.append(f"\n{agent_name}, please analyze the inputs and provide your response:")
+        # Add final instruction
+        user_parts.append(f"\n{agent_name}, please analyze the inputs and provide your response:")
         
-        return "\n".join(prompt_parts)
+        user_content = "\n".join(user_parts) if user_parts else f"{agent_name}, please provide your response."
+        
+        # Build messages array
+        messages = []
+        if system_message:
+            messages.append({"role": "system", "content": system_message})
+        messages.append({"role": "user", "content": user_content})
+        
+        return messages
     
     async def execute_group_chat_manager(self, chat_manager_node: Dict[str, Any], llm_provider, conversation_history: str, execution_sequence: List[Dict[str, Any]], graph_json: Dict[str, Any], project_id: Optional[str] = None, project: Optional[Any] = None) -> str:
         """
@@ -1027,19 +1064,10 @@ class ChatManager:
             logger.error(f"❌ DELEGATE: {error_msg}")
             return f"ERROR: {error_msg}"
         
-        # Craft delegate prompt
-        delegate_prompt = f"""
-        You are {delegate_name}, a specialized delegate agent.
+        # Build system message for delegate
+        system_message = f"""You are {delegate_name}, a specialized delegate agent.
         
         System Message: {delegate_data.get('system_message', 'You are a helpful specialized agent.')}
-        
-        Original Task Context:
-        {conversation_history}
-        
-        Previous Delegate Conversations:
-        {"; ".join(conversation_log[-3:]) if conversation_log else "None"}
-        
-        Current Iteration: {status['iterations'] + 1}/{status['max_iterations']}
         
         Instructions:
         - Provide specialized analysis or assistance based on your role
@@ -1047,22 +1075,43 @@ class ChatManager:
         - If you have completed your analysis and want to terminate early, end your response with "{status['termination_condition']}"
         - Consider the previous delegate conversations to avoid duplication
         
-        Your response:
-        """
+Current Iteration: {status['iterations'] + 1}/{status['max_iterations']}"""
+        
+        # Convert conversation_history to structured messages array
+        from .message_converter import parse_conversation_history_to_messages
+        
+        # Build conversation context for messages
+        conversation_context = conversation_history
+        if conversation_log:
+            previous_conversations = "\n".join(conversation_log[-3:])
+            if previous_conversations:
+                conversation_context += f"\n\nPrevious Delegate Conversations:\n{previous_conversations}"
+        
+        # Parse to structured messages
+        messages = parse_conversation_history_to_messages(
+            conversation_history=conversation_context,
+            system_message=system_message,
+            include_system=True
+        )
+        
+        # Add final user instruction if messages array is empty or only has system message
+        if len(messages) == 1 and messages[0]['role'] == 'system':
+            messages.append({
+                "role": "user",
+                "content": "Please provide your analysis and response based on the context provided."
+            })
         
         logger.info(f"🤝 DELEGATE: Executing {delegate_name} iteration {status['iterations'] + 1}")
-        logger.info(f"🤝 DELEGATE: About to call LLM with prompt length: {len(delegate_prompt)} chars")
         logger.info(f"🤝 DELEGATE: Using provider type: {type(delegate_llm).__name__}")
+        logger.info(f"🤝 DELEGATE: Converted conversation to {len(messages)} structured messages")
         
         try:
             logger.info(f"🤝 DELEGATE: About to call generate_response for {delegate_name}")
-            
-            # Add debugging for the actual API call
             logger.info(f"🤝 DELEGATE: API Key available: {bool(delegate_llm)}")
             
-            logger.info(f"🤝 DELEGATE: Prompt length for {delegate_name}: {len(delegate_prompt)} chars")
+            # Use structured messages array (preferred) or fallback to prompt string
             delegate_response = await delegate_llm.generate_response(
-                prompt=delegate_prompt
+                messages=messages
             )
             logger.info(f"🤝 DELEGATE: LLM call completed for {delegate_name}")
             logger.info(f"🤝 DELEGATE: Response type: {type(delegate_response)}")
@@ -2146,22 +2195,25 @@ Delegation Metrics:
             logger.error(f"❌ DELEGATE (INTELLIGENT): {error_msg}")
             return f"ERROR: {error_msg}"
         
-        # Build delegate prompt with delegation message
-        system_message = delegate_data.get('system_message', 'You are a helpful specialized delegate agent.')
-        
-        delegate_prompt = f"""You are {delegate_name}, a specialized delegate agent.
+        # Build system message
+        system_message = f"""You are {delegate_name}, a specialized delegate agent.
 
-System Message: {system_message}
-
-{delegation_message}
+System Message: {delegate_data.get('system_message', 'You are a helpful specialized delegate agent.')}
 
 Instructions:
 - Process the delegated subquery carefully
 - Provide a clear, actionable response
 - If you need clarification, indicate so in your response
-- Complete your response with your analysis and recommendations
-
-Your response:"""
+- Complete your response with your analysis and recommendations"""
+        
+        # Build user message with delegation message
+        user_content = f"{delegation_message}\n\nPlease process this delegation and provide your response."
+        
+        # Build messages array
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_content}
+        ]
         
         try:
             # Enhanced diagnostic logging before LLM call
@@ -2171,10 +2223,10 @@ Your response:"""
             logger.info(f"🔍 DELEGATE DEBUG: LLM Model: {delegate_data.get('llm_model', 'unknown')}")
             logger.info(f"🔍 DELEGATE DEBUG: Temperature: {delegate_data.get('temperature', 0.4)}")
             logger.info(f"🔍 DELEGATE DEBUG: Max Tokens: {delegate_data.get('max_tokens', 1024)}")
-            logger.info(f"🤖 DELEGATE (INTELLIGENT): Calling LLM for {delegate_name}")
+            logger.info(f"🤖 DELEGATE (INTELLIGENT): Calling LLM for {delegate_name} with {len(messages)} structured messages")
             
             delegate_response = await delegate_llm.generate_response(
-                prompt=delegate_prompt,
+                messages=messages,
                 max_tokens=delegate_data.get('max_tokens', 1024),
                 temperature=delegate_data.get('temperature', 0.4)
             )

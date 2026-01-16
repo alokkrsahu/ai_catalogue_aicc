@@ -341,12 +341,15 @@ class AgentWorkflowViewSet(viewsets.ModelViewSet):
             for message_data in messages_from_data:
                 # Convert timestamp to proper format if needed
                 timestamp = message_data.get('timestamp')
-                if isinstance(timestamp, str):
+                if timestamp is None:
+                    timestamp = timezone.now()
+                elif isinstance(timestamp, str):
                     try:
                         from datetime import datetime
                         timestamp = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
                     except:
                         timestamp = timezone.now()
+                # If it's already a datetime, keep it as is
                 
                 formatted_message = {
                     'sequence': message_data.get('sequence', 0),
@@ -365,8 +368,9 @@ class AgentWorkflowViewSet(viewsets.ModelViewSet):
             logger.info(f"💬 CLEAN SOURCE: Loaded {len(conversation_messages)} messages from single source (no duplicates)")
             
             # Sort all messages chronologically by timestamp, then by sequence as secondary sort
+            # Handle None timestamps explicitly to avoid comparison errors
             conversation_messages.sort(key=lambda x: (
-                x.get('timestamp', timezone.now()),
+                x.get('timestamp') or timezone.now(),  # Handle None explicitly
                 x.get('sequence', 0)
             ))
             
