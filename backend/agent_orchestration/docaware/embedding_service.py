@@ -66,19 +66,18 @@ class DocAwareEmbeddingService:
                 model_cached = True
             
             if model_cached:
-                # Load from cache with local_files_only to skip HTTP checks (prevents timeout errors)
-                # This tells huggingface_hub to use cache only, no network requests
-                logger.info(f"✅ EMBEDDING: Loading from cache (skipping network checks)")
+                # Set offline mode to skip network checks (prevents timeout errors)
+                # This tells huggingface_hub to use cache only, no HTTP requests
+                os.environ['HF_HUB_OFFLINE'] = '1'
+                logger.info(f"✅ EMBEDDING: Loading from cache (offline mode - no network checks)")
                 try:
-                    # Try with local_files_only first to avoid timeout errors
-                    from huggingface_hub import snapshot_download
-                    import tempfile
-                    # Use a workaround: set HF_HUB_DISABLE_EXPERIMENTAL_WARNING to avoid warnings
-                    os.environ.setdefault('HF_HUB_DISABLE_EXPERIMENTAL_WARNING', '1')
                     self.model = SentenceTransformer(self.model_name, cache_folder=str(cache_dir))
                 except Exception as e:
-                    logger.warning(f"⚠️ EMBEDDING: Error with cache, will try normal load: {e}")
+                    logger.warning(f"⚠️ EMBEDDING: Error loading from cache, will try with network: {e}")
+                    # If offline mode fails, try with network (cache might be incomplete)
+                    os.environ.pop('HF_HUB_OFFLINE', None)
                     self.model = SentenceTransformer(self.model_name, cache_folder=str(cache_dir))
+                # Keep HF_HUB_OFFLINE set for subsequent loads (better performance)
             else:
                 logger.info(f"📥 EMBEDDING: Model not in cache, will download (this may take a few minutes)")
                 logger.info(f"💡 TIP: Pre-download model using: python manage.py download_embedder_model")

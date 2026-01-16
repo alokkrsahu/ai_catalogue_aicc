@@ -170,7 +170,13 @@ class PublicKnowledgeService:
                     logger.info(f"✅ CHROMA: Found cached model (new format) at {new_format_path}")
                     model_cached = True
                 
-                if not model_cached:
+                if model_cached:
+                    # Set offline mode to skip network checks
+                    os.environ['HF_HUB_OFFLINE'] = '1'
+                    logger.info(f"✅ CHROMA: Loading from cache (offline mode - no network checks)")
+                else:
+                    # Ensure offline mode is not set when downloading
+                    os.environ.pop('HF_HUB_OFFLINE', None)
                     logger.info(f"📥 CHROMA: Model not in cache, will download (this may take a few minutes)")
                     logger.info(f"💡 TIP: Pre-download model using: python manage.py download_embedder_model")
                     logger.info(f"⏱️  Using timeout: {os.environ.get('HF_HUB_DOWNLOAD_TIMEOUT', 'NOT SET')} seconds")
@@ -183,6 +189,8 @@ class PublicKnowledgeService:
                 except Exception as embed_error:
                     logger.error(f"❌ CHROMA: Failed to initialize SentenceTransformer: {embed_error}")
                     logger.warning("⚠️ CHROMA: Falling back to default embeddings")
+                    # Reset offline mode if initialization failed
+                    os.environ.pop('HF_HUB_OFFLINE', None)
                     self.embedding_function = embedding_functions.DefaultEmbeddingFunction()
             else:
                 # Fallback to default embeddings

@@ -53,15 +53,21 @@ class DocumentEmbedder:
             model_cached = False
             if old_format_path.exists() and any(old_format_path.iterdir()):
                 logger.info(f"Found model in cache (old format). Loading from {old_format_path}")
+                # Set offline mode to skip network checks
+                os.environ['HF_HUB_OFFLINE'] = '1'
                 self.model = SentenceTransformer(str(old_format_path))
                 model_cached = True
             elif new_format_path.exists() and any(new_format_path.iterdir()):
                 logger.info(f"Found model in cache (new format). Loading from {new_format_path}")
+                # Set offline mode to skip network checks
+                os.environ['HF_HUB_OFFLINE'] = '1'
                 # For new format, use model name directly - SentenceTransformer will find it
                 self.model = SentenceTransformer(model_name, cache_folder=str(cache_dir))
                 model_cached = True
             
             if not model_cached:
+                # Ensure offline mode is not set when downloading
+                os.environ.pop('HF_HUB_OFFLINE', None)
                 logger.warning(f"Model not found in cache. Attempting to download with {os.environ.get('HF_HUB_DOWNLOAD_TIMEOUT', 'default')}s timeout.")
                 # This will raise an error if it fails, which is the desired behavior
                 self.model = SentenceTransformer(model_name, cache_folder=str(cache_dir))
