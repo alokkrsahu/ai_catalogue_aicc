@@ -37,17 +37,34 @@ class DocumentEmbedder:
             
             logger.info(f"Initializing DocumentEmbedder with model {model_name}...")
             
-            # Attempt to load the model from a local cache first
-            cache_dir = Path.home() / '.cache' / 'torch' / 'sentence_transformers'
-            model_cache_path = cache_dir / model_name.replace('/', '_')
+            # Set timeout environment variables for HuggingFace
+            os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '300')
+            os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT_S', '300')
+            os.environ.setdefault('REQUESTS_TIMEOUT', '300')
             
-            if not model_cache_path.exists() or not any(model_cache_path.iterdir()):
-                logger.warning(f"Model not found in cache ({model_cache_path}). Attempting to download.")
+            # Attempt to load the model from a local cache first
+            # HuggingFace uses different cache formats:
+            # - Old format: model_name.replace('/', '_')
+            # - New format: models--{org}--{model_name}
+            cache_dir = Path.home() / '.cache' / 'torch' / 'sentence_transformers'
+            old_format_path = cache_dir / model_name.replace('/', '_')
+            new_format_path = cache_dir / f"models--{model_name.replace('/', '--')}"
+            
+            model_cached = False
+            if old_format_path.exists() and any(old_format_path.iterdir()):
+                logger.info(f"Found model in cache (old format). Loading from {old_format_path}")
+                self.model = SentenceTransformer(str(old_format_path))
+                model_cached = True
+            elif new_format_path.exists() and any(new_format_path.iterdir()):
+                logger.info(f"Found model in cache (new format). Loading from {new_format_path}")
+                # For new format, use model name directly - SentenceTransformer will find it
+                self.model = SentenceTransformer(model_name, cache_folder=str(cache_dir))
+                model_cached = True
+            
+            if not model_cached:
+                logger.warning(f"Model not found in cache. Attempting to download with {os.environ.get('HF_HUB_DOWNLOAD_TIMEOUT', 'default')}s timeout.")
                 # This will raise an error if it fails, which is the desired behavior
                 self.model = SentenceTransformer(model_name, cache_folder=str(cache_dir))
-            else:
-                logger.info(f"Found model in cache. Loading from {model_cache_path}")
-                self.model = SentenceTransformer(str(model_cache_path))
 
             self.vector_dim = self.model.get_sentence_embedding_dimension()
             

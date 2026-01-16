@@ -184,12 +184,23 @@ class Command(BaseCommand):
             cache_dir = Path.home() / '.cache' / 'torch' / 'sentence_transformers'
             model_cache_path = cache_dir / model_name.replace('/', '_')
             
-            # Check if model is already cached
-            if model_cache_path.exists() and any(model_cache_path.iterdir()):
+            # Check for both old and new HuggingFace cache formats
+            old_format_path = model_cache_path
+            new_format_path = cache_dir / f"models--{model_name.replace('/', '--')}"
+            
+            model_cached = False
+            if old_format_path.exists() and any(old_format_path.iterdir()):
                 self.stdout.write(
-                    self.style.SUCCESS(f'✅ Embedding model already cached at {model_cache_path}')
+                    self.style.SUCCESS(f'✅ Embedding model already cached (old format) at {old_format_path}')
                 )
-                
+                model_cached = True
+            elif new_format_path.exists() and any(new_format_path.iterdir()):
+                self.stdout.write(
+                    self.style.SUCCESS(f'✅ Embedding model already cached (new format) at {new_format_path}')
+                )
+                model_cached = True
+            
+            if model_cached:
                 # Test the cached model
                 try:
                     model = SentenceTransformer(model_name, cache_folder=str(cache_dir))
@@ -203,9 +214,15 @@ class Command(BaseCommand):
                         self.style.WARNING(f'⚠️  Cached model test failed: {e}, will re-download...')
                     )
             
+            # Set timeout environment variables for HuggingFace
+            os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '300')
+            os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT_S', '300')
+            os.environ.setdefault('REQUESTS_TIMEOUT', '300')
+            
             # Download the model with increased timeout
             self.stdout.write(f'📥 Downloading embedding model: {model_name}...')
             self.stdout.write('   ⏳ This may take a few minutes on first run...')
+            self.stdout.write(f'   ⏱️  Using timeout: {os.environ.get("HF_HUB_DOWNLOAD_TIMEOUT", "NOT SET")} seconds')
             
             try:
                 model = SentenceTransformer(model_name, cache_folder=str(cache_dir))
@@ -213,7 +230,11 @@ class Command(BaseCommand):
                 self.stdout.write(
                     self.style.SUCCESS(f'✅ Embedding model downloaded and verified (dimension: {len(test_embedding)})')
                 )
-                self.stdout.write(f'💾 Model cached at: {model_cache_path}')
+                # Check which format was used
+                if new_format_path.exists():
+                    self.stdout.write(f'💾 Model cached at: {new_format_path}')
+                else:
+                    self.stdout.write(f'💾 Model cached at: {old_format_path}')
                 return True
             except Exception as e:
                 self.stdout.write(

@@ -144,16 +144,33 @@ class PublicKnowledgeService:
             os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '300')  # 5 minutes
             
             if SENTENCE_TRANSFORMERS_AVAILABLE:
+                # Set timeout environment variables for HuggingFace
+                os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '300')
+                os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT_S', '300')
+                os.environ.setdefault('REQUESTS_TIMEOUT', '300')
+                
                 # Check if model is cached first (similar to main system approach)
+                # HuggingFace uses different cache formats:
+                # - Old format: model_name.replace('/', '_')
+                # - New format: models--{org}--{model_name}
                 model_name = "all-MiniLM-L6-v2"
                 cache_dir = Path.home() / '.cache' / 'torch' / 'sentence_transformers'
-                model_cache_path = cache_dir / model_name.replace('/', '_')
                 
-                if model_cache_path.exists() and any(model_cache_path.iterdir()):
-                    logger.info(f"✅ CHROMA: Found cached model at {model_cache_path}, using cached version")
-                else:
+                old_format_path = cache_dir / model_name.replace('/', '_')
+                new_format_path = cache_dir / f"models--{model_name.replace('/', '--')}"
+                
+                model_cached = False
+                if old_format_path.exists() and any(old_format_path.iterdir()):
+                    logger.info(f"✅ CHROMA: Found cached model (old format) at {old_format_path}")
+                    model_cached = True
+                elif new_format_path.exists() and any(new_format_path.iterdir()):
+                    logger.info(f"✅ CHROMA: Found cached model (new format) at {new_format_path}")
+                    model_cached = True
+                
+                if not model_cached:
                     logger.info(f"📥 CHROMA: Model not in cache, will download (this may take a few minutes)")
                     logger.info(f"💡 TIP: Pre-download model using: python manage.py download_embedder_model")
+                    logger.info(f"⏱️  Using timeout: {os.environ.get('HF_HUB_DOWNLOAD_TIMEOUT', 'NOT SET')} seconds")
                 
                 try:
                     self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(

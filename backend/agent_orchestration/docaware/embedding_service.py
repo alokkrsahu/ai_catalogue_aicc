@@ -34,22 +34,40 @@ class DocAwareEmbeddingService:
         """Load the embedding model with cache checking and timeout handling"""
         try:
             # CRITICAL: Set HuggingFace timeout before initialization to prevent timeout errors
+            # SentenceTransformer uses huggingface_hub which respects these environment variables
             os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '300')  # 5 minutes
+            os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT_S', '300')  # Alternative name
+            # Also set for requests library used by huggingface_hub
+            os.environ.setdefault('REQUESTS_TIMEOUT', '300')
             
             logger.info(f"📊 EMBEDDING: Loading model {self.model_name}")
             
             # Check if model is cached first (similar to main system approach)
+            # HuggingFace uses different cache formats:
+            # - Old format: model_name.replace('/', '_')
+            # - New format: models--{org}--{model_name}
             cache_dir = Path.home() / '.cache' / 'torch' / 'sentence_transformers'
-            model_cache_path = cache_dir / self.model_name.replace('/', '_')
             
-            if model_cache_path.exists() and any(model_cache_path.iterdir()):
-                logger.info(f"✅ EMBEDDING: Found cached model at {model_cache_path}, using cached version")
+            # Check for both old and new cache formats
+            old_format_path = cache_dir / self.model_name.replace('/', '_')
+            new_format_path = cache_dir / f"models--{self.model_name.replace('/', '--')}"
+            
+            model_cached = False
+            if old_format_path.exists() and any(old_format_path.iterdir()):
+                logger.info(f"✅ EMBEDDING: Found cached model (old format) at {old_format_path}")
+                model_cached = True
+            elif new_format_path.exists() and any(new_format_path.iterdir()):
+                logger.info(f"✅ EMBEDDING: Found cached model (new format) at {new_format_path}")
+                model_cached = True
+            
+            if model_cached:
                 # Load from cache explicitly
                 self.model = SentenceTransformer(self.model_name, cache_folder=str(cache_dir))
             else:
                 logger.info(f"📥 EMBEDDING: Model not in cache, will download (this may take a few minutes)")
                 logger.info(f"💡 TIP: Pre-download model using: python manage.py download_embedder_model")
-                # Download with timeout
+                logger.info(f"⏱️  Using timeout: {os.environ.get('HF_HUB_DOWNLOAD_TIMEOUT', 'NOT SET')} seconds")
+                # Download with timeout - SentenceTransformer will use the environment variable
                 self.model = SentenceTransformer(self.model_name, cache_folder=str(cache_dir))
             
             logger.info(f"✅ EMBEDDING: Model loaded successfully")
