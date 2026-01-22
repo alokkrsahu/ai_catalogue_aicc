@@ -137,6 +137,23 @@ def parse_conversation_history_to_messages(
     # Add system message first if provided
     if include_system and system_message:
         messages.append({"role": "system", "content": system_message})
+        
+        # Debug logging for system message verification
+        system_msg_length = len(system_message)
+        has_documents = "RELEVANT DOCUMENTS" in system_message or "=== RELEVANT DOCUMENTS ===" in system_message
+        system_msg_preview = system_message[:300] if len(system_message) > 300 else system_message
+        
+        logger.info(f"📚 MESSAGE CONVERTER DEBUG: System message length: {system_msg_length} chars")
+        logger.info(f"📚 MESSAGE CONVERTER DEBUG: Contains document context marker: {has_documents}")
+        if has_documents:
+            logger.info(f"📚 MESSAGE CONVERTER DEBUG: System message preview (first 300 chars): {system_msg_preview}...")
+        else:
+<<<<<<< Current (Your changes)
+            logger.debug(f"📚 MESSAGE CONVERTER DEBUG: System message does not contain document context markers")
+=======
+            # This is expected when DocAware is disabled or all documents have failed extraction
+            logger.debug(f"ℹ️ MESSAGE CONVERTER DEBUG: No document context markers - DocAware may be disabled or all documents filtered")
+>>>>>>> Incoming (Background Agent changes)
     
     # Parse conversation history
     lines = conversation_history.strip().split('\n')

@@ -158,12 +158,45 @@ class HumanInputHandler:
         
         # Get workflow and rebuild execution state
         workflow = await sync_to_async(lambda: execution_record.workflow)()
+        graph_json = await sync_to_async(lambda: workflow.graph_json)()
+        project_id = str(await sync_to_async(lambda: workflow.project.project_id)())
         
-        # Add human input to conversation history
+        # 📚 USERPROXY DOCAWARE INTEGRATION: Check if DocAware is enabled for UserProxyAgent
+        user_proxy_agent_id = execution_record.human_input_agent_id
+        user_proxy_node = None
+        docaware_enabled = False
+        
+        if user_proxy_agent_id:
+            # Find the UserProxyAgent node in the graph
+            for node in graph_json.get('nodes', []):
+                if node.get('id') == user_proxy_agent_id:
+                    user_proxy_node = node
+                    node_data = node.get('data', {})
+                    docaware_enabled = self.docaware_handler.is_docaware_enabled(node)
+                    logger.info(f"📚 USERPROXY DOCAWARE CHECK: UserProxyAgent {execution_record.awaiting_human_input_agent} - DocAware enabled: {docaware_enabled}")
+                    break
+        
+        # Process DocAware if enabled
+        processed_human_input = human_input
+        if docaware_enabled and user_proxy_node and project_id:
+            try:
+                logger.info(f"📚 USERPROXY DOCAWARE: Processing human input with DocAware for {execution_record.awaiting_human_input_agent}")
+                processed_human_input = await self.process_userproxy_docaware(
+                    user_proxy_node, human_input, project_id, execution_record
+                )
+                logger.info(f"📚 USERPROXY DOCAWARE: DocAware processing completed - result length: {len(processed_human_input)} chars")
+            except Exception as e:
+                logger.error(f"❌ USERPROXY DOCAWARE: Failed to process with DocAware: {e}")
+                import traceback
+                logger.error(f"❌ USERPROXY DOCAWARE: Traceback: {traceback.format_exc()}")
+                # Fall back to original human input if DocAware processing fails
+                processed_human_input = human_input
+        
+        # Add human input (or DocAware-processed input) to conversation history
         # Format: "AgentName: human_input" for proper conversation flow
-        updated_conversation = execution_record.conversation_history + f"\n{execution_record.awaiting_human_input_agent}: {human_input}"
+        updated_conversation = execution_record.conversation_history + f"\n{execution_record.awaiting_human_input_agent}: {processed_human_input}"
         
-        logger.info(f"📝 HUMAN INPUT: Added user input to conversation history: {execution_record.awaiting_human_input_agent}: {human_input[:100]}...")
+        logger.info(f"📝 HUMAN INPUT: Added user input to conversation history: {execution_record.awaiting_human_input_agent}: {processed_human_input[:100]}...")
         
         # CRITICAL FIX: Add human input message to messages array for proper conversation history display
         messages = execution_record.messages_data or []
@@ -172,19 +205,18 @@ class HumanInputHandler:
         next_sequence = len(messages)
         
         # ROOT CAUSE FIX: Check if UserProxyAgent has outgoing edges to determine if input is routed
-        workflow = await sync_to_async(lambda: execution_record.workflow)()
-        graph_json = await sync_to_async(lambda: workflow.graph_json)()
+        # (graph_json and user_proxy_agent_id already retrieved above for DocAware processing)
         user_proxy_agent_id = execution_record.human_input_agent_id
         outgoing_edges = []
         if user_proxy_agent_id:
             outgoing_edges = self.workflow_parser.find_outgoing_edges_from_node(user_proxy_agent_id, graph_json)
         
-        # Add human input message
+        # Add human input message (use processed_human_input which may have been enhanced by DocAware)
         messages.append({
             'sequence': next_sequence,
             'agent_name': execution_record.awaiting_human_input_agent,
             'agent_type': 'UserProxyAgent',
-            'content': human_input,
+            'content': processed_human_input,
             'message_type': 'human_input',
             'timestamp': timezone.now().isoformat(),
             'response_time_ms': 0,
@@ -194,7 +226,10 @@ class HumanInputHandler:
                 'iteration': execution_record.human_input_context.get('iteration'),
                 'has_outgoing_edges': len(outgoing_edges) > 0,
                 'outgoing_edge_count': len(outgoing_edges),
-                'target_agents': [edge['name'] for edge in outgoing_edges] if outgoing_edges else []
+                'target_agents': [edge['name'] for edge in outgoing_edges] if outgoing_edges else [],
+                'docaware_processed': docaware_enabled,
+                'original_input_length': len(human_input),
+                'processed_input_length': len(processed_human_input)
             }
         })
         
@@ -474,13 +509,14 @@ class HumanInputHandler:
                         current_position = len(execution_sequence)
                         logger.info(f"📍 WORKFLOW RESUME: All nodes executed, starting from end at position {current_position}")
                 
-                # ROOT CAUSE FIX: Add the human input to executed_nodes only if UserProxyAgent has outgoing edges
+                # ROOT CAUSE FIX: Add the human input (or DocAware-processed input) to executed_nodes only if UserProxyAgent has outgoing edges
                 # If it has no outgoing edges, the human input should just be logged in conversation history
                 # and NOT be added to executed_nodes (since no agent will use it as input)
                 if user_proxy_agent_id:
                     if len(outgoing_edges) > 0:
                         # UserProxyAgent has outgoing edges - route input to target agents
-                        executed_nodes[user_proxy_agent_id] = human_input
+                        # Use processed_human_input (which may have been enhanced by DocAware)
+                        executed_nodes[user_proxy_agent_id] = processed_human_input
                         # CRITICAL FIX: Save executed_nodes to database before continuing workflow
                         # This ensures continue_workflow_execution sees the human input when it refreshes
                         execution_record.executed_nodes = executed_nodes
@@ -610,7 +646,7 @@ class HumanInputHandler:
         node_data = userproxy_node.get('data', {})
         
         # Get DocAware configuration from the node
-        search_method = node_data.get('search_method', 'semantic_search')
+        search_method = node_data.get('search_method', 'hybrid_search')
         search_parameters = node_data.get('search_parameters', {})
 
         # Get multi-select content filters
@@ -627,38 +663,69 @@ class HumanInputHandler:
         
         try:
             # 1. Perform DocAware search using human input as query
-            from .docaware import EnhancedDocAwareAgentService
-            docaware_service = EnhancedDocAwareAgentService()
+            from .docaware import EnhancedDocAwareAgentService, SearchMethod
+            
+            # Initialize DocAware service with project_id (required parameter)
+            def create_docaware_service():
+                return EnhancedDocAwareAgentService(project_id)
+            
+            docaware_service = await sync_to_async(create_docaware_service)()
             
             logger.info(f"📚 USERPROXY DOCAWARE: Performing document search with query: {human_input}")
             
-            # Execute the document search
-            search_results = await sync_to_async(docaware_service.execute_search)(
-                project_id=project_id,
-                search_method=search_method,
-                search_parameters=search_parameters,
-                query=human_input,
-                content_filters=content_filters
-            )
+            # Execute the document search using search_documents method
+            def perform_search():
+                return docaware_service.search_documents(
+                    query=human_input,
+                    search_method=SearchMethod(search_method),
+                    method_parameters=search_parameters,
+                    conversation_context=None,
+                    content_filters=content_filters
+                )
             
-            if not search_results or not search_results.get('success'):
-                logger.warning(f"⚠️ USERPROXY DOCAWARE: No search results or search failed")
+            search_results = await sync_to_async(perform_search)()
+            
+            if not search_results:
+                logger.warning(f"⚠️ USERPROXY DOCAWARE: No search results returned")
                 return f"I searched for information about '{human_input}' but couldn't find relevant documents."
             
-            retrieved_documents = search_results.get('results', [])
-            logger.info(f"📚 USERPROXY DOCAWARE: Found {len(retrieved_documents)} relevant documents")
+            # Filter out documents with failed extraction status
+            valid_results = []
+            failed_results = []
             
-            if not retrieved_documents:
-                return f"I searched for information about '{human_input}' but no relevant documents were found."
+            for result in search_results:
+                content = result.get('content', '')
+                # Check if content indicates failed extraction
+                if content and ('Extraction Status: FAILED' in content or 
+                               'This document could not be processed' in content):
+                    failed_results.append(result)
+                    logger.warning(f"⚠️ USERPROXY DOCAWARE: Filtering out document with failed extraction: {result.get('metadata', {}).get('source', 'Unknown')}")
+                else:
+                    valid_results.append(result)
+            
+            if failed_results:
+                logger.warning(f"⚠️ USERPROXY DOCAWARE: Filtered out {len(failed_results)} document(s) with failed extraction status")
+            
+            if not valid_results:
+                logger.error(f"❌ USERPROXY DOCAWARE: All {len(search_results)} search results have failed extraction status!")
+                return f"I searched for information about '{human_input}' but all documents have failed extraction status. Please re-upload and re-process the documents."
+            
+            retrieved_documents = valid_results
+            logger.info(f"📚 USERPROXY DOCAWARE: Found {len(retrieved_documents)} valid relevant documents (filtered {len(failed_results)} failed)")
             
             # 2. Format retrieved documents for LLM
             context_text = "\n\n=== RETRIEVED DOCUMENTS ===\n"
-            for i, doc in enumerate(retrieved_documents[:5], 1):  # Limit to top 5 documents
-                source = doc.get('source', 'Unknown source')
-                content = doc.get('content_preview', doc.get('content', ''))[:1000]  # Limit content length
-                score = doc.get('score', 0)
+            # Use search_limit from parameters, default to 5
+            search_limit = search_parameters.get('search_limit', 5)
+            limit = min(len(retrieved_documents), search_limit)
+            
+            for i, doc in enumerate(retrieved_documents[:limit], 1):
+                metadata = doc.get('metadata', {})
+                source = metadata.get('source', 'Unknown source')
+                content = doc.get('content', '')  # Use full content, not truncated
+                score = metadata.get('score', 0)
                 
-                context_text += f"\nDocument {i} (Source: {source}, Relevance: {score:.2f}):\n{content}\n"
+                context_text += f"\nDocument {i} (Source: {source}, Relevance: {score:.3f}):\n{content}\n"
             
             context_text += "\n=== END RETRIEVED DOCUMENTS ===\n"
             

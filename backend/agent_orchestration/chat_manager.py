@@ -103,11 +103,27 @@ class ChatManager:
             edges = graph_json.get('edges', [])
             all_nodes = graph_json.get('nodes', [])  # Use full node list, not just execution_sequence
             
+            # DIAGNOSTIC: Log discovery parameters
+            logger.info(f"🔍 DELEGATE DISCOVERY: Chat Manager ID: {chat_manager_id}, Total edges: {len(edges)}, Total nodes: {len(all_nodes)}")
+            
+            # DIAGNOSTIC: Log all edges for debugging
+            delegate_edges = [e for e in edges if e.get('type') == 'delegate']
+            logger.info(f"🔍 DELEGATE DISCOVERY: Found {len(delegate_edges)} edges with type='delegate'")
+            for edge in delegate_edges:
+                logger.info(f"🔍 DELEGATE DISCOVERY: Edge - source: {edge.get('source')}, target: {edge.get('target')}, type: {edge.get('type')}")
+            
+            # DIAGNOSTIC: Log all DelegateAgent nodes
+            all_delegate_agents = [n for n in all_nodes if n.get('type') == 'DelegateAgent']
+            logger.info(f"🔍 DELEGATE DISCOVERY: Found {len(all_delegate_agents)} DelegateAgent nodes in graph")
+            for node in all_delegate_agents:
+                logger.info(f"🔍 DELEGATE DISCOVERY: DelegateAgent node - id: {node.get('id')}, name: {node.get('data', {}).get('name', 'Unknown')}")
+            
             connected_delegate_ids = set()
             for edge in edges:
                 # Only consider delegate-type edges
                 if edge.get('type') == 'delegate' and edge.get('source') == chat_manager_id:
                     target_id = edge.get('target')
+                    logger.info(f"🔍 DELEGATE DISCOVERY: Checking delegate edge from {chat_manager_id} to {target_id}")
                     # Find delegate in full graph, not just execution sequence
                     for node in all_nodes:
                         if node.get('id') == target_id and node.get('type') == 'DelegateAgent':
@@ -119,6 +135,7 @@ class ChatManager:
             for edge in edges:
                 if edge.get('type') == 'delegate' and edge.get('target') == chat_manager_id:
                     source_id = edge.get('source')
+                    logger.info(f"🔍 DELEGATE DISCOVERY: Checking bidirectional delegate edge from {source_id} to {chat_manager_id}")
                     # Find delegate in full graph, not just execution sequence
                     for node in all_nodes:
                         if node.get('id') == source_id and node.get('type') == 'DelegateAgent' and source_id not in connected_delegate_ids:
@@ -127,6 +144,20 @@ class ChatManager:
                             logger.info(f"🔗 GROUP CHAT MANAGER (MULTI-INPUT): Found bidirectionally connected delegate via delegate edge: {node.get('data', {}).get('name', source_id)}")
             
             logger.info(f"🤝 GROUP CHAT MANAGER (MULTI-INPUT): Found {len(delegate_nodes)} connected delegate agents")
+            
+            # DIAGNOSTIC: If no delegates found, provide detailed diagnostic info
+            if len(delegate_nodes) == 0:
+                logger.warning(f"⚠️ DELEGATE DISCOVERY: No delegates found! Diagnostic info:")
+                logger.warning(f"⚠️ DELEGATE DISCOVERY: - Chat Manager ID: {chat_manager_id}")
+                logger.warning(f"⚠️ DELEGATE DISCOVERY: - Total edges: {len(edges)}")
+                logger.warning(f"⚠️ DELEGATE DISCOVERY: - Delegate-type edges: {len(delegate_edges)}")
+                logger.warning(f"⚠️ DELEGATE DISCOVERY: - Total DelegateAgent nodes: {len(all_delegate_agents)}")
+                # Check if there are edges that might be delegates but wrong type
+                edges_from_gcm = [e for e in edges if e.get('source') == chat_manager_id]
+                edges_to_gcm = [e for e in edges if e.get('target') == chat_manager_id]
+                logger.warning(f"⚠️ DELEGATE DISCOVERY: - Edges FROM GCM: {len(edges_from_gcm)} (types: {[e.get('type') for e in edges_from_gcm]})")
+                logger.warning(f"⚠️ DELEGATE DISCOVERY: - Edges TO GCM: {len(edges_to_gcm)} (types: {[e.get('type') for e in edges_to_gcm]})")
+            
             return delegate_nodes
         
         # Execute aggregation and discovery in parallel
@@ -435,10 +466,19 @@ class ChatManager:
         
         # 📚 DOCAWARE INTEGRATION FOR DELEGATE AGENTS
         document_context = ""
-        if self.docaware_handler.is_docaware_enabled(delegate_node) and project_id:
+        docaware_enabled = self.docaware_handler.is_docaware_enabled(delegate_node)
+        logger.info(f"📚 DOCAWARE CHECK: Delegate {delegate_name} - DocAware enabled: {docaware_enabled}, Project ID: {project_id}")
+        
+        if docaware_enabled and project_id:
             try:
+                logger.info(f"📚 DOCAWARE: Processing DocAware for delegate {delegate_name}")
+                logger.info(f"📚 DOCAWARE: Aggregated context keys: {list(aggregated_context.keys())}")
+                logger.info(f"📚 DOCAWARE: Aggregated context input_count: {aggregated_context.get('input_count', 'N/A')}")
+                
                 # Use aggregated input as search query for DocAware
                 search_query = self.docaware_handler.extract_search_query_from_aggregated_input(aggregated_context)
+                
+                logger.info(f"📚 DOCAWARE: Extracted search query: {search_query[:200] if search_query else 'None'}...")
                 
                 if search_query:
                     logger.info(f"📚 DOCAWARE: Delegate {delegate_name} using aggregated input as search query")
@@ -450,13 +490,20 @@ class ChatManager:
                     
                     if document_context:
                         logger.info(f"📚 DOCAWARE: Added document context to delegate {delegate_name} prompt ({len(document_context)} chars)")
+                    else:
+                        logger.warning(f"📚 DOCAWARE: Document context is empty for delegate {delegate_name}")
                 else:
                     logger.warning(f"📚 DOCAWARE: No search query could be extracted from aggregated input for delegate {delegate_name}")
+                    logger.warning(f"📚 DOCAWARE: Aggregated context content: {str(aggregated_context)[:500]}")
                     
             except Exception as e:
                 logger.error(f"❌ DOCAWARE: Failed to get document context for delegate {delegate_name}: {e}")
                 import traceback
                 logger.error(f"❌ DOCAWARE: Traceback: {traceback.format_exc()}")
+        elif not docaware_enabled:
+            logger.info(f"📚 DOCAWARE: DocAware is disabled for delegate {delegate_name}")
+        elif not project_id:
+            logger.warning(f"📚 DOCAWARE: Project ID is missing for delegate {delegate_name}, cannot perform DocAware search")
         
         # Build system message for delegate
         from .message_converter import parse_conversation_history_to_messages
@@ -468,8 +515,13 @@ class ChatManager:
         # Add DocAware document context to system message if available
         if document_context:
             system_parts.append("\n=== RELEVANT DOCUMENTS ===")
+            system_parts.append("IMPORTANT: The following documents contain the ACTUAL CONTENT of the research paper you are reviewing.")
+            system_parts.append("These documents ARE the paper content - use them directly in your analysis and response.")
+            system_parts.append("You have full access to the paper content through these documents.")
+            system_parts.append("")
             system_parts.append(document_context)
             system_parts.append("=== END DOCUMENTS ===")
+            system_parts.append("\nCRITICAL: Use the document content provided above to conduct your review. The documents above ARE the paper content.")
         
         system_parts.extend([
             f"\nInstructions:",
@@ -622,8 +674,13 @@ class ChatManager:
         # Add document context to system message if available
         if document_context:
             system_parts.append("\n=== RELEVANT DOCUMENTS ===")
+            system_parts.append("IMPORTANT: The following documents contain the ACTUAL CONTENT of the research paper you are reviewing.")
+            system_parts.append("These documents ARE the paper content - use them directly in your analysis and response.")
+            system_parts.append("You have full access to the paper content through these documents.")
+            system_parts.append("")
             system_parts.append(document_context)
             system_parts.append("=== END DOCUMENTS ===")
+            system_parts.append("\nCRITICAL: Use the document content provided above to conduct your review. The documents above ARE the paper content.")
         
         # Build full system message
         system_message = "\n".join(system_parts) if system_parts else None
@@ -697,8 +754,13 @@ class ChatManager:
         # Add document context to system message if available
         if document_context:
             system_parts.append("\n=== RELEVANT DOCUMENTS ===")
+            system_parts.append("IMPORTANT: The following documents contain the ACTUAL CONTENT of the research paper you are reviewing.")
+            system_parts.append("These documents ARE the paper content - use them directly in your analysis and response.")
+            system_parts.append("You have full access to the paper content through these documents.")
+            system_parts.append("")
             system_parts.append(document_context)
             system_parts.append("=== END DOCUMENTS ===")
+            system_parts.append("\nCRITICAL: Use the document content provided above to conduct your review. The documents above ARE the paper content.")
         
         # Build full system message
         system_message = "\n".join(system_parts) if system_parts else None
@@ -768,11 +830,27 @@ class ChatManager:
         edges = graph_json.get('edges', [])
         all_nodes = graph_json.get('nodes', [])  # Use full node list, not just execution_sequence
         
+        # DIAGNOSTIC: Log discovery parameters
+        logger.info(f"🔍 DELEGATE DISCOVERY (SINGLE-INPUT): Chat Manager ID: {chat_manager_id}, Total edges: {len(edges)}, Total nodes: {len(all_nodes)}")
+        
+        # DIAGNOSTIC: Log all edges for debugging
+        delegate_edges = [e for e in edges if e.get('type') == 'delegate']
+        logger.info(f"🔍 DELEGATE DISCOVERY (SINGLE-INPUT): Found {len(delegate_edges)} edges with type='delegate'")
+        for edge in delegate_edges:
+            logger.info(f"🔍 DELEGATE DISCOVERY (SINGLE-INPUT): Edge - source: {edge.get('source')}, target: {edge.get('target')}, type: {edge.get('type')}")
+        
+        # DIAGNOSTIC: Log all DelegateAgent nodes
+        all_delegate_agents = [n for n in all_nodes if n.get('type') == 'DelegateAgent']
+        logger.info(f"🔍 DELEGATE DISCOVERY (SINGLE-INPUT): Found {len(all_delegate_agents)} DelegateAgent nodes in graph")
+        for node in all_delegate_agents:
+            logger.info(f"🔍 DELEGATE DISCOVERY (SINGLE-INPUT): DelegateAgent node - id: {node.get('id')}, name: {node.get('data', {}).get('name', 'Unknown')}")
+        
         connected_delegate_ids = set()
         for edge in edges:
             # Only consider delegate-type edges
             if edge.get('type') == 'delegate' and edge.get('source') == chat_manager_id:
                 target_id = edge.get('target')
+                logger.info(f"🔍 DELEGATE DISCOVERY (SINGLE-INPUT): Checking delegate edge from {chat_manager_id} to {target_id}")
                 # Find delegate in full graph, not just execution sequence
                 for node in all_nodes:
                     if node.get('id') == target_id and node.get('type') == 'DelegateAgent':
@@ -784,6 +862,7 @@ class ChatManager:
         for edge in edges:
             if edge.get('type') == 'delegate' and edge.get('target') == chat_manager_id:
                 source_id = edge.get('source')
+                logger.info(f"🔍 DELEGATE DISCOVERY (SINGLE-INPUT): Checking bidirectional delegate edge from {source_id} to {chat_manager_id}")
                 # Find delegate in full graph, not just execution sequence
                 for node in all_nodes:
                     if node.get('id') == source_id and node.get('type') == 'DelegateAgent' and source_id not in connected_delegate_ids:
@@ -792,6 +871,19 @@ class ChatManager:
                         logger.info(f"🔗 GROUP CHAT MANAGER: Found bidirectionally connected delegate via delegate edge: {node.get('data', {}).get('name', source_id)}")
         
         logger.info(f"🤝 GROUP CHAT MANAGER: Found {len(delegate_nodes)} connected delegate agents")
+        
+        # DIAGNOSTIC: If no delegates found, provide detailed diagnostic info
+        if len(delegate_nodes) == 0:
+            logger.warning(f"⚠️ DELEGATE DISCOVERY (SINGLE-INPUT): No delegates found! Diagnostic info:")
+            logger.warning(f"⚠️ DELEGATE DISCOVERY (SINGLE-INPUT): - Chat Manager ID: {chat_manager_id}")
+            logger.warning(f"⚠️ DELEGATE DISCOVERY (SINGLE-INPUT): - Total edges: {len(edges)}")
+            logger.warning(f"⚠️ DELEGATE DISCOVERY (SINGLE-INPUT): - Delegate-type edges: {len(delegate_edges)}")
+            logger.warning(f"⚠️ DELEGATE DISCOVERY (SINGLE-INPUT): - Total DelegateAgent nodes: {len(all_delegate_agents)}")
+            # Check if there are edges that might be delegates but wrong type
+            edges_from_gcm = [e for e in edges if e.get('source') == chat_manager_id]
+            edges_to_gcm = [e for e in edges if e.get('target') == chat_manager_id]
+            logger.warning(f"⚠️ DELEGATE DISCOVERY (SINGLE-INPUT): - Edges FROM GCM: {len(edges_from_gcm)} (types: {[e.get('type') for e in edges_from_gcm]})")
+            logger.warning(f"⚠️ DELEGATE DISCOVERY (SINGLE-INPUT): - Edges TO GCM: {len(edges_to_gcm)} (types: {[e.get('type') for e in edges_to_gcm]})")
         
         # CRITICAL FIX: If no delegates found, return error instead of fake response
         if not delegate_nodes:
@@ -1064,18 +1156,94 @@ class ChatManager:
             logger.error(f"❌ DELEGATE: {error_msg}")
             return f"ERROR: {error_msg}"
         
+        # 📚 DOCAWARE INTEGRATION FOR DELEGATE AGENTS (SINGLE-INPUT PATH)
+        document_context = ""
+        docaware_enabled = self.docaware_handler.is_docaware_enabled(delegate_node)
+        logger.info(f"📚 DOCAWARE CHECK (SINGLE-INPUT): Delegate {delegate_name} - DocAware enabled: {docaware_enabled}, Project ID: {project_id}")
+        
+        if docaware_enabled and project_id:
+            try:
+                logger.info(f"📚 DOCAWARE (SINGLE-INPUT): Processing DocAware for delegate {delegate_name}")
+                
+                # Extract search query from conversation history
+                # For single-input path, use conversation_history as the search query source
+                search_query = self.docaware_handler.extract_query_from_conversation(conversation_history)
+                
+                logger.info(f"📚 DOCAWARE (SINGLE-INPUT): Extracted search query: {search_query[:200] if search_query else 'None'}...")
+                
+                if search_query:
+                    logger.info(f"📚 DOCAWARE (SINGLE-INPUT): Delegate {delegate_name} using conversation history as search query")
+                    logger.info(f"📚 DOCAWARE (SINGLE-INPUT): Query: {search_query[:100]}...")
+                    
+                    # Use conversation-based query method (same as single AssistantAgent)
+                    document_context = await self.docaware_handler.get_docaware_context_from_conversation_query(
+                        delegate_node, search_query, project_id, conversation_history
+                    )
+                    
+                    if document_context:
+                        logger.info(f"📚 DOCAWARE (SINGLE-INPUT): Added document context to delegate {delegate_name} prompt ({len(document_context)} chars)")
+                    else:
+                        logger.warning(f"📚 DOCAWARE (SINGLE-INPUT): Document context is empty for delegate {delegate_name}")
+                else:
+                    logger.warning(f"📚 DOCAWARE (SINGLE-INPUT): No search query could be extracted from conversation history for delegate {delegate_name}")
+                    logger.warning(f"📚 DOCAWARE (SINGLE-INPUT): Conversation history length: {len(conversation_history)} chars")
+                    
+            except Exception as e:
+                logger.error(f"❌ DOCAWARE (SINGLE-INPUT): Failed to get document context for delegate {delegate_name}: {e}")
+                import traceback
+                logger.error(f"❌ DOCAWARE (SINGLE-INPUT): Traceback: {traceback.format_exc()}")
+        elif not docaware_enabled:
+            logger.info(f"📚 DOCAWARE (SINGLE-INPUT): DocAware is disabled for delegate {delegate_name}")
+        elif not project_id:
+            logger.warning(f"📚 DOCAWARE (SINGLE-INPUT): Project ID is missing for delegate {delegate_name}, cannot perform DocAware search")
+        
         # Build system message for delegate
-        system_message = f"""You are {delegate_name}, a specialized delegate agent.
+        system_message_parts = [
+            f"You are {delegate_name}, a specialized delegate agent.",
+            f"System Message: {delegate_data.get('system_message', 'You are a helpful specialized agent.')}",
+            "",
+            "Instructions:",
+            "- Provide specialized analysis or assistance based on your role",
+            "- Be specific and actionable in your response",
+            f"- If you have completed your analysis and want to terminate early, end your response with \"{status['termination_condition']}\"",
+            "- Consider the previous delegate conversations to avoid duplication",
+            "",
+            f"Current Iteration: {status['iterations'] + 1}/{status['max_iterations']}"
+        ]
         
-        System Message: {delegate_data.get('system_message', 'You are a helpful specialized agent.')}
+        # Add DocAware document context to system message if available
+        if document_context:
+            system_message_parts.append("\n=== RELEVANT DOCUMENTS ===")
+            system_message_parts.append("IMPORTANT: The following documents contain the ACTUAL CONTENT of the research paper you are reviewing.")
+            system_message_parts.append("These documents ARE the paper content - use them directly in your analysis and response.")
+            system_message_parts.append("You have full access to the paper content through these documents.")
+            system_message_parts.append("")
+            system_message_parts.append(document_context)
+            system_message_parts.append("=== END DOCUMENTS ===")
+            system_message_parts.append("\nCRITICAL: Use the document content provided above to conduct your review. The documents above ARE the paper content.")
         
-        Instructions:
-        - Provide specialized analysis or assistance based on your role
-        - Be specific and actionable in your response
-        - If you have completed your analysis and want to terminate early, end your response with "{status['termination_condition']}"
-        - Consider the previous delegate conversations to avoid duplication
+        system_message = "\n".join(system_message_parts)
         
-Current Iteration: {status['iterations'] + 1}/{status['max_iterations']}"""
+        # Debug logging for system message verification
+        system_message_length = len(system_message)
+        has_documents = "RELEVANT DOCUMENTS" in system_message
+        system_message_preview = system_message[:500] if len(system_message) > 500 else system_message
+        
+        logger.info(f"📚 SYSTEM MESSAGE DEBUG: System message length: {system_message_length} chars")
+        logger.info(f"📚 SYSTEM MESSAGE DEBUG: Contains document context: {has_documents}")
+        if has_documents:
+            logger.info(f"📚 SYSTEM MESSAGE DEBUG: System message preview (first 500 chars): {system_message_preview}...")
+<<<<<<< Current (Your changes)
+        else:
+            logger.warning(f"⚠️ SYSTEM MESSAGE DEBUG: System message does NOT contain 'RELEVANT DOCUMENTS' marker!")
+=======
+        elif document_context:
+            # Document context was retrieved but not added (shouldn't happen, but log for debugging)
+            logger.warning(f"⚠️ SYSTEM MESSAGE DEBUG: Document context was retrieved ({len(document_context)} chars) but not added to system message!")
+        else:
+            # This is expected when DocAware is disabled or all documents have failed extraction
+            logger.info(f"ℹ️ SYSTEM MESSAGE DEBUG: No document context marker - DocAware may be disabled or all documents filtered due to failed extraction")
+>>>>>>> Incoming (Background Agent changes)
         
         # Convert conversation_history to structured messages array
         from .message_converter import parse_conversation_history_to_messages
@@ -1144,7 +1312,7 @@ Current Iteration: {status['iterations'] + 1}/{status['max_iterations']}"""
                     error_msg += f" - {' | '.join(error_details)}"
                 
                 logger.error(f"❌ DELEGATE: {error_msg}")
-                logger.error(f"❌ DELEGATE: Prompt length: {len(delegate_prompt)} chars")
+                logger.error(f"❌ DELEGATE: Conversation history length: {len(conversation_history)} chars")
                 return f"ERROR: {error_msg}"
             
             response_text = delegate_response.text.strip()
