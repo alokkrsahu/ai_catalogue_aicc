@@ -76,8 +76,15 @@ docker compose -f docker-compose.yml -f docker-compose.override.yml down --remov
 echo "📦 Pulling latest database images..."
 docker compose pull postgres etcd minio milvus
 
+# Enable BuildKit for better network handling and caching
+export DOCKER_BUILDKIT=1
+export COMPOSE_DOCKER_CLI_BUILD=1
+
 # Build development images
-echo "🔨 Building development images..."
+echo "🔨 Building development images (with BuildKit enabled)..."
+# Prune old BuildKit cache to avoid corruption issues
+echo "🧹 Cleaning old BuildKit cache..."
+docker builder prune -af --filter "until=24h" > /dev/null 2>&1 || true
 docker compose -f docker-compose.yml -f docker-compose.override.yml build --no-cache
 
 # Start services in proper order for Milvus v2.6.0

@@ -52,7 +52,7 @@ class DocAwareHandler:
             Formatted document context string
         """
         agent_data = agent_node.get('data', {})
-        search_method = agent_data.get('search_method', 'semantic_search')
+        search_method = agent_data.get('search_method', 'hybrid_search')
         search_parameters = agent_data.get('search_parameters', {})
         
         logger.info(f"📚 DOCAWARE: Single agent searching with method {search_method}")
@@ -89,17 +89,55 @@ class DocAwareHandler:
                 logger.info(f"📚 DOCAWARE: No relevant documents found for single agent query")
                 return ""
             
+            # Get search_limit from search_parameters (configured in frontend)
+            search_limit = search_parameters.get('search_limit', 10)
+            
+            # Filter out documents with failed extraction status
+            valid_results = []
+            failed_results = []
+            
+            for result in search_results:
+                content = result.get('content', '')
+                # Check if content indicates failed extraction
+                if content and ('Extraction Status: FAILED' in content or 
+                               'This document could not be processed' in content):
+                    failed_results.append(result)
+                    logger.warning(f"⚠️ DOCAWARE: Filtering out document with failed extraction: {result.get('metadata', {}).get('source', 'Unknown')}")
+                else:
+                    valid_results.append(result)
+            
+            if failed_results:
+                logger.warning(f"⚠️ DOCAWARE: Filtered out {len(failed_results)} document(s) with failed extraction status")
+            
+            if not valid_results:
+                logger.error(f"❌ DOCAWARE: All {len(search_results)} search results have failed extraction status!")
+                logger.error(f"❌ DOCAWARE: Search found {len(search_results)} document(s), but all contain 'Extraction Status: FAILED'")
+                logger.error(f"❌ DOCAWARE: These documents were processed but content extraction failed during processing")
+                logger.error(f"❌ DOCAWARE: ACTION REQUIRED: Delete these documents from the project and re-upload them")
+                logger.error(f"❌ DOCAWARE: After re-uploading, wait for 'Start Processing' to complete successfully before using DocAware")
+                return ""  # Return empty context if all documents failed
+            
             # Format results for prompt inclusion
             context_parts = []
-            context_parts.append(f"Found {len(search_results)} relevant documents based on conversation context:\n")
+            context_parts.append(f"Found {len(valid_results)} relevant documents based on conversation context:\n")
             
-            for i, result in enumerate(search_results[:5], 1):  # Limit to top 5 results
-                content = result['content']
+            # Use configured search_limit, but don't exceed available results
+            limit = min(len(valid_results), search_limit)
+            for i, result in enumerate(valid_results[:limit], 1):
+                content = result['content']  # Use full content without truncation
                 metadata = result['metadata']
                 
-                # Truncate content for prompt efficiency
-                if len(content) > 400:
-                    content = content[:400] + f"... [content truncated]"
+                # Debug logging for content verification
+                content_length = len(content) if content else 0
+                content_preview = content[:200] if content and len(content) > 200 else content
+                is_empty = not content or len(content.strip()) == 0
+                
+                logger.info(f"📚 DOCAWARE CONTENT DEBUG: Document {i} - Content length: {content_length} chars, Empty: {is_empty}")
+                if content:
+                    logger.info(f"📚 DOCAWARE CONTENT DEBUG: Document {i} preview (first 200 chars): {content_preview}...")
+                else:
+                    logger.warning(f"⚠️ DOCAWARE CONTENT DEBUG: Document {i} has EMPTY content! Available result keys: {list(result.keys())}")
+                    logger.warning(f"⚠️ DOCAWARE CONTENT DEBUG: Document {i} metadata keys: {list(metadata.keys()) if metadata else 'None'}")
                 
                 context_parts.append(f"📄 Document {i} (Relevance: {metadata.get('score', 0):.3f}):")
                 context_parts.append(f"   Source: {metadata.get('source', 'Unknown')}")
@@ -115,13 +153,13 @@ class DocAwareHandler:
             context_parts.append(f"Query derived from conversation history")
             
             result_text = "\n".join(context_parts)
-            logger.info(f"📚 DOCAWARE: Generated context from {len(search_results)} results ({len(result_text)} chars)")
+            logger.info(f"📚 DOCAWARE: Generated context from {len(valid_results)} valid results (filtered {len(failed_results)} failed, total {len(search_results)} results) ({len(result_text)} chars)")
 
             # Structured experiment log for DocAware impact / retrieval overhead
             try:
                 agent_name = agent_data.get('name') or agent_node.get('data', {}).get('name', 'UnknownAgent')
                 domain_counts: Dict[str, int] = {}
-                for r in search_results:
+                for r in valid_results:
                     meta = r.get('metadata', {}) or {}
                     # Try common domain/category fields
                     domain = meta.get('category') or meta.get('domain') or meta.get('document_type') or 'unknown'
@@ -140,7 +178,9 @@ class DocAwareHandler:
                     "agent_name": agent_name,
                     "search_method": search_method,
                     "query_length": len(search_query or ""),
-                    "results_count": len(search_results),
+                    "results_count": len(valid_results),
+                    "failed_results_count": len(failed_results),
+                    "total_results_count": len(search_results),
                     "search_duration_ms": search_duration_ms,
                     "content_filters": content_filters,
                     "domain_counts": domain_counts,
@@ -188,7 +228,7 @@ class DocAwareHandler:
         Retrieve document context using DocAware service
         """
         agent_data = agent_node.get('data', {})
-        search_method = agent_data.get('search_method', 'semantic_search')
+        search_method = agent_data.get('search_method', 'hybrid_search')
         search_parameters = agent_data.get('search_parameters', {})
         
         logger.info(f"📚 DOCAWARE: Getting context for agent with method {search_method}")
@@ -225,13 +265,55 @@ class DocAwareHandler:
                 logger.info(f"📚 DOCAWARE: No relevant documents found for query: {query[:50]}...")
                 return ""
             
+            # Get search_limit from search_parameters (configured in frontend)
+            search_limit = search_parameters.get('search_limit', 10)
+            
+            # Filter out documents with failed extraction status
+            valid_results = []
+            failed_results = []
+            
+            for result in search_results:
+                content = result.get('content', '')
+                # Check if content indicates failed extraction
+                if content and ('Extraction Status: FAILED' in content or 
+                               'This document could not be processed' in content):
+                    failed_results.append(result)
+                    logger.warning(f"⚠️ DOCAWARE: Filtering out document with failed extraction: {result.get('metadata', {}).get('source', 'Unknown')}")
+                else:
+                    valid_results.append(result)
+            
+            if failed_results:
+                logger.warning(f"⚠️ DOCAWARE: Filtered out {len(failed_results)} document(s) with failed extraction status")
+            
+            if not valid_results:
+                logger.error(f"❌ DOCAWARE: All {len(search_results)} search results have failed extraction status!")
+                logger.error(f"❌ DOCAWARE: Search found {len(search_results)} document(s), but all contain 'Extraction Status: FAILED'")
+                logger.error(f"❌ DOCAWARE: These documents were processed but content extraction failed during processing")
+                logger.error(f"❌ DOCAWARE: ACTION REQUIRED: Delete these documents from the project and re-upload them")
+                logger.error(f"❌ DOCAWARE: After re-uploading, wait for 'Start Processing' to complete successfully before using DocAware")
+                return ""  # Return empty context if all documents failed
+            
             # Format results for prompt
             context_parts = []
-            context_parts.append(f"Found {len(search_results)} relevant documents for your query:\n")
+            context_parts.append(f"Found {len(valid_results)} relevant documents for your query:\n")
             
-            for i, result in enumerate(search_results[:5], 1):  # Limit to top 5 results
-                content = result['content'][:500] + "..." if len(result['content']) > 500 else result['content']
+            # Use configured search_limit, but don't exceed available results
+            limit = min(len(valid_results), search_limit)
+            for i, result in enumerate(valid_results[:limit], 1):
+                content = result['content']  # Use full content without truncation
                 metadata = result['metadata']
+                
+                # Debug logging for content verification
+                content_length = len(content) if content else 0
+                content_preview = content[:200] if content and len(content) > 200 else content
+                is_empty = not content or len(content.strip()) == 0
+                
+                logger.info(f"📚 DOCAWARE CONTENT DEBUG: Document {i} - Content length: {content_length} chars, Empty: {is_empty}")
+                if content:
+                    logger.info(f"📚 DOCAWARE CONTENT DEBUG: Document {i} preview (first 200 chars): {content_preview}...")
+                else:
+                    logger.warning(f"⚠️ DOCAWARE CONTENT DEBUG: Document {i} has EMPTY content! Available result keys: {list(result.keys())}")
+                    logger.warning(f"⚠️ DOCAWARE CONTENT DEBUG: Document {i} metadata keys: {list(metadata.keys()) if metadata else 'None'}")
                 
                 context_parts.append(f"Document {i} (Score: {metadata.get('score', 0):.3f}):")
                 context_parts.append(f"Source: {metadata.get('source', 'Unknown')}")
@@ -241,13 +323,13 @@ class DocAwareHandler:
                 context_parts.append("")  # Empty line separator
             
             result_text = "\n".join(context_parts)
-            logger.info(f"📚 DOCAWARE: Generated context with {len(search_results)} results ({len(result_text)} chars)")
+            logger.info(f"📚 DOCAWARE: Generated context with {len(valid_results)} valid results (filtered {len(failed_results)} failed, total {len(search_results)} results) ({len(result_text)} chars)")
 
             # Structured experiment log for DocAware impact (generic path)
             try:
                 agent_name = agent_data.get('name') or agent_node.get('data', {}).get('name', 'UnknownAgent')
                 domain_counts: Dict[str, int] = {}
-                for r in search_results:
+                for r in valid_results:
                     meta = r.get('metadata', {}) or {}
                     domain = meta.get('category') or meta.get('domain') or meta.get('document_type') or 'unknown'
                     domain_counts[domain] = domain_counts.get(domain, 0) + 1
@@ -265,7 +347,9 @@ class DocAwareHandler:
                     "agent_name": agent_name,
                     "search_method": search_method,
                     "query_length": len(query or ""),
-                    "results_count": len(search_results),
+                    "results_count": len(valid_results),
+                    "failed_results_count": len(failed_results),
+                    "total_results_count": len(search_results),
                     "search_duration_ms": search_duration_ms,
                     "content_filters": content_filters,
                     "domain_counts": domain_counts,
@@ -625,7 +709,7 @@ Refined search query:"""
             Formatted document context string
         """
         agent_data = agent_node.get('data', {})
-        search_method = agent_data.get('search_method', 'semantic_search')
+        search_method = agent_data.get('search_method', 'hybrid_search')
         search_parameters = agent_data.get('search_parameters', {})
         
         # Check if query refinement is enabled
@@ -668,17 +752,55 @@ Refined search query:"""
                 logger.info(f"📚 DOCAWARE: No relevant documents found for aggregated input query")
                 return ""
             
+            # Get search_limit from search_parameters (configured in frontend)
+            search_limit = search_parameters.get('search_limit', 10)
+            
+            # Filter out documents with failed extraction status
+            valid_results = []
+            failed_results = []
+            
+            for result in search_results:
+                content = result.get('content', '')
+                # Check if content indicates failed extraction
+                if content and ('Extraction Status: FAILED' in content or 
+                               'This document could not be processed' in content):
+                    failed_results.append(result)
+                    logger.warning(f"⚠️ DOCAWARE: Filtering out document with failed extraction: {result.get('metadata', {}).get('source', 'Unknown')}")
+                else:
+                    valid_results.append(result)
+            
+            if failed_results:
+                logger.warning(f"⚠️ DOCAWARE: Filtered out {len(failed_results)} document(s) with failed extraction status")
+            
+            if not valid_results:
+                logger.error(f"❌ DOCAWARE: All {len(search_results)} search results have failed extraction status!")
+                logger.error(f"❌ DOCAWARE: Search found {len(search_results)} document(s), but all contain 'Extraction Status: FAILED'")
+                logger.error(f"❌ DOCAWARE: These documents were processed but content extraction failed during processing")
+                logger.error(f"❌ DOCAWARE: ACTION REQUIRED: Delete these documents from the project and re-upload them")
+                logger.error(f"❌ DOCAWARE: After re-uploading, wait for 'Start Processing' to complete successfully before using DocAware")
+                return ""  # Return empty context if all documents failed
+            
             # Format results for prompt inclusion
             context_parts = []
-            context_parts.append(f"Found {len(search_results)} relevant documents based on connected agent inputs:\n")
+            context_parts.append(f"Found {len(valid_results)} relevant documents based on connected agent inputs:\n")
             
-            for i, result in enumerate(search_results[:5], 1):  # Limit to top 5 results
-                content = result['content']
+            # Use configured search_limit, but don't exceed available results
+            limit = min(len(valid_results), search_limit)
+            for i, result in enumerate(valid_results[:limit], 1):
+                content = result['content']  # Use full content without truncation
                 metadata = result['metadata']
                 
-                # Truncate content for prompt efficiency
-                if len(content) > 400:
-                    content = content[:400] + f"... [content truncated]"
+                # Debug logging for content verification
+                content_length = len(content) if content else 0
+                content_preview = content[:200] if content and len(content) > 200 else content
+                is_empty = not content or len(content.strip()) == 0
+                
+                logger.info(f"📚 DOCAWARE CONTENT DEBUG: Document {i} - Content length: {content_length} chars, Empty: {is_empty}")
+                if content:
+                    logger.info(f"📚 DOCAWARE CONTENT DEBUG: Document {i} preview (first 200 chars): {content_preview}...")
+                else:
+                    logger.warning(f"⚠️ DOCAWARE CONTENT DEBUG: Document {i} has EMPTY content! Available result keys: {list(result.keys())}")
+                    logger.warning(f"⚠️ DOCAWARE CONTENT DEBUG: Document {i} metadata keys: {list(metadata.keys()) if metadata else 'None'}")
                 
                 context_parts.append(f"📄 Document {i} (Relevance: {metadata.get('score', 0):.3f}):")
                 context_parts.append(f"   Source: {metadata.get('source', 'Unknown')}")
@@ -694,7 +816,7 @@ Refined search query:"""
             context_parts.append(f"Query derived from {aggregated_context['input_count']} connected agent outputs")
             
             result_text = "\n".join(context_parts)
-            logger.info(f"📚 DOCAWARE: Generated context from {len(search_results)} results ({len(result_text)} chars)")
+            logger.info(f"📚 DOCAWARE: Generated context from {len(valid_results)} valid results (filtered {len(failed_results)} failed, total {len(search_results)} results) ({len(result_text)} chars)")
             
             return result_text
             

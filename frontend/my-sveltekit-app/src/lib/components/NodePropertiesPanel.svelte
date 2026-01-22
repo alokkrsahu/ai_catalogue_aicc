@@ -1675,7 +1675,7 @@
                   
                   // Set default search method after ensuring methods are loaded
                   if (!nodeConfig.search_method && availableSearchMethods.length > 0) {
-                    nodeConfig.search_method = 'semantic_search';
+                    nodeConfig.search_method = 'hybrid_search';
                     await handleSearchMethodChange();
                   } else if (!nodeConfig.search_method) {
                     // If still no methods available, set fallback
@@ -2220,7 +2220,7 @@
                   
                   // Set default search method after ensuring methods are loaded
                   if (!nodeConfig.search_method && availableSearchMethods.length > 0) {
-                    nodeConfig.search_method = 'semantic_search';
+                    nodeConfig.search_method = 'hybrid_search';
                     await handleSearchMethodChange();
                   } else if (!nodeConfig.search_method) {
                     // If still no methods available, set fallback

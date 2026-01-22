@@ -2104,6 +2104,56 @@ class WorkflowExecutor:
                     if missing_inputs:
                         raise Exception(f"Missing required inputs: {missing_inputs}")
                 
+                # CRITICAL FIX: Special handling for GroupChatManager in parallel execution
+                # GroupChatManager must execute delegates, not act as a regular AssistantAgent
+                if node_type == 'GroupChatManager':
+                    logger.info(f"👥 PARALLEL: Executing GroupChatManager {node_name} with delegate support")
+                    
+                    # Get execution sequence for delegate discovery
+                    # Use the existing workflow_parser instance instead of creating a new one
+                    execution_sequence = self.workflow_parser.parse_workflow_graph(graph_json)
+                    
+                    # Use the same logic as sequential execution
+                    if len(input_sources) > 1:
+                        logger.info(f"📥 PARALLEL: GroupChatManager {node_name} has {len(input_sources)} input sources - using multi-input mode")
+                        chat_result = await self.chat_manager.execute_group_chat_manager_with_multiple_inputs(
+                            node, llm_provider, input_sources, executed_nodes, execution_sequence, graph_json, str(project_id), project
+                        )
+                    else:
+                        logger.info(f"📥 PARALLEL: GroupChatManager {node_name} has {len(input_sources)} input source - using single-input mode")
+                        chat_result = await self.chat_manager.execute_group_chat_manager(
+                            node, llm_provider, conversation_history, execution_sequence, graph_json, str(project_id), project
+                        )
+                    
+                    agent_response_text = chat_result['final_response']
+                    response_time_ms = 0  # GroupChatManager response time is complex (includes delegate execution)
+                    
+                    logger.info(f"✅ PARALLEL: {node_name} completed - {len(agent_response_text)} chars (with {chat_result.get('total_iterations', 0)} delegate iterations)")
+                    
+                    # Return special result for GroupChatManager
+                    return {
+                        'node_id': node_id,
+                        'node_name': node_name,
+                        'executed': True,
+                        'output': agent_response_text,
+                        'response_time_ms': response_time_ms,
+                        'token_count': None,
+                        'agents_involved': {node_name},
+                        'providers_used': [agent_config['llm_provider']],
+                        'metadata': {
+                            'llm_provider': agent_config['llm_provider'],
+                            'llm_model': agent_config['llm_model'],
+                            'is_group_chat_manager': True,
+                            'delegate_conversations': chat_result.get('delegate_conversations', []),
+                            'delegate_status': chat_result.get('delegate_status', {}),
+                            'total_iterations': chat_result.get('total_iterations', 0)
+                        },
+                        'index': idx,
+                        'is_group_chat_manager': True,
+                        'chat_result': chat_result  # Store full result for message logging
+                    }
+                
+                # Regular agent execution (AssistantAgent, etc.)
                 # Craft prompt - use conversation_history snapshot
                 # Note: In parallel execution, conversation_history may not include other parallel nodes yet
                 # This is correct - each node sees the state before parallel execution started
@@ -2170,19 +2220,53 @@ class WorkflowExecutor:
                 node_idx = result['index']
                 node_type = next((n[1].get('type', 'AssistantAgent') for n in ready_nodes if n[0] == node_idx), 'AssistantAgent')
                 
-                # Create message for this node
-                new_messages.append({
-                    'sequence': next_sequence,
-                    'agent_name': result['node_name'],
-                    'agent_type': node_type,
-                    'content': result['output'],
-                    'message_type': 'chat',
-                    'timestamp': timezone.now().isoformat(),
-                    'response_time_ms': result.get('response_time_ms', 0),
-                    'token_count': result.get('token_count'),
-                    'metadata': result.get('metadata', {})
-                })
-                next_sequence += 1
+                # Special handling for GroupChatManager from parallel execution
+                if result.get('is_group_chat_manager') and result.get('chat_result'):
+                    chat_result = result['chat_result']
+                    delegate_conversations = chat_result.get('delegate_conversations', [])
+                    delegate_status = chat_result.get('delegate_status', {})
+                    total_iterations = chat_result.get('total_iterations', 0)
+                    
+                    # Create GroupChatManager message with delegate details
+                    new_messages.append({
+                        'sequence': next_sequence,
+                        'agent_name': result['node_name'],
+                        'agent_type': node_type,
+                        'content': result['output'],
+                        'message_type': 'group_chat_summary',
+                        'timestamp': timezone.now().isoformat(),
+                        'response_time_ms': result.get('response_time_ms', 0),
+                        'token_count': result.get('token_count'),
+                        'metadata': {
+                            **result.get('metadata', {}),
+                            'is_group_chat_manager': True,
+                            'total_iterations': total_iterations,
+                            'delegate_count': len(delegate_status),
+                            'expandable': True,
+                            'delegate_conversations': delegate_conversations,
+                            'delegate_status': delegate_status
+                        }
+                    })
+                    next_sequence += 1
+                    
+                    # Log individual delegate messages if available
+                    # Note: For parallel execution, we store delegate conversations in metadata
+                    # Individual delegate messages are logged in the sequential path
+                    logger.info(f"💾 PARALLEL: GroupChatManager {result['node_name']} completed with {total_iterations} delegate iterations")
+                else:
+                    # Regular agent message
+                    new_messages.append({
+                        'sequence': next_sequence,
+                        'agent_name': result['node_name'],
+                        'agent_type': node_type,
+                        'content': result['output'],
+                        'message_type': 'chat',
+                        'timestamp': timezone.now().isoformat(),
+                        'response_time_ms': result.get('response_time_ms', 0),
+                        'token_count': result.get('token_count'),
+                        'metadata': result.get('metadata', {})
+                    })
+                    next_sequence += 1
         
         # Append new messages to existing messages list
         messages.extend(new_messages)

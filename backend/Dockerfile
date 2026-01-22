@@ -6,10 +6,16 @@ WORKDIR /app
 
 # CRITICAL FIX: Install system dependencies with robust retry logic and error handling
 # Split into essential and optional packages - continue even if optional packages fail
+# Configure apt to handle network timeouts better
+RUN echo 'Acquire::http::Timeout "60";' > /etc/apt/apt.conf.d/99timeout && \
+    echo 'Acquire::ftp::Timeout "60";' >> /etc/apt/apt.conf.d/99timeout && \
+    echo 'Acquire::Retries "5";' >> /etc/apt/apt.conf.d/99timeout
+
+# Install essential packages (must succeed)
 RUN set -eux; \
-    # Retry apt-get update up to 3 times with delays
-    for i in 1 2 3; do \
-        apt-get update --fix-missing && break || (echo "Retry $i failed, waiting..." && sleep 10); \
+    # Retry apt-get update up to 5 times with exponential backoff
+    for i in 1 2 3 4 5; do \
+        apt-get update --fix-missing && break || (echo "Retry $i failed, waiting..." && sleep $((i * 5))); \
     done && \
     # Install essential network and build tools first (must succeed)
     apt-get install -y --no-install-recommends \
@@ -21,8 +27,12 @@ RUN set -eux; \
         python3-dev \
         libpq-dev \
         pkg-config \
-        git \
     && \
+    # Install git separately with retry logic (may have network dependencies)
+    (apt-get install -y --no-install-recommends git || \
+     (echo "Warning: git install failed, retrying..." && sleep 10 && \
+      apt-get install -y --no-install-recommends git || \
+      echo "Warning: git installation failed, continuing without it...")) && \
     # Install essential document processing libraries (must succeed)
     apt-get install -y --no-install-recommends \
         libxml2-dev \
@@ -30,22 +40,32 @@ RUN set -eux; \
         libjpeg-dev \
         libmagic1 \
     && \
-    # Install document processing tools (retry on failure, but continue)
-    (apt-get install -y --no-install-recommends \
+    rm -rf /var/lib/apt/lists/*
+
+# Install document processing tools (optional - don't fail build)
+RUN set +e; \
+    apt-get update --fix-missing || true; \
+    apt-get install -y --no-install-recommends \
         poppler-utils \
         tesseract-ocr \
         antiword \
         unrtf \
-    || (echo "Warning: Some document tools failed, retrying..." && \
-        sleep 5 && \
+    || (echo "Warning: Document tools failed, retrying..." && \
+        sleep 10 && \
+        apt-get update --fix-missing && \
         apt-get install -y --no-install-recommends \
             poppler-utils \
             tesseract-ocr \
             antiword \
             unrtf \
-    || echo "Warning: Document tools installation failed, continuing...")) && \
-    # Install audio processing tools (optional - continue even if they fail)
-    (apt-get install -y --no-install-recommends \
+    || echo "Warning: Document tools installation failed, continuing without them..."); \
+    rm -rf /var/lib/apt/lists/* || true
+
+# Install audio processing tools (optional - don't fail build)
+# Note: These packages have many X11 dependencies that may fail due to network issues
+RUN set +e; \
+    apt-get update --fix-missing || true; \
+    apt-get install -y --no-install-recommends \
         flac \
         ffmpeg \
         lame \
@@ -54,9 +74,21 @@ RUN set -eux; \
         sox \
         swig \
         libpulse-dev \
-    || echo "Warning: Audio packages failed to install, continuing without them...") && \
-    rm -rf /var/lib/apt/lists/* && \
-    apt-get clean
+    || (echo "Warning: Audio packages failed, retrying..." && \
+        sleep 10 && \
+        apt-get update --fix-missing && \
+        apt-get install -y --no-install-recommends \
+            flac \
+            ffmpeg \
+            lame \
+            libmad0 \
+            libsox-fmt-mp3 \
+            sox \
+            swig \
+            libpulse-dev \
+    || echo "Warning: Audio packages failed to install, continuing without them..."); \
+    rm -rf /var/lib/apt/lists/* || true; \
+    apt-get clean || true
 
 # Copy requirements first for better caching
 COPY requirements.txt .

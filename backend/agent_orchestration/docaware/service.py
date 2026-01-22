@@ -64,7 +64,7 @@ class EnhancedDocAwareAgentService:
     def search_documents(
         self,
         query: str,
-        search_method: SearchMethod = SearchMethod.SEMANTIC_SEARCH,
+        search_method: SearchMethod = SearchMethod.HYBRID_SEARCH,
         method_parameters: Optional[Dict[str, Any]] = None,
         conversation_context: Optional[List[str]] = None,
         content_filters: Optional[List[str]] = None
@@ -188,13 +188,21 @@ class EnhancedDocAwareAgentService:
             "text"
         )
         
-        # Log field extraction for debugging
-        if not content:
-            logger.warning(f"📚 FIELD MAPPING: No content found in hit with keys: {list(hit.keys())}")
+        # Enhanced validation and logging for content
+        content_length = len(content) if content else 0
+        is_empty = not content or len(content.strip()) == 0
+        
+        if is_empty:
+            logger.warning(f"⚠️ FIELD MAPPING: Document has EMPTY content! Content length: {content_length}")
+            logger.warning(f"⚠️ FIELD MAPPING: Available fields in hit: {list(hit.keys())}")
             # Show first few characters of each field to help debug
             for key, value in hit.items():
                 if isinstance(value, str) and len(value) > 10:
-                    logger.debug(f"📚 FIELD MAPPING: {key}: {str(value)[:50]}...")
+                    logger.info(f"📚 FIELD MAPPING: Field '{key}' contains: {str(value)[:100]}...")
+                elif isinstance(value, (int, float, bool)):
+                    logger.info(f"📚 FIELD MAPPING: Field '{key}' = {value}")
+        else:
+            logger.debug(f"📚 FIELD MAPPING: Document content length: {content_length} chars")
         
         if source == "Unknown":
             logger.debug(f"📚 FIELD MAPPING: No source found in hit with keys: {list(hit.keys())}")
@@ -464,13 +472,21 @@ class EnhancedDocAwareAgentService:
                     1
                 )
                 
-                # Log for debugging
-                if not content:
-                    logger.warning(f"📚 HYBRID SEARCH: No content found in document. Available fields: {list(hit.keys())}")
+                # Enhanced validation and logging for content
+                content_length = len(content) if content else 0
+                is_empty = not content or len(content.strip()) == 0
+                
+                if is_empty:
+                    logger.warning(f"⚠️ HYBRID SEARCH: Document has EMPTY content! Content length: {content_length}")
+                    logger.warning(f"⚠️ HYBRID SEARCH: Available fields in hit: {list(hit.keys())}")
                     # Show sample of each field to help identify the correct one
                     for key, value in hit.items():
                         if isinstance(value, str) and len(value) > 20:
                             logger.info(f"📚 HYBRID SEARCH: Field '{key}' contains: {str(value)[:100]}...")
+                        elif isinstance(value, (int, float, bool)):
+                            logger.info(f"📚 HYBRID SEARCH: Field '{key}' = {value}")
+                else:
+                    logger.debug(f"📚 HYBRID SEARCH: Document content length: {content_length} chars")
                 
                 semantic_score = hit.get("score", 0.0)
                 
@@ -860,7 +876,7 @@ class EnhancedDocAwareAgentService:
         Returns:
             Function that can be used by agents for document retrieval
         """
-        search_method = SearchMethod(agent_config.get('search_method', SearchMethod.SEMANTIC_SEARCH))
+        search_method = SearchMethod(agent_config.get('search_method', SearchMethod.HYBRID_SEARCH))
         method_parameters = agent_config.get('search_parameters', {})
         
         logger.info(f"📚 RAG FUNCTION: Creating function with {search_method.value} method")
