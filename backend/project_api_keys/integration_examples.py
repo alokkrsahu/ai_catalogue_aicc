@@ -12,6 +12,267 @@ from .integrations import get_project_api_key_integration
 
 logger = logging.getLogger(__name__)
 
+# Multi-Provider Summarizer for Document Processing
+class MultiProviderSummarizer:
+    """Summarizer that supports multiple LLM providers (OpenAI, Anthropic, Google)"""
+    
+    def __init__(self, project: IntelliDocProject, provider_type: str = 'openai', model: str = 'gpt-3.5-turbo'):
+        self.project = project
+        self.provider_type = provider_type.lower()
+        self.model = model
+        self.integration = get_project_api_key_integration()
+        self.client = None
+        self.available = False
+        self.max_tokens = 150
+        self.temperature = 0.3
+        self.max_input_length = 3000
+        
+        # Initialize client based on provider type
+        self._initialize_client()
+        
+        if self.available:
+            logger.info(f"✅ MULTI-PROVIDER SUMMARIZER: Initialized {provider_type} provider with model {model} for project {project.name}")
+        else:
+            logger.warning(f"⚠️ MULTI-PROVIDER SUMMARIZER: {provider_type} not available for project {project.name}")
+    
+    def _initialize_client(self):
+        """Initialize LLM client based on provider type"""
+        try:
+            if self.provider_type == 'openai':
+                self.client = self.integration.get_openai_client_for_project(self.project)
+                if self.client:
+                    self.available = True
+            elif self.provider_type in ['anthropic', 'claude']:
+                # Get Anthropic client
+                try:
+                    from anthropic import Anthropic
+                    api_key = self.integration.api_key_service.get_project_api_key(self.project, 'anthropic')
+                    if api_key:
+                        self.client = Anthropic(api_key=api_key)
+                        self.available = True
+                except ImportError:
+                    logger.error("❌ MULTI-PROVIDER SUMMARIZER: anthropic package not installed")
+                except Exception as e:
+                    logger.error(f"❌ MULTI-PROVIDER SUMMARIZER: Failed to initialize Anthropic client: {e}")
+            elif self.provider_type in ['google', 'gemini']:
+                # Get Google client
+                try:
+                    from google import genai
+                    api_key = self.integration.api_key_service.get_project_api_key(self.project, 'google')
+                    if api_key:
+                        import os
+                        os.environ['GOOGLE_API_KEY'] = api_key
+                        self.client = genai.Client()
+                        self.available = True
+                except ImportError:
+                    logger.error("❌ MULTI-PROVIDER SUMMARIZER: google-genai package not installed")
+                except Exception as e:
+                    logger.error(f"❌ MULTI-PROVIDER SUMMARIZER: Failed to initialize Google client: {e}")
+            else:
+                logger.error(f"❌ MULTI-PROVIDER SUMMARIZER: Unsupported provider type: {self.provider_type}")
+        except Exception as e:
+            logger.error(f"❌ MULTI-PROVIDER SUMMARIZER: Failed to initialize {self.provider_type} client: {e}")
+            self.available = False
+    
+    def generate_summary(self, content: str, document_metadata: Dict[str, Any] = None) -> Optional[str]:
+        """Generate summary using configured provider"""
+        if not self.available or not self.client or not content.strip():
+            if not self.available:
+                return f"❌ {self.provider_type.capitalize()} API key not configured for project '{self.project.name}'. Please add your {self.provider_type} API key in the project's API Management settings."
+            return None
+        
+        try:
+            # Truncate content if too long
+            if len(content) > self.max_input_length:
+                content = content[:self.max_input_length] + "..."
+            
+            # Build prompt
+            prompt = self._build_summarization_prompt(content, document_metadata)
+            
+            # Generate summary based on provider
+            if self.provider_type == 'openai':
+                return self._generate_openai_summary(prompt)
+            elif self.provider_type in ['anthropic', 'claude']:
+                return self._generate_anthropic_summary(prompt)
+            elif self.provider_type in ['google', 'gemini']:
+                return self._generate_google_summary(prompt)
+            else:
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ MULTI-PROVIDER SUMMARIZER: Failed to generate summary for project {self.project.name}: {e}")
+            return f"❌ Error generating summary: {str(e)}"
+    
+    def generate_topic(self, content: str, document_metadata: Dict[str, Any] = None) -> Optional[str]:
+        """Generate topic using configured provider"""
+        if not self.available or not self.client or not content.strip():
+            if not self.available:
+                return f"❌ {self.provider_type.capitalize()} API key not configured for project '{self.project.name}'"
+            return None
+        
+        try:
+            if len(content) > self.max_input_length:
+                content = content[:self.max_input_length] + "..."
+            
+            prompt = self._build_topic_prompt(content, document_metadata)
+            
+            # Generate topic based on provider
+            if self.provider_type == 'openai':
+                return self._generate_openai_topic(prompt)
+            elif self.provider_type in ['anthropic', 'claude']:
+                return self._generate_anthropic_topic(prompt)
+            elif self.provider_type in ['google', 'gemini']:
+                return self._generate_google_topic(prompt)
+            else:
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ MULTI-PROVIDER SUMMARIZER: Failed to generate topic for project {self.project.name}: {e}")
+            return None
+    
+    def _generate_openai_summary(self, prompt: str) -> Optional[str]:
+        """Generate summary using OpenAI"""
+        # Newer OpenAI models (like gpt-5.2-chat-latest) have different parameter requirements
+        # Check if model requires max_completion_tokens and has temperature restrictions
+        model_lower = self.model.lower()
+        use_max_completion_tokens = any(x in model_lower for x in ['gpt-5', 'gpt-4o', 'o1', 'o3'])
+        # Some newer models only support default temperature (1)
+        temperature_restricted = any(x in model_lower for x in ['gpt-5', 'o1', 'o3'])
+        
+        request_params = {
+            'model': self.model,
+            'messages': [
+                {"role": "system", "content": "You are a professional document summarizer."},
+                {"role": "user", "content": prompt}
+            ]
+        }
+        
+        # Only add temperature if model supports it (not restricted to default)
+        if not temperature_restricted:
+            request_params['temperature'] = self.temperature
+        
+        if use_max_completion_tokens:
+            request_params['max_completion_tokens'] = self.max_tokens
+        else:
+            request_params['max_tokens'] = self.max_tokens
+        
+        response = self.client.chat.completions.create(**request_params)
+        return response.choices[0].message.content.strip()
+    
+    def _generate_anthropic_summary(self, prompt: str) -> Optional[str]:
+        """Generate summary using Anthropic"""
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+        return response.content[0].text.strip()
+    
+    def _generate_google_summary(self, prompt: str) -> Optional[str]:
+        """Generate summary using Google/Gemini"""
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=prompt
+        )
+        return response.text.strip()
+    
+    def _generate_openai_topic(self, prompt: str) -> Optional[str]:
+        """Generate topic using OpenAI"""
+        # Newer OpenAI models (like gpt-5.2-chat-latest) have different parameter requirements
+        # Check if model requires max_completion_tokens and has temperature restrictions
+        model_lower = self.model.lower()
+        use_max_completion_tokens = any(x in model_lower for x in ['gpt-5', 'gpt-4o', 'o1', 'o3'])
+        # Some newer models only support default temperature (1)
+        temperature_restricted = any(x in model_lower for x in ['gpt-5', 'o1', 'o3'])
+        
+        request_params = {
+            'model': self.model,
+            'messages': [
+                {"role": "system", "content": "You are an expert at creating concise topic names."},
+                {"role": "user", "content": prompt}
+            ]
+        }
+        
+        # Only add temperature if model supports it (not restricted to default)
+        if not temperature_restricted:
+            request_params['temperature'] = 0.2
+        
+        if use_max_completion_tokens:
+            request_params['max_completion_tokens'] = 30
+        else:
+            request_params['max_tokens'] = 30
+        
+        response = self.client.chat.completions.create(**request_params)
+        return self._clean_topic(response.choices[0].message.content.strip())
+    
+    def _generate_anthropic_topic(self, prompt: str) -> Optional[str]:
+        """Generate topic using Anthropic"""
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=30,
+            temperature=0.2,
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+        return self._clean_topic(response.content[0].text.strip())
+    
+    def _generate_google_topic(self, prompt: str) -> Optional[str]:
+        """Generate topic using Google/Gemini"""
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=prompt
+        )
+        return self._clean_topic(response.text.strip())
+    
+    def _build_summarization_prompt(self, content: str, metadata: Dict[str, Any] = None) -> str:
+        """Build summarization prompt"""
+        prompt = ("Create a concise summary (max 200 words, 5 lines). "
+                 "Focus on key points and main ideas.\n\n")
+        
+        if metadata:
+            file_name = metadata.get('file_name', 'unknown')
+            prompt += f"Document: {file_name}\n\n"
+        
+        prompt += f"Content: {content}\n\nSummary:"
+        return prompt
+    
+    def _build_topic_prompt(self, content: str, metadata: Dict[str, Any] = None) -> str:
+        """Build topic generation prompt"""
+        prompt = ("Create a concise topic name (max 8 words, title case). "
+                 "Focus on main subject. No quotes or special formatting.\n\n")
+        
+        if metadata:
+            file_name = metadata.get('file_name', 'unknown')
+            prompt += f"Document: {file_name}\n\n"
+        
+        prompt += f"Content: {content}\n\nTopic:"
+        return prompt
+    
+    def _clean_topic(self, topic: str) -> str:
+        """Clean and validate topic"""
+        if not topic:
+            return "Document Content"
+
+        # Remove quotes and prefixes
+        topic = topic.strip('"\'')
+        prefixes = ['Topic:', 'Title:', 'Subject:']
+        for prefix in prefixes:
+            if topic.startswith(prefix):
+                topic = topic[len(prefix):].strip()
+
+        # Limit to 8 words
+        words = topic.split()[:8]
+        return ' '.join(words).title()
+    
+    def is_available(self) -> bool:
+        """Check if summarizer is available"""
+        return self.available
+
+
 # Example 1: Updated OpenAI Summarizer using project-specific keys
 class ProjectAwareOpenAISummarizer:
     """Enhanced OpenAI Summarizer that uses project-specific API keys"""

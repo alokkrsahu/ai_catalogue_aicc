@@ -54,26 +54,43 @@ class UnifiedVectorSearchManager:
         pass  # No longer need ContentExtractor since EnhancedHierarchicalProcessor handles everything
     
     @staticmethod
-    def process_project_documents(project_id: str, processing_mode: str = 'enhanced') -> Dict[str, Any]:
+    def process_project_documents(
+        project_id: str, 
+        processing_mode: str = 'enhanced',
+        llm_provider: str = None,
+        llm_model: str = None,
+        enable_summary: bool = True
+    ) -> Dict[str, Any]:
         """
         Enhanced document processing with full AI capabilities - NO fallbacks
         
         Args:
             project_id: Project identifier
             processing_mode: Only 'enhanced' mode supported
+            llm_provider: LLM provider to use (e.g., 'openai', 'anthropic', 'google')
+            llm_model: LLM model to use (e.g., 'gpt-3.5-turbo', 'claude-3-opus')
+            enable_summary: Whether to generate summaries for chunks
         """
         try:
             # Get project using UUID only
             project = IntelliDocProject.objects.get(project_id=project_id)
             
             logger.info(f"🚀 Starting ENHANCED processing for project {project.name}")
+            if llm_provider:
+                logger.info(f"📋 LLM Config - Provider: {llm_provider}, Model: {llm_model}, Enable Summary: {enable_summary}")
             
             # Initialize components
             manager = UnifiedVectorSearchManager()
             embedder = get_embedder_instance()
             
             # Only enhanced processing - no fallbacks
-            return manager._process_enhanced_with_full_ai(project, embedder)
+            return manager._process_enhanced_with_full_ai(
+                project, 
+                embedder,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                enable_summary=enable_summary
+            )
                 
         except Exception as e:
             logger.error(f"❌ Enhanced processing failed for project {project_id}: {e}")
@@ -86,18 +103,31 @@ class UnifiedVectorSearchManager:
                 'processing_mode': 'enhanced'
             }
     
-    def _process_enhanced_with_full_ai(self, project: IntelliDocProject, embedder) -> Dict[str, Any]:
-        """Enhanced processing with full AI capabilities using project-specific OpenAI API key"""
+    def _process_enhanced_with_full_ai(
+        self, 
+        project: IntelliDocProject, 
+        embedder,
+        llm_provider: str = None,
+        llm_model: str = None,
+        enable_summary: bool = True
+    ) -> Dict[str, Any]:
+        """Enhanced processing with full AI capabilities using project-specific API keys"""
         from .enhanced_hierarchical_processor import EnhancedHierarchicalProcessor
         from .enhanced_hierarchical_database import EnhancedHierarchicalVectorDatabase
 
         start_time = time.time()
 
-        # Initialize processor with project (requires project-specific OpenAI API key)
+        # Initialize processor with project and LLM configuration
         try:
-            processor = EnhancedHierarchicalProcessor(project=project, embedder=embedder)
+            processor = EnhancedHierarchicalProcessor(
+                project=project, 
+                embedder=embedder,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                enable_summary=enable_summary
+            )
         except ValueError as e:
-            # Project doesn't have OpenAI API key configured
+            # Project doesn't have required API key configured
             logger.error(f"❌ Cannot process documents: {e}")
             return {
                 'status': 'error',

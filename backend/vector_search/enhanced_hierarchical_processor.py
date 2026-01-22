@@ -14,7 +14,7 @@ import re
 from .embeddings import DocumentEmbedder
 from .summarization import get_summarizer
 from .gemini_extractor import get_gemini_extractor, initialize_gemini_extractor
-from project_api_keys.integration_examples import ProjectAwareOpenAISummarizer
+from project_api_keys.integration_examples import ProjectAwareOpenAISummarizer, MultiProviderSummarizer
 
 logger = logging.getLogger(__name__)
 
@@ -84,57 +84,91 @@ class HierarchicalDocumentInfo:
 class EnhancedHierarchicalProcessor:
     """Enhanced processor with MANDATORY AI content generation using project-specific API keys"""
 
-    def __init__(self, project, embedder: DocumentEmbedder = None, max_chunk_size: int = 35000):
+    def __init__(
+        self, 
+        project, 
+        embedder: DocumentEmbedder = None, 
+        max_chunk_size: int = 35000,
+        llm_provider: str = None,
+        llm_model: str = None,
+        enable_summary: bool = True
+    ):
         """
-        Initialize processor with project-specific OpenAI API key
+        Initialize processor with project-specific API keys and LLM configuration
 
         Args:
             project: IntelliDocProject instance (REQUIRED)
             embedder: DocumentEmbedder instance
             max_chunk_size: Maximum chunk size in characters
+            llm_provider: LLM provider to use (e.g., 'openai', 'anthropic', 'google')
+            llm_model: LLM model to use (e.g., 'gpt-3.5-turbo', 'claude-3-opus')
+            enable_summary: Whether to generate summaries for chunks
 
         Raises:
-            ValueError: If project has no OpenAI API key configured
+            ValueError: If project has no API key configured for selected provider
         """
         self.project = project
         self.embedder = embedder or DocumentEmbedder()
         self.max_chunk_size = max_chunk_size
-        self.supported_extensions = {'.txt', '.pdf', '.docx', '.doc', '.md', '.rtf', '.odt'}
+        self.supported_extensions = {'.txt', '.text', '.pdf', '.docx', '.doc', '.md', '.rtf', '.odt'}
+        self.enable_summary = enable_summary
 
-        # Use project-specific OpenAI summarizer - NO FALLBACK
-        self.summarizer = ProjectAwareOpenAISummarizer(project)
+        # Determine LLM provider and model (default to OpenAI if not specified)
+        self.llm_provider = llm_provider or 'openai'
+        self.llm_model = llm_model or 'gpt-3.5-turbo'
 
-        # Check if project has OpenAI API key configured
-        if not self.summarizer.is_available():
-            error_msg = (
-                f"❌ PROJECT API KEY REQUIRED: Project '{project.name}' does not have an OpenAI API key configured. "
-                f"Please add your OpenAI API key in the project's API Management settings before processing documents."
-            )
-            logger.error(error_msg)
-            raise ValueError(error_msg)
+        logger.info(f"📋 PROCESSOR: Initializing with LLM Provider: {self.llm_provider}, Model: {self.llm_model}, Enable Summary: {self.enable_summary}")
 
-        logger.info(f"✅ AI Summarizer initialized with project-specific OpenAI API key for project '{project.name}'")
+        # Use MultiProviderSummarizer if summary is enabled, otherwise None
+        if self.enable_summary:
+            try:
+                self.summarizer = MultiProviderSummarizer(
+                    project=project,
+                    provider_type=self.llm_provider,
+                    model=self.llm_model
+                )
 
-        # Initialize Gemini extractor for PDF text extraction
+                # Check if summarizer is available
+                if not self.summarizer.is_available():
+                    error_msg = (
+                        f"❌ PROJECT API KEY REQUIRED: Project '{project.name}' does not have a {self.llm_provider} API key configured. "
+                        f"Please add your {self.llm_provider} API key in the project's API Management settings before processing documents."
+                    )
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+
+                logger.info(f"✅ AI Summarizer initialized with {self.llm_provider} provider (model: {self.llm_model}) for project '{project.name}'")
+            except Exception as e:
+                logger.error(f"❌ Failed to initialize MultiProviderSummarizer: {e}")
+                raise ValueError(f"Failed to initialize summarizer: {str(e)}")
+        else:
+            self.summarizer = None
+            logger.info(f"ℹ️ Summarizer disabled for project '{project.name}' - summaries will not be generated")
+
+        # Initialize PDF extractor (use Google/Gemini if selected, otherwise fallback)
         self._initialize_extractors()
 
-        logger.info(f"🚀 Enhanced Hierarchical Processor initialized for project '{project.name}' with project-specific OpenAI API key")
+        logger.info(f"🚀 Enhanced Hierarchical Processor initialized for project '{project.name}' with LLM Provider: {self.llm_provider}, Model: {self.llm_model}")
     
     def _initialize_extractors(self):
-        """Initialize text extraction services using project-specific Google API key"""
+        """Initialize text extraction services using project-specific API keys"""
         try:
-            # Get project-specific Google/Gemini API key
             from project_api_keys.services import ProjectAPIKeyService
 
             service = ProjectAPIKeyService()
-            gemini_api_key = service.get_project_api_key(self.project, 'google')
-
-            if gemini_api_key:
-                initialize_gemini_extractor(gemini_api_key)
-                logger.info(f"✅ Gemini PDF extractor initialized with project-specific API key for project '{self.project.name}'")
+            
+            # If Google/Gemini is selected as LLM provider, try to use Gemini for PDF extraction
+            if self.llm_provider in ['google', 'gemini']:
+                gemini_api_key = service.get_project_api_key(self.project, 'google')
+                if gemini_api_key:
+                    initialize_gemini_extractor(gemini_api_key)
+                    logger.info(f"✅ Gemini PDF extractor initialized with project-specific API key for project '{self.project.name}'")
+                else:
+                    logger.warning(f"⚠️ No Google API key configured for project '{self.project.name}' - PDF extraction will use fallback methods (PyPDF2/pdfplumber)")
+                    initialize_gemini_extractor(None)
             else:
-                logger.warning(f"⚠️ No Google API key configured for project '{self.project.name}' - PDF extraction will use fallback methods (PyPDF2/pdfplumber)")
-                # Initialize with None to ensure fallback methods are used
+                # For non-Google providers, use fallback PDF extraction methods
+                logger.info(f"ℹ️ Using fallback PDF extraction methods (PyPDF2/pdfplumber) for {self.llm_provider} provider")
                 initialize_gemini_extractor(None)
 
         except Exception as e:
@@ -628,25 +662,31 @@ class EnhancedHierarchicalProcessor:
         folder_path = '/'.join(path_parts[:-1])
         chunk_hierarchical_path = f"{folder_path}/{file_part}#chunk_{chunk_index:03d}"
         
-        # Generate summary and topic using project-specific OpenAI API key
-        logger.info(f"         -> Generating AI content (summary/topic) using project-specific OpenAI key...")
-        summary_metadata = {'file_name': document_metadata['file_name'], 'section_title': section_title}
+        # Generate summary and topic if enabled
+        summary = None
+        topic = None
+        
+        if self.enable_summary and self.summarizer:
+            logger.info(f"         -> Generating AI content (summary/topic) using {self.llm_provider} provider (model: {self.llm_model})...")
+            summary_metadata = {'file_name': document_metadata['file_name'], 'section_title': section_title}
 
-        # Summarizer is guaranteed to be available (checked in __init__)
-        summary = self.summarizer.generate_summary(content, summary_metadata) or ""
-        topic = self.summarizer.generate_topic(content, summary_metadata) or ""
+            # Generate summary and topic using configured provider
+            summary = self.summarizer.generate_summary(content, summary_metadata) or None
+            topic = self.summarizer.generate_topic(content, summary_metadata) or None
 
-        if not summary:
-            logger.warning(f"         -> ⚠️ Failed to generate summary for chunk {chunk_index}, using fallback.")
-            summary = f"Content from {section_title}: {content[:250]}..."
+            if not summary:
+                logger.warning(f"         -> ⚠️ Failed to generate summary for chunk {chunk_index}.")
+                summary = None
+            else:
+                logger.info(f"         -> ✔️ Summary generated ({len(summary)} chars).")
+
+            if not topic:
+                logger.warning(f"         -> ⚠️ Failed to generate topic for chunk {chunk_index}.")
+                topic = None
+            else:
+                logger.info(f"         -> ✔️ Topic generated: '{topic}'.")
         else:
-            logger.info(f"         -> ✔️ Summary generated ({len(summary)} chars).")
-
-        if not topic:
-            logger.warning(f"         -> ⚠️ Failed to generate topic for chunk {chunk_index}, using fallback.")
-            topic = section_title.title() if len(section_title.split()) <= 8 else f"{document_metadata['category'].title()} Content"
-        else:
-            logger.info(f"         -> ✔️ Topic generated: '{topic}'.")
+            logger.info(f"         -> ℹ️ Summary generation disabled - skipping summary/topic generation for chunk {chunk_index}.")
 
         chunk_id = str(uuid.uuid4())
         chunk_metadata = {
@@ -656,8 +696,8 @@ class EnhancedHierarchicalProcessor:
             'chunk_type': chunk_type,
             'section_title': section_title,
             'content_length': len(content),
-            'summary': summary,
-            'topic': topic,
+            'summary': summary or None,  # Explicitly set to None if not generated
+            'topic': topic or None,  # Explicitly set to None if not generated
         }
         
         logger.info(f"      ✔️ Chunk {chunk_index} created successfully.")
@@ -715,7 +755,7 @@ class EnhancedHierarchicalProcessor:
             if is_pdf:
                 logger.info(f"   [1.2] 📔 Starting PDF extraction for {filename}")
                 extracted_content = self._extract_pdf_content_properly(file_path, filename)
-            elif file_ext in ['.txt', '.md', '.rtf']:
+            elif file_ext in ['.txt', '.text', '.md', '.rtf']:
                 logger.info(f"   [1.2] 📄 Starting text extraction for {filename}")
                 extracted_content = self._extract_text_content(file_path, filename)
             elif file_ext in ['.docx', '.doc']:
@@ -746,9 +786,9 @@ class EnhancedHierarchicalProcessor:
         return extracted_content
     
     def _extract_pdf_content_properly(self, file_path: str, filename: str) -> str:
-        """Extract text from PDF using the primary (Gemini) method."""
+        """Extract text from PDF using Gemini with automatic fallback to PyPDF2/pdfplumber."""
         
-        logger.info(f"      [PDF] Attempting Gemini PDF extraction for {filename}")
+        logger.info(f"      [PDF] Attempting PDF extraction for {filename}")
         logger.info(f"      [PDF] File path: {file_path}")
         
         try:
@@ -766,34 +806,72 @@ class EnhancedHierarchicalProcessor:
             if file_size == 0:
                 raise ValueError(f"PDF file is empty: {file_path}")
             
-            # Get and check Gemini extractor
+            # Get Gemini extractor (may be None if not initialized)
             gemini_extractor = get_gemini_extractor()
-            if not gemini_extractor:
-                raise ConnectionError("Gemini extractor instance not found")
-                
-            if not hasattr(gemini_extractor, 'gemini_available') or not gemini_extractor.gemini_available:
-                raise ConnectionError("Gemini extractor is not available or not initialized")
-                
-            logger.info(f"      [PDF] Gemini extractor confirmed available")
             
-            # Attempt extraction
-            logger.info(f"      [PDF] Starting Gemini extraction...")
-            text = gemini_extractor.extract_pdf_text(file_path)
+            # If Gemini extractor is available, try it first
+            if gemini_extractor and hasattr(gemini_extractor, 'gemini_available') and gemini_extractor.gemini_available:
+                logger.info(f"      [PDF] Gemini extractor available, attempting Gemini extraction...")
+                try:
+                    text = gemini_extractor.extract_pdf_text(file_path)
+                    
+                    if text and not is_binary(text):
+                        logger.info(f"      [PDF] ✅ Gemini extraction successful for {filename} - extracted {len(text)} characters")
+                        return text
+                    else:
+                        logger.warning(f"      [PDF] ⚠️ Gemini extraction returned empty or binary content, falling back to PyPDF2/pdfplumber")
+                except Exception as gemini_error:
+                    logger.warning(f"      [PDF] ⚠️ Gemini extraction failed: {gemini_error}, falling back to PyPDF2/pdfplumber")
+            else:
+                logger.info(f"      [PDF] Gemini extractor not available, using fallback methods (PyPDF2/pdfplumber)")
             
-            if not text:
-                raise ValueError("Gemini extraction returned empty content")
+            # Fallback: Use PyPDF2/pdfplumber directly
+            # The extract_pdf_text method already has fallback, but if extractor is None, we need to do it ourselves
+            if gemini_extractor:
+                # Try the extractor's fallback method
+                logger.info(f"      [PDF] Using extractor's fallback method...")
+                text = gemini_extractor._fallback_pdf_extraction(file_path)
+            else:
+                # Direct fallback if no extractor at all
+                logger.info(f"      [PDF] Using direct PyPDF2/pdfplumber fallback...")
+                text = self._fallback_pdf_extraction_direct(file_path)
+            
+            if not text or is_binary(text):
+                raise ValueError(f"Fallback PDF extraction returned empty or binary content for {filename}")
                 
-            if is_binary(text):
-                raise ValueError("Gemini extraction returned binary content")
-                
-            logger.info(f"      [PDF] ✅ Gemini extraction successful for {filename} - extracted {len(text)} characters")
+            logger.info(f"      [PDF] ✅ Fallback extraction successful for {filename} - extracted {len(text)} characters")
             return text
 
         except Exception as e:
-            logger.error(f"      [PDF] 💥 Gemini extraction failed for {filename}: {e}")
+            logger.error(f"      [PDF] 💥 All PDF extraction methods failed for {filename}: {e}")
             logger.error(f"      [PDF] Exception type: {type(e).__name__}")
-            # Re-raise the exception to ensure the failure is not silent
-            raise RuntimeError(f"Failed to extract content from PDF '{filename}' using Gemini: {str(e)}") from e
+            # Re-raise to trigger placeholder generation
+            raise RuntimeError(f"Failed to extract content from PDF '{filename}': {str(e)}") from e
+    
+    def _fallback_pdf_extraction_direct(self, file_path: str) -> str:
+        """Direct fallback PDF extraction using PyPDF2/pdfplumber when Gemini extractor is not available."""
+        try:
+            import pdfplumber
+            logger.info(f"      [PDF] Attempting pdfplumber extraction...")
+            with pdfplumber.open(file_path) as pdf:
+                text = '\n\n'.join(page.extract_text() or '' for page in pdf.pages)
+                if text and text.strip():
+                    return text
+        except Exception as e:
+            logger.warning(f"      [PDF] pdfplumber failed: {e}, trying PyPDF2...")
+        
+        try:
+            import PyPDF2
+            logger.info(f"      [PDF] Attempting PyPDF2 extraction...")
+            with open(file_path, 'rb') as f:
+                pdf_reader = PyPDF2.PdfReader(f)
+                text = '\n\n'.join(page.extract_text() or '' for page in pdf_reader.pages)
+                if text and text.strip():
+                    return text
+        except Exception as e:
+            logger.error(f"      [PDF] PyPDF2 extraction also failed: {e}")
+        
+        return ""
 
     def _extract_text_content(self, file_path: str, filename: str) -> str:
         """Extract content from text files."""

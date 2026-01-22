@@ -508,15 +508,15 @@ class MilvusProjectVectorDatabase:
                 [safe_str(metadata.get('section_title'))],
                 [safe_bool(metadata.get('is_complete_document'))],
                 
-                # AI-Generated Content Fields
-                [safe_str(metadata.get('summary'))],
-                [safe_int(metadata.get('summary_word_count'))],
+                # AI-Generated Content Fields - handle None values when summary is disabled
+                [safe_str(metadata.get('summary')) if metadata.get('summary') else ''],
+                [safe_int(metadata.get('summary_word_count', 0))],
                 [safe_str(metadata.get('summary_generated_at'))],
-                [safe_str(metadata.get('summarizer_used'), 'enhanced_ai')],
-                [safe_str(metadata.get('topic'))],
-                [safe_int(metadata.get('topic_word_count'))],
+                [safe_str(metadata.get('summarizer_used', 'none'), 'none')],
+                [safe_str(metadata.get('topic')) if metadata.get('topic') else ''],
+                [safe_int(metadata.get('topic_word_count', 0))],
                 [safe_str(metadata.get('topic_generated_at'))],
-                [safe_str(metadata.get('topic_generator_used'), 'enhanced_ai')],
+                [safe_str(metadata.get('topic_generator_used', 'none'), 'none')],
                 
                 # Processing Metadata Fields
                 [safe_str(metadata.get('vector_id'))],

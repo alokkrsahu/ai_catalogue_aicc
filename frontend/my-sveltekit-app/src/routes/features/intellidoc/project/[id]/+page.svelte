@@ -8,6 +8,7 @@
   import ApiManagement from '$lib/components/project/ApiManagement.svelte';
   import AdminDeleteButton from '$lib/components/AdminDeleteButton.svelte';
   import { isAdmin } from '$lib/stores/auth';
+  import { llmModelsService, type LLMModel, type BulkModelData } from '$lib/stores/llmModelsStore';
   
   // Get project ID from URL
   $: projectId = $page.params.id;
@@ -53,6 +54,17 @@
     checking: true
   };
   
+  // LLM Configuration state for document processing
+  let llmConfig = {
+    provider: 'openai',
+    model: 'gpt-3.5-turbo',
+    enableSummary: true
+  };
+  let bulkModelData: BulkModelData | null = null;
+  let modelsLoading = false;
+  let availableProviders: string[] = [];
+  let providerModels: LLMModel[] = [];
+  
   console.log(`🎯 UNIVERSAL: Initializing universal project interface for project ${projectId}`);
   
   // Helper function to format processing status
@@ -69,7 +81,86 @@
   
   onMount(() => {
     loadProject();
+    // Don't force refresh on initial load - use cache if available
+    loadLLMModels(false);
   });
+  
+  async function loadLLMModels(forceRefresh = false) {
+    try {
+      modelsLoading = true;
+      console.log('📋 DOCUMENTS: Loading LLM models for document processing configuration', { projectId, forceRefresh });
+      
+      // Force refresh if requested (e.g., after setting API keys)
+      const data = await llmModelsService.loadBulkModels(projectId, forceRefresh);
+      bulkModelData = data;
+      
+      // Debug: Log provider statuses
+      console.log('📊 DOCUMENTS: Provider statuses:', data.provider_statuses);
+      
+      // Get available providers (those with API keys set, even if validation failed)
+      // We allow providers with keys set but validation failed, as validation might fail due to network issues
+      availableProviders = Object.keys(data.provider_statuses || {}).filter(provider => 
+        data.provider_statuses[provider]?.has_api_key === true
+      );
+      
+      // Debug: Log which providers have keys but are invalid
+      const providersWithKeys = Object.keys(data.provider_statuses || {}).filter(provider => 
+        data.provider_statuses[provider]?.has_api_key
+      );
+      const invalidProviders = providersWithKeys.filter(provider => 
+        !data.provider_statuses[provider]?.api_key_valid
+      );
+      
+      if (invalidProviders.length > 0) {
+        console.warn('⚠️ DOCUMENTS: Providers with API keys but validation failed:', invalidProviders.map(p => ({
+          provider: p,
+          status: data.provider_statuses[p],
+          message: data.provider_statuses[p]?.message
+        })));
+      }
+      
+      // Set default provider to first available, or OpenAI if available
+      if (availableProviders.length > 0) {
+        llmConfig.provider = availableProviders.includes('openai') ? 'openai' : availableProviders[0];
+        updateProviderModels();
+      } else {
+        console.warn('⚠️ DOCUMENTS: No providers with API keys found. Provider statuses:', data.provider_statuses);
+        
+        // Log detailed status for debugging
+        if (data.provider_statuses) {
+          Object.keys(data.provider_statuses).forEach(provider => {
+            const status = data.provider_statuses[provider];
+            console.log(`  - ${provider}: has_api_key=${status?.has_api_key}, api_key_valid=${status?.api_key_valid}, message=${status?.message}`);
+          });
+        }
+      }
+      
+      console.log('✅ DOCUMENTS: LLM models loaded', { 
+        providers: availableProviders,
+        selectedProvider: llmConfig.provider,
+        totalProviders: Object.keys(data.provider_statuses || {}).length
+      });
+    } catch (error) {
+      console.error('❌ DOCUMENTS: Failed to load LLM models:', error);
+      // Continue with defaults
+    } finally {
+      modelsLoading = false;
+    }
+  }
+  
+  function updateProviderModels() {
+    if (bulkModelData) {
+      providerModels = bulkModelData.provider_models[llmConfig.provider] || [];
+      // Auto-select first model if current model not available
+      if (providerModels.length > 0 && !providerModels.find(m => m.id === llmConfig.model)) {
+        llmConfig.model = providerModels[0].id;
+      }
+    }
+  }
+  
+  $: if (llmConfig.provider && bulkModelData) {
+    updateProviderModels();
+  }
   
   async function loadProject() {
     try {
@@ -342,11 +433,25 @@
   async function processDocuments() {
     if (processing) return;
     
+    // Validate LLM configuration
+    if (!llmConfig.provider || !llmConfig.model) {
+      toasts.error('Please select an LLM provider and model');
+      return;
+    }
+    
     try {
       processing = true;
-      console.log(`🚀 UNIVERSAL: Starting document processing for project ${projectId}`);
+      console.log(`🚀 UNIVERSAL: Starting document processing for project ${projectId}`, {
+        llm_provider: llmConfig.provider,
+        llm_model: llmConfig.model,
+        enable_summary: llmConfig.enableSummary
+      });
       
-      const result = await cleanUniversalApi.processDocuments(projectId);
+      const result = await cleanUniversalApi.processDocuments(projectId, {
+        llm_provider: llmConfig.provider,
+        llm_model: llmConfig.model,
+        enable_summary: llmConfig.enableSummary
+      });
       
       console.log('✅ UNIVERSAL: Document processing started');
       toasts.success('Document processing started successfully');
@@ -819,10 +924,102 @@
                   </div>
                 {/if}
                 
+                <!-- LLM Configuration Section -->
+                {#if uploadedDocuments.length > 0}
+                  <div class="mb-6 p-4 bg-gray-50 rounded-lg border border-gray-200">
+                    <h3 class="text-sm font-semibold text-gray-900 mb-4 flex items-center">
+                      <i class="fas fa-brain mr-2 text-oxford-blue"></i>
+                      Processing Configuration
+                    </h3>
+                    
+                    <!-- LLM Provider Selection -->
+                    <div class="mb-4">
+                      <label class="block text-sm font-medium text-gray-700 mb-2">
+                        LLM Provider
+                        <span class="text-red-500">*</span>
+                      </label>
+                      {#if modelsLoading}
+                        <div class="text-xs text-gray-500">Loading providers...</div>
+                      {:else if availableProviders.length === 0}
+                        <div class="text-xs text-amber-600 bg-amber-50 p-2 rounded">
+                          <i class="fas fa-exclamation-triangle mr-1"></i>
+                          No LLM providers available. Please configure API keys in API Management.
+                        </div>
+                      {:else}
+                        {#if availableProviders.some(p => bulkModelData?.provider_statuses[p]?.has_api_key && !bulkModelData?.provider_statuses[p]?.api_key_valid)}
+                          <div class="text-xs text-amber-600 bg-amber-50 p-2 rounded mb-2">
+                            <i class="fas fa-exclamation-triangle mr-1"></i>
+                            Some API keys could not be validated. They may still work for processing.
+                          </div>
+                        {/if}
+                        <select 
+                          bind:value={llmConfig.provider}
+                          on:change={() => updateProviderModels()}
+                          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue/20 transition-all text-sm"
+                        >
+                          {#each availableProviders as provider}
+                            {@const status = bulkModelData?.provider_statuses[provider]}
+                            <option value={provider}>
+                              {provider.charAt(0).toUpperCase() + provider.slice(1)}
+                              {#if status?.has_api_key && !status?.api_key_valid}
+                                (Validation Failed)
+                              {/if}
+                            </option>
+                          {/each}
+                        </select>
+                      {/if}
+                    </div>
+                    
+                    <!-- LLM Model Selection -->
+                    {#if llmConfig.provider && providerModels.length > 0}
+                      <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">
+                          LLM Model
+                          <span class="text-red-500">*</span>
+                        </label>
+                        <select 
+                          bind:value={llmConfig.model}
+                          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue/20 transition-all text-sm"
+                        >
+                          {#each providerModels as model}
+                            <option value={model.id}>
+                              {model.display_name || model.name}
+                              {#if model.cost_per_1k_tokens}
+                                (${model.cost_per_1k_tokens}/1K tokens)
+                              {/if}
+                            </option>
+                          {/each}
+                        </select>
+                      </div>
+                    {/if}
+                    
+                    <!-- Enable Summary Toggle -->
+                    <div class="flex items-center justify-between p-3 bg-white rounded-lg border border-gray-200">
+                      <div class="flex-1">
+                        <label class="text-sm font-medium text-gray-900 cursor-pointer" for="enable-summary-toggle">
+                          Enable Summary
+                        </label>
+                        <p class="text-xs text-gray-500 mt-1">
+                          Generate AI summaries for document chunks during processing
+                        </p>
+                      </div>
+                      <label class="relative inline-flex items-center cursor-pointer">
+                        <input 
+                          type="checkbox" 
+                          id="enable-summary-toggle"
+                          bind:checked={llmConfig.enableSummary}
+                          class="sr-only peer"
+                        />
+                        <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-oxford-blue/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-oxford-blue"></div>
+                      </label>
+                    </div>
+                  </div>
+                {/if}
+                
                 <button
                   class="w-full flex items-center justify-center px-6 py-3 bg-oxford-blue text-white rounded-lg hover:bg-blue-700 transition-all duration-200 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none disabled:shadow-lg"
                   on:click={processDocuments}
-                  disabled={processing || uploadedDocuments.length === 0}
+                  disabled={processing || uploadedDocuments.length === 0 || availableProviders.length === 0}
                 >
                   {#if processing}
                     <div class="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-3"></div>
@@ -1152,5 +1349,7 @@
     showApiManagement = false;
     // Re-check API key status after closing the modal
     checkApiKeyStatus();
+    // Force reload LLM models to pick up newly configured API keys
+    loadLLMModels(true);
   }}
 />

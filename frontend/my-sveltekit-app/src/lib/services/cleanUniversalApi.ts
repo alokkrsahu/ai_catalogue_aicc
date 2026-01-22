@@ -355,16 +355,36 @@ export class CleanUniversalApiService {
   /**
    * Process documents (Universal endpoint)
    */
-  async processDocuments(projectId: string): Promise<any> {
-    console.log(`🚀 UNIVERSAL: Processing documents via /api/projects/${projectId}/process_documents/`);
+  async processDocuments(
+    projectId: string, 
+    options?: {
+      llm_provider?: string;
+      llm_model?: string;
+      enable_summary?: boolean;
+    }
+  ): Promise<any> {
+    console.log(`🚀 UNIVERSAL: Processing documents via /api/projects/${projectId}/process_documents/`, options);
+    
+    const requestBody: any = {};
+    if (options?.llm_provider) {
+      requestBody.llm_provider = options.llm_provider;
+    }
+    if (options?.llm_model) {
+      requestBody.llm_model = options.llm_model;
+    }
+    if (options?.enable_summary !== undefined) {
+      requestBody.enable_summary = options.enable_summary;
+    }
     
     const response = await fetch(`${API_BASE}/projects/${projectId}/process_documents/`, {
       method: 'POST',
       headers: this.getAuthHeaders(),
+      body: Object.keys(requestBody).length > 0 ? JSON.stringify(requestBody) : undefined,
     });
 
     if (!response.ok) {
-      throw new Error(`Process documents failed: ${response.status}`);
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.message || errorData.error || `Process documents failed: ${response.status}`);
     }
 
     const result = await response.json();

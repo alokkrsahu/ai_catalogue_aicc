@@ -45,14 +45,18 @@ def run_processing_in_background(project_id: str, processing_mode: str = 'enhanc
         if project_id in PROCESSING_THREADS:
             del PROCESSING_THREADS[project_id]
 
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def process_unified_consolidated(request, project_id):
+def process_unified_consolidated(request, project_id, llm_config=None, processing_mode_override=None):
     """
     CONSOLIDATED PROCESSING ENDPOINT - Phase 2
     
     Combines all processing capabilities into a single, intelligent endpoint
     that automatically selects the best processing mode based on project configuration
+    
+    Args:
+        request: Django HttpRequest (for authentication/permission checks)
+        project_id: Project ID to process
+        llm_config: Optional dict with llm_provider, llm_model, enable_summary
+        processing_mode_override: Optional processing mode override
     """
     try:
         # Verify project exists and user has access
@@ -74,10 +78,9 @@ def process_unified_consolidated(request, project_id):
         else:
             processing_mode = 'basic'
         
-        # Allow override from request
-        requested_mode = request.data.get('processing_mode')
-        if requested_mode:
-            processing_mode = requested_mode
+        # Allow override from parameter
+        if processing_mode_override:
+            processing_mode = processing_mode_override
         
         logger.info(f"🎯 CONSOLIDATED: Selected processing mode: {processing_mode}")
         logger.info(f"📊 CONSOLIDATED: Project capabilities: {list(processing_capabilities.keys())}")
@@ -97,10 +100,24 @@ def process_unified_consolidated(request, project_id):
                 }
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        # Use provided LLM config or defaults
+        if not llm_config:
+            llm_config = {
+                'llm_provider': 'openai',
+                'llm_model': 'gpt-3.5-turbo',
+                'enable_summary': True
+            }
+            logger.info(f"📋 CONSOLIDATED: Using default LLM config")
+        
+        logger.info(f"📋 CONSOLIDATED: LLM Config - Provider: {llm_config.get('llm_provider')}, Model: {llm_config.get('llm_model')}, Enable Summary: {llm_config.get('enable_summary')}")
+        
         # Use the enhanced UnifiedVectorSearchManager for processing
         result = UnifiedVectorSearchManager.process_project_documents(
             project_id=str(project.project_id),
-            processing_mode=processing_mode
+            processing_mode=processing_mode,
+            llm_provider=llm_config.get('llm_provider'),
+            llm_model=llm_config.get('llm_model'),
+            enable_summary=llm_config.get('enable_summary', True)
         )
         
         # Enhanced result metadata
@@ -120,7 +137,7 @@ def process_unified_consolidated(request, project_id):
                 'category_filtering': processing_capabilities.get('category_filtered_search', False),
                 'advanced_search': processing_capabilities.get('multi_filter_search', False)
             },
-            'user_email': request.user.email,
+            'user_email': request.user.email if hasattr(request, 'user') and request.user else 'unknown',
             'processed_at': timezone.now().isoformat(),
             'ready_documents': ready_documents.count(),
             'total_documents': project.documents.count()

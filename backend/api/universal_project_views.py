@@ -931,10 +931,25 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
         """Process project documents using consolidated processing - FIXED"""
         from vector_search.consolidated_api_views import process_unified_consolidated
         
-        # Delegate to the consolidated processing endpoint
+        # Extract LLM configuration from request
+        llm_provider = request.data.get('llm_provider', 'openai')
+        llm_model = request.data.get('llm_model', 'gpt-3.5-turbo')
+        enable_summary = request.data.get('enable_summary', True)
+        
         logger.info(f"🚀 UNIVERSAL: Delegating document processing for project {project_id}")
-        # Convert DRF request to Django HttpRequest for compatibility
-        return process_unified_consolidated(request._request, project_id)
+        logger.info(f"📋 UNIVERSAL: LLM Config - Provider: {llm_provider}, Model: {llm_model}, Enable Summary: {enable_summary}")
+        
+        # Prepare LLM config dict
+        llm_config = {
+            'llm_provider': llm_provider,
+            'llm_model': llm_model,
+            'enable_summary': enable_summary
+        }
+        
+        # Pass the DRF request object and LLM config as parameter
+        # Since we removed @api_view decorator, we can pass the DRF request directly
+        # without it trying to parse the body stream again
+        return process_unified_consolidated(request, project_id, llm_config=llm_config)
     
     @action(detail=True, methods=['post'])
     def search(self, request, project_id=None):

@@ -739,7 +739,14 @@ def bulk_load_all_models(request):
         max_age_minutes = int(request.GET.get('max_age_minutes', '60'))
         project_id = request.GET.get('project_id')
         
+        logger.info(f"🔍 BULK LOAD API: Request received - project_id param: {project_id}, user: {request.user.email}")
+        
         project = get_user_project(request.user, project_id)
+        
+        if not project:
+            logger.error(f"❌ BULK LOAD API: Project not found or user doesn't have access - project_id: {project_id}, user: {request.user.email}")
+        else:
+            logger.info(f"✅ BULK LOAD API: Project found - {project.name} (ID: {project.project_id})")
         
         logger.info(f"🚀 BULK LOAD API: Starting bulk model loading (force_refresh: {force_refresh}, project: {project.name if project else 'None'})")
         

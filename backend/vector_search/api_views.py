@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # Global processing threads
 PROCESSING_THREADS = {}
 
-def run_processing_in_background(project_id: str, processing_mode: str = 'enhanced'):
+def run_processing_in_background(project_id: str, processing_mode: str = 'enhanced', llm_provider: str = None, llm_model: str = None, enable_summary: bool = True):
     """Run enhanced document processing in background thread - no fallbacks"""
     try:
         # Force enhanced mode only
@@ -25,11 +25,19 @@ def run_processing_in_background(project_id: str, processing_mode: str = 'enhanc
         
         # Create detailed logging for this processing session
         doc_logger.info(f"🚀 ENHANCED BACKGROUND PROCESSING STARTED | Project: {project_id}")
+        if llm_provider:
+            doc_logger.info(f"📋 BACKGROUND: LLM Config - Provider: {llm_provider}, Model: {llm_model}, Enable Summary: {enable_summary}")
         
         logger.info(f"Starting enhanced background processing for project {project_id}")
         
         # Use enhanced UnifiedVectorSearchManager only
-        result = UnifiedVectorSearchManager.process_project_documents(project_id, processing_mode='enhanced')
+        result = UnifiedVectorSearchManager.process_project_documents(
+            project_id, 
+            processing_mode='enhanced',
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            enable_summary=enable_summary
+        )
         
         doc_logger.info(f"✅ ENHANCED BACKGROUND PROCESSING COMPLETED | Project: {project_id} | Result: {result.get('status', 'unknown')}")
         logger.info(f"Enhanced background processing completed for project {project_id}: {result.get('status', 'unknown')}")

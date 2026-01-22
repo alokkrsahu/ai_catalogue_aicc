@@ -148,12 +148,8 @@ def parse_conversation_history_to_messages(
         if has_documents:
             logger.info(f"📚 MESSAGE CONVERTER DEBUG: System message preview (first 300 chars): {system_msg_preview}...")
         else:
-<<<<<<< Current (Your changes)
-            logger.debug(f"📚 MESSAGE CONVERTER DEBUG: System message does not contain document context markers")
-=======
             # This is expected when DocAware is disabled or all documents have failed extraction
             logger.debug(f"ℹ️ MESSAGE CONVERTER DEBUG: No document context markers - DocAware may be disabled or all documents filtered")
->>>>>>> Incoming (Background Agent changes)
     
     # Parse conversation history
     lines = conversation_history.strip().split('\n')

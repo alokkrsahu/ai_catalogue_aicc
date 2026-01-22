@@ -281,6 +281,13 @@ class LLMModelsService {
   }
 
   /**
+   * Load bulk models (alias for preLoadAllModels for convenience)
+   */
+  async loadBulkModels(projectId?: string, forceRefresh = false): Promise<BulkModelData> {
+    return await this.preLoadAllModels(forceRefresh, projectId);
+  }
+
+  /**
    * Get models for a specific provider
    */
   getModelsForProvider(providerId: string): LLMModel[] {

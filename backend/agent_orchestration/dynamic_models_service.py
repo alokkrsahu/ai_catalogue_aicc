@@ -69,27 +69,28 @@ class DynamicModelsService:
     def get_api_key_for_provider(self, provider: str, project: Optional[IntelliDocProject] = None) -> Optional[str]:
         """Get API key for provider from project-specific keys or fallback to settings (sync version)"""
         if provider not in self.provider_configs:
+            logger.warning(f"⚠️ UNKNOWN PROVIDER: {provider} not in provider_configs")
             return None
         
         # First try to get project-specific API key
         if project:
             try:
                 project_service = get_project_api_key_service()
+                logger.info(f"🔍 API KEY LOOKUP: Checking for {provider} API key in project {project.name} (ID: {project.project_id})")
                 project_api_key = project_service.get_project_api_key(project, provider)
                 if project_api_key and project_api_key.strip():
-                    logger.info(f"🔑 PROJECT API KEY: Using project-specific {provider} API key for project {project.name}")
+                    logger.info(f"✅ PROJECT API KEY: Found project-specific {provider} API key for project {project.name} (length: {len(project_api_key)})")
                     return project_api_key.strip()
                 else:
-                    logger.warning(f"⚠️ PROJECT API KEY: No project-specific {provider} API key found for project {project.name}")
+                    logger.warning(f"⚠️ PROJECT API KEY: No project-specific {provider} API key found for project {project.name} (ID: {project.project_id})")
             except Exception as e:
-                logger.error(f"❌ PROJECT API KEY: Error retrieving project-specific {provider} API key: {e}")
+                logger.error(f"❌ PROJECT API KEY: Error retrieving project-specific {provider} API key for project {project.name}: {e}")
+                import traceback
+                logger.error(f"❌ PROJECT API KEY: Traceback: {traceback.format_exc()}")
+        else:
+            logger.warning(f"⚠️ NO PROJECT CONTEXT: Project is None - {provider} API key not available")
         
         # NO fallback to environment variables - project-specific keys ONLY
-        if project:
-            logger.warning(f"⚠️ NO PROJECT API KEY: No project-specific {provider} API key found for project {project.name}")
-        else:
-            logger.warning(f"⚠️ NO PROJECT CONTEXT: Project required for API key access - {provider} not available")
-        
         return None
 
     async def get_api_key_for_provider_async(self, provider: str, project: Optional[IntelliDocProject] = None) -> Optional[str]:
