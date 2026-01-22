@@ -1233,17 +1233,12 @@ class ChatManager:
         logger.info(f"📚 SYSTEM MESSAGE DEBUG: Contains document context: {has_documents}")
         if has_documents:
             logger.info(f"📚 SYSTEM MESSAGE DEBUG: System message preview (first 500 chars): {system_message_preview}...")
-<<<<<<< Current (Your changes)
-        else:
-            logger.warning(f"⚠️ SYSTEM MESSAGE DEBUG: System message does NOT contain 'RELEVANT DOCUMENTS' marker!")
-=======
         elif document_context:
             # Document context was retrieved but not added (shouldn't happen, but log for debugging)
             logger.warning(f"⚠️ SYSTEM MESSAGE DEBUG: Document context was retrieved ({len(document_context)} chars) but not added to system message!")
         else:
             # This is expected when DocAware is disabled or all documents have failed extraction
             logger.info(f"ℹ️ SYSTEM MESSAGE DEBUG: No document context marker - DocAware may be disabled or all documents filtered due to failed extraction")
->>>>>>> Incoming (Background Agent changes)
         
         # Convert conversation_history to structured messages array
         from .message_converter import parse_conversation_history_to_messages
