@@ -2327,16 +2327,26 @@
               }
             };
 
+            console.log('🔄 WORKFLOW: Node update details', {
+              nodeId: updatedNode.id.slice(-4),
+              oldName: nodes[nodeIndex].data?.name || nodes[nodeIndex].data?.label,
+              newName: newNode.data?.name || newNode.data?.label,
+              oldDesc: (nodes[nodeIndex].data?.description || '').substring(0, 50),
+              newDesc: (newNode.data?.description || '').substring(0, 50),
+              oldData: nodes[nodeIndex].data,
+              newData: newNode.data
+            });
+
             // Update the nodes array with completely new node object
-            nodes[nodeIndex] = newNode;
+            // CRITICAL: Use array assignment to trigger reactivity
+            nodes = nodes.map((n, idx) => idx === nodeIndex ? newNode : n);
 
-            // 🔥 FORCE REACTIVITY: Create new array reference to trigger Svelte reactivity
-            nodes = [...nodes];
+            // Update selectedNode reference to new object if it's the selected node
+            if (selectedNode && selectedNode.id === newNode.id) {
+              selectedNode = newNode;
+            }
 
-            // Update selectedNode reference to new object
-            selectedNode = newNode;
-
-            console.log('✅ WORKFLOW: Node updated successfully');
+            console.log('✅ WORKFLOW: Node updated successfully - name:', newNode.data?.name || newNode.data?.label, 'description:', (newNode.data?.description || '').substring(0, 50));
             saveWorkflowToDatabase(false); // Silent auto-save - no toast for property updates
           } else {
             console.error('❌ WORKFLOW: Node not found in array!', updatedNode.id);

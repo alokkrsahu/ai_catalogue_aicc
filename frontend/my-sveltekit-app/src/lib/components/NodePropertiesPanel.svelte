@@ -524,7 +524,9 @@
         from: currentNodeId?.slice(-4),
         to: node.id.slice(-4),
         oldName: nodeName,
-        newName: currentName
+        newName: currentName,
+        oldDesc: nodeDescription.substring(0, 50),
+        newDesc: currentDesc.substring(0, 50)
       });
       
       // Clear prompt generation state when node changes
@@ -545,42 +547,45 @@
       console.log('✅ NODE SYNC: State forcefully updated for new node', {
         nodeName,
         nodeDescription: nodeDescription.substring(0, 50),
-        nodeId: node.id.slice(-4)
+        nodeId: node.id.slice(-4),
+        nodeDataName: node.data?.name,
+        nodeDataDesc: (node.data?.description || '').substring(0, 50)
       });
-    } else if (hasConfigChanged && !document.activeElement?.closest('.node-properties-panel')) {
-      // Only update config if data changed and user is not actively editing
-      console.log('🔄 NODE SYNC: Same node but data changed, updating state', {
-        hasNameChanged: hasNameChanged ? `${nodeName} → ${currentName}` : false,
+    } else if (hasNameChanged || hasDescChanged || (hasConfigChanged && !document.activeElement?.closest('.node-properties-panel'))) {
+      // Update if name/description changed OR if config changed and user is not actively editing
+      console.log('🔄 NODE SYNC: Node data changed, updating local state', {
+        hasNameChanged,
         hasDescChanged,
         hasConfigChanged,
-        nodeId: node.id.slice(-4),
-        isUserEditing: !!document.activeElement?.closest('.node-properties-panel')
+        oldName: nodeName,
+        newName: currentName,
+        oldDesc: nodeDescription.substring(0, 50),
+        newDesc: currentDesc.substring(0, 50)
       });
       
-      // Update local state to match the node
-      nodeName = currentName;
-      nodeDescription = currentDesc;
-      nodeConfig = { ...currentConfig }; // Deep clone to prevent reference issues
+      // Update current node ID if it changed (shouldn't happen, but safety check)
+      if (node.id !== currentNodeId) {
+        currentNodeId = node.id;
+      }
       
-      // Initialize defaults if needed
-      if (isDifferentNode) {
-        initializeNodeDefaults();
-        
-        // Check API keys and load models for the current provider
-        if (nodeConfig.llm_provider) {
-          lastProviderChange = nodeConfig.llm_provider;
-          checkApiKeyAvailability();
-          if (hasValidApiKeys && bulkModelData && modelsLoaded) {
-            loadModelsForProvider(nodeConfig.llm_provider, false);
-          }
-        }
+      // Update local state to match node data
+      if (hasNameChanged) {
+        nodeName = currentName;
+      }
+      if (hasDescChanged) {
+        nodeDescription = currentDesc;
+      }
+      if (hasConfigChanged && !document.activeElement?.closest('.node-properties-panel')) {
+        // Only update config if user is not actively editing
+        nodeConfig = { ...currentConfig }; // Deep clone to prevent reference issues
       }
       
       console.log('✅ NODE SYNC: Local state updated', {
         nodeName,
-        nodeDescription,
-        docAware: nodeConfig.doc_aware,
-        nodeId: node.id.slice(-4)
+        nodeDescription: nodeDescription.substring(0, 50),
+        nodeId: node.id.slice(-4),
+        nodeDataName: node.data?.name,
+        nodeDataDesc: (node.data?.description || '').substring(0, 50)
       });
     }
   }
@@ -756,9 +761,16 @@
   });
   
   // Call update function when node changes
-  $: if (node) {
+  $: if (node && node.id) {
+    // Check if this is a different node OR if the node data has changed
+    const isDifferentNode = node.id !== currentNodeId;
+    const currentName = node.data.name || node.data.label || node.type;
+    const currentDesc = node.data.description || '';
+    const hasNameChanged = nodeName !== currentName;
+    const hasDescChanged = nodeDescription !== currentDesc;
+    
     // Clear prompt generation state when switching to a different node
-    if (node.id !== currentNodeId) {
+    if (isDifferentNode) {
       const previousNodeId = currentNodeId;
       currentNodeId = node.id;
       
@@ -769,20 +781,25 @@
       promptGenerationError = null;
       promptGenerationMetadata = null;
       
+      // Clear description debounce timer
+      if (descriptionDebounceTimer) {
+        clearTimeout(descriptionDebounceTimer);
+        descriptionDebounceTimer = null;
+      }
+      
       // Immediately reset nodeName and nodeDescription from the new node's data
       // This ensures the UI reflects the correct node's data, not stale data from the previous node
-      const newName = node.data.name || node.data.label || node.type;
-      const newDesc = node.data.description || '';
+      const previousName = nodeName;
+      const previousDesc = nodeDescription;
       
-      // Force update nodeName and nodeDescription immediately to prevent stale data
-      if (nodeName !== newName) {
-        nodeName = newName;
-        console.log(`🔄 NODE PROPERTIES: Node changed (${previousNodeId?.slice(-4)} → ${node.id.slice(-4)}), reset nodeName: "${nodeName}"`);
-      }
-      if (nodeDescription !== newDesc) {
-        nodeDescription = newDesc;
-        console.log(`🔄 NODE PROPERTIES: Node changed, reset nodeDescription`);
-      }
+      // CRITICAL: Always update, even if values appear the same, to ensure reactivity
+      nodeName = currentName;
+      nodeDescription = currentDesc;
+      
+      console.log(`🔄 NODE PROPERTIES: Node changed (${previousNodeId?.slice(-4)} → ${node.id.slice(-4)})`, {
+        nameChange: previousName !== currentName ? `${previousName} → ${currentName}` : 'no change',
+        descChange: previousDesc !== currentDesc ? `${previousDesc.substring(0, 50)}... → ${currentDesc.substring(0, 50)}...` : 'no change'
+      });
       
       // CRITICAL FIX: Immediately reset nodeConfig (including system_message) from the new node's data
       // This prevents system_message and other config values from the previous node appearing in the new node's property panel
@@ -802,8 +819,40 @@
       // Cancel any pending model load requests
       currentLoadRequestId++;
       
+      // Reset DocAware state
+      selectedSearchMethod = null;
+      searchParameters = {};
+      testSearchResults = null;
+      
+      // Reset MCP state
+      mcpGoogleDriveCredentials = { client_id: '', client_secret: '', refresh_token: '' };
+      mcpSharePointCredentials = { tenant_id: '', client_id: '', client_secret: '', site_url: '' };
+      mcpCredentialName = '';
+      mcpConnectionTestResult = null;
+      mcpAvailableTools = [];
+      
       console.log('🔄 NODE PROPERTIES: Node changed, cleared all state and reset name/description/system_message/models');
+    } else if (hasNameChanged || hasDescChanged) {
+      // Same node but name/description changed externally (e.g., from another component or after save)
+      console.log('🔄 NODE PROPERTIES: Same node but name/description changed externally', {
+        hasNameChanged,
+        hasDescChanged,
+        oldName: nodeName,
+        newName: currentName,
+        oldDesc: nodeDescription.substring(0, 50),
+        newDesc: currentDesc.substring(0, 50)
+      });
+      
+      // Update local state to match node data
+      if (hasNameChanged) {
+        nodeName = currentName;
+      }
+      if (hasDescChanged) {
+        nodeDescription = currentDesc;
+      }
     }
+    
+    // Always call updateLocalStateFromNode to ensure full sync
     updateLocalStateFromNode();
   }
   
@@ -819,6 +868,8 @@
     const trimmedDesc = nodeDescription.trim();
     
     console.log('🔥 UPDATE NODE DATA: Starting update for node', node.id.slice(-4));
+    console.log('🔥 UPDATE NODE DATA: Name change:', (node.data.name || 'undefined') + ' → ' + trimmedName);
+    console.log('🔥 UPDATE NODE DATA: Description change:', (node.data.description || 'undefined').substring(0, 50) + ' → ' + trimmedDesc.substring(0, 50));
     console.log('🔥 NODE CONFIG CHECK:', JSON.stringify(nodeConfig));
     console.log('📚 DOC AWARE STATUS:', nodeConfig.doc_aware);
     
@@ -848,9 +899,11 @@
     
     console.log('🔥 UPDATE NODE DATA DEBUG:', {
       nodeId: node.id.slice(-4),
-      originalData: JSON.stringify(node.data),
+      originalName: node.data.name || node.data.label,
+      newName: trimmedName,
+      originalDesc: (node.data.description || '').substring(0, 50),
+      newDesc: trimmedDesc.substring(0, 50),
       updatedData: JSON.stringify(updatedNode.data),
-      nameChange: (node.data.name || 'undefined') + ' → ' + trimmedName,
       docAwareValue: updatedNode.data.doc_aware,
       dataMemoryCheck: {
         originalRef: node.data,
@@ -874,7 +927,7 @@
       isUpdatingFromNode = false;
     }, 100);
     
-    console.log('✅ NODE PROPERTIES: Update dispatched for node', node.id.slice(-4), 'new name:', trimmedName, 'doc_aware:', updatedNode.data.doc_aware);
+    console.log('✅ NODE PROPERTIES: Update dispatched for node', node.id.slice(-4), 'new name:', trimmedName, 'new desc:', trimmedDesc.substring(0, 50), 'doc_aware:', updatedNode.data.doc_aware);
   }
   
   function handleNameChange(event) {
@@ -884,6 +937,9 @@
     console.log('📝 HANDLE NAME CHANGE: Called with newName=', newName, 'currentName=', currentName);
     console.log('📝 BINDING CHECK: nodeName variable=', nodeName, 'input value=', newName);
     
+    // Always update nodeName to match input (bind:value should handle this, but ensure it)
+    nodeName = newName;
+    
     if (newName.trim() !== currentName) {
       console.log('📝 NAME CHANGE DEBUG:', {
         from: currentName,
@@ -892,17 +948,31 @@
         currentNodeData: node.data
       });
       
-      // Update nodeName variable to match input
-      nodeName = newName;
+      // Update node data immediately
       updateNodeData();
     } else {
       console.log('⚠️ NAME CHANGE: No change detected, not updating');
     }
   }
   
-  function handleDescriptionChange() {
-    if (nodeDescription.trim() !== (node.data.description || '')) {
-      console.log('📝 DESC CHANGE: Updated description for node', node.id.slice(-4));
+  function handleDescriptionChange(event) {
+    const newDesc = event?.target?.value || nodeDescription;
+    const currentDesc = node.data.description || '';
+    
+    console.log('📝 HANDLE DESC CHANGE: Called with newDesc=', newDesc.substring(0, 50), 'currentDesc=', currentDesc.substring(0, 50));
+    
+    // Always update nodeDescription to match input (bind:value should handle this, but ensure it)
+    nodeDescription = newDesc;
+    
+    if (newDesc.trim() !== currentDesc) {
+      console.log('📝 DESC CHANGE DEBUG:', {
+        from: currentDesc.substring(0, 50),
+        to: newDesc.trim().substring(0, 50),
+        nodeId: node.id.slice(-4),
+        currentNodeData: node.data
+      });
+      
+      // Update node data immediately
       updateNodeData();
       
       // Auto-generate prompt if enabled and agent type supports it
@@ -919,6 +989,8 @@
           }
         }, 2000);
       }
+    } else {
+      console.log('⚠️ DESC CHANGE: No change detected, not updating');
     }
   }
   
@@ -1206,8 +1278,14 @@
       <input
         type="text"
         bind:value={nodeName}
-        on:input={(e) => handleNameChange(e)}
-        on:blur={(e) => handleNameChange(e)}
+        on:input={(e) => {
+          nodeName = e.target.value;
+          handleNameChange(e);
+        }}
+        on:blur={(e) => {
+          nodeName = e.target.value;
+          handleNameChange(e);
+        }}
         class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20 transition-all"
         placeholder="Enter agent name..."
       />
@@ -1250,8 +1328,14 @@
         </div>
         <textarea
           bind:value={nodeDescription}
-          on:input={handleDescriptionChange}
-          on:blur={handleDescriptionChange}
+          on:input={(e) => {
+            nodeDescription = e.target.value;
+            handleDescriptionChange(e);
+          }}
+          on:blur={(e) => {
+            nodeDescription = e.target.value;
+            handleDescriptionChange(e);
+          }}
           rows="2"
           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20 transition-all resize-none"
           placeholder={node.type === 'DelegateAgent' 
@@ -1329,8 +1413,14 @@
         <label class="block text-sm font-medium text-gray-700 mb-2">Description</label>
         <textarea
           bind:value={nodeDescription}
-          on:input={handleDescriptionChange}
-          on:blur={handleDescriptionChange}
+          on:input={(e) => {
+            nodeDescription = e.target.value;
+            handleDescriptionChange(e);
+          }}
+          on:blur={(e) => {
+            nodeDescription = e.target.value;
+            handleDescriptionChange(e);
+          }}
           rows="2"
           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20 transition-all resize-none"
           placeholder="Describe what this agent does..."

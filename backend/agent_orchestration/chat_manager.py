@@ -28,7 +28,7 @@ class ChatManager:
         self.workflow_parser = workflow_parser
         self.docaware_handler = docaware_handler
     
-    async def execute_group_chat_manager_with_multiple_inputs(self, chat_manager_node: Dict[str, Any], llm_provider, input_sources: List[Dict[str, Any]], executed_nodes: Dict[str, str], execution_sequence: List[Dict[str, Any]], graph_json: Dict[str, Any], project_id: Optional[str] = None, project: Optional[Any] = None) -> Dict[str, Any]:
+    async def execute_group_chat_manager_with_multiple_inputs(self, chat_manager_node: Dict[str, Any], llm_provider, input_sources: List[Dict[str, Any]], executed_nodes: Dict[str, str], execution_sequence: List[Dict[str, Any]], graph_json: Dict[str, Any], project_id: Optional[str] = None, project: Optional[Any] = None, execution_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Execute GroupChatManager with multiple inputs support
         Enhanced version that handles multiple input sources
@@ -58,6 +58,10 @@ class ChatManager:
         # Check delegation mode
         delegation_mode = manager_data.get('delegation_mode', 'round_robin')
         logger.info(f"🔧 GROUP CHAT MANAGER (MULTI-INPUT): Delegation mode: {delegation_mode}")
+        logger.info(f"🔍 DIAGNOSTIC: manager_data keys: {list(manager_data.keys())}")
+        logger.info(f"🔍 DIAGNOSTIC: manager_data.get('delegation_mode'): {manager_data.get('delegation_mode')}")
+        logger.info(f"🔍 DIAGNOSTIC: manager_data.get('delegationMode'): {manager_data.get('delegationMode')}")
+        logger.info(f"🔍 DIAGNOSTIC: manager_data.get('delegation-mode'): {manager_data.get('delegation-mode')}")
         
         # Route to intelligent delegation if enabled
         if delegation_mode == 'intelligent':
@@ -65,7 +69,6 @@ class ChatManager:
                 # Get project for API keys if not provided
                 if project is None and project_id:
                     from users.models import IntelliDocProject
-                    from asgiref.sync import sync_to_async
                     try:
                         project = await sync_to_async(IntelliDocProject.objects.get)(project_id=project_id)
                     except IntelliDocProject.DoesNotExist:
@@ -80,10 +83,12 @@ class ChatManager:
                     execution_sequence=execution_sequence,
                     graph_json=graph_json,
                     project_id=project_id,
-                    project=project
+                    project=project,
+                    execution_id=execution_id
                 )
             except Exception as e:
                 logger.error(f"❌ GROUP CHAT MANAGER (MULTI-INPUT): Intelligent delegation failed, falling back to round-robin: {e}")
+                logger.error(f"❌ GROUP CHAT MANAGER (MULTI-INPUT): Exception type: {type(e).__name__}")
                 import traceback
                 logger.error(f"❌ GROUP CHAT MANAGER (MULTI-INPUT): Traceback: {traceback.format_exc()}")
                 # Fall through to round-robin mode
@@ -176,9 +181,12 @@ class ChatManager:
         # Get configuration
         # For Round Robin, use max_iterations if available, otherwise fallback to max_rounds
         max_iterations = manager_data.get('max_iterations', None)
+        max_rounds_config = manager_data.get('max_rounds', None)
+        logger.info(f"🔍 ROUND ROBIN CONFIG: max_iterations={max_iterations}, max_rounds={max_rounds_config}")
         if max_iterations is None:
             # Fallback to max_rounds for backward compatibility
             max_rounds = manager_data.get('max_rounds', 10)
+            logger.info(f"🔍 ROUND ROBIN CONFIG: Using max_rounds fallback: {max_rounds}")
             if max_rounds <= 0:
                 logger.warning(f"⚠️ GROUP CHAT MANAGER (MULTI-INPUT): max_rounds was {max_rounds}, setting to 1")
                 max_rounds = 1
@@ -189,6 +197,7 @@ class ChatManager:
                 logger.warning(f"⚠️ GROUP CHAT MANAGER (MULTI-INPUT): max_iterations was {max_iterations}, setting to 2 (default)")
                 max_iterations = 2
             max_rounds = max_iterations  # Use max_iterations as max_rounds for the loop
+            logger.info(f"🔍 ROUND ROBIN CONFIG: Using max_iterations: {max_iterations}, max_rounds: {max_rounds}")
         
         termination_strategy = manager_data.get('termination_strategy', 'all_delegates_complete')
         
@@ -440,7 +449,6 @@ class ChatManager:
             project = None
             if project_id:
                 from users.models import IntelliDocProject
-                from asgiref.sync import sync_to_async
                 try:
                     project = await sync_to_async(IntelliDocProject.objects.get)(project_id=project_id)
                 except IntelliDocProject.DoesNotExist:
@@ -1130,7 +1138,6 @@ class ChatManager:
             # Get project from project_id if project is None
             if project is None and project_id:
                 from users.models import IntelliDocProject
-                from asgiref.sync import sync_to_async
                 try:
                     project = await sync_to_async(IntelliDocProject.objects.get)(project_id=project_id)
                     logger.info(f"✅ DELEGATE: Retrieved project {project.name} for {delegate_name} API keys")
@@ -1357,7 +1364,8 @@ class ChatManager:
         execution_sequence: List[Dict[str, Any]],
         graph_json: Dict[str, Any],
         project_id: Optional[str] = None,
-        project: Optional[Any] = None
+        project: Optional[Any] = None,
+        execution_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Execute GroupChatManager with intelligent task delegation
@@ -1388,7 +1396,6 @@ class ChatManager:
         # Get project for API keys if not provided (required for all agents)
         if project is None and project_id:
             from users.models import IntelliDocProject
-            from asgiref.sync import sync_to_async
             try:
                 project = await sync_to_async(IntelliDocProject.objects.get)(project_id=project_id)
                 logger.info(f"✅ GROUP CHAT MANAGER (INTELLIGENT): Retrieved project {project.name} for delegate API keys")
@@ -1498,6 +1505,7 @@ class ChatManager:
         
         # Get max_subqueries from manager configuration (default: None = no limit)
         max_subqueries = manager_data.get('max_subqueries', None)
+        logger.info(f"🔍 INTELLIGENT DELEGATION: max_subqueries from config: {max_subqueries} (type: {type(max_subqueries)})")
         if max_subqueries is not None:
             try:
                 max_subqueries = int(max_subqueries)
@@ -1814,6 +1822,7 @@ class ChatManager:
             logger.info(f"EXP_METRIC_INTELLIGENT_DELEGATION | {json.dumps(exp_payload, default=str)}")
             
             # Store in database
+            logger.info(f"📊 METRIC SAVE CHECK: project_id={project_id}, execution_id={execution_id}, will_save={bool(project_id)}")
             if project_id:
                 try:
                     from users.models import IntelliDocProject, ExperimentMetric
@@ -1821,27 +1830,37 @@ class ChatManager:
                     def save_metric():
                         try:
                             project_obj = IntelliDocProject.objects.get(project_id=project_id)
+                            logger.info(f"📊 METRIC SAVE: Project found, creating ExperimentMetric...")
                             metric = ExperimentMetric.objects.create(
                                 project=project_obj,
                                 experiment_type='intelligent_delegation',
                                 metric_data=exp_payload,
                                 configuration=configuration,
-                                execution_id=execution_id if 'execution_id' in locals() else '',
+                                execution_id=execution_id or '',
                             )
-                            logger.info(f"✅ Stored intelligent delegation experiment metric: id={metric.id}, project={project_id}")
+                            logger.info(f"✅ Stored intelligent delegation experiment metric: id={metric.id}, project={project_id}, execution_id={execution_id or 'N/A'}")
+                            return metric.id
                         except IntelliDocProject.DoesNotExist:
                             logger.warning(f"⚠️ Could not save experiment metric: Project {project_id} not found")
+                            return None
                         except Exception as e:
                             logger.error(f"❌ Failed to save experiment metric to database: {e}", exc_info=True)
                             import traceback
                             logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+                            return None
                     
                     # Use sync_to_async for database write
-                    await sync_to_async(save_metric)()
+                    metric_id = await sync_to_async(save_metric)()
+                    if metric_id:
+                        logger.info(f"✅ METRIC SAVE SUCCESS: Intelligent delegation metric saved with ID {metric_id}")
+                    else:
+                        logger.warning(f"⚠️ METRIC SAVE FAILED: Metric was not saved (check logs above)")
                 except Exception as db_error:
                     logger.error(f"❌ Failed to store experiment metric in database: {db_error}", exc_info=True)
                     import traceback
                     logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+            else:
+                logger.warning(f"⚠️ METRIC SAVE SKIPPED: project_id is None or empty - metric will not be saved")
         except Exception as metric_error:
             logger.error(f"❌ EXP_METRIC_INTELLIGENT_DELEGATION: Failed to log metrics: {metric_error}")
         
@@ -1943,15 +1962,22 @@ Delegation Metrics:
                     if isinstance(response_data, dict):
                         response_text = response_data.get('response', response_data.get('text', str(response_data)))
                         status = response_data.get('status', 'completed')
+                        response_time_ms = response_data.get('response_time_ms', 0)
+                        token_count = response_data.get('token_count')
                     else:
                         response_text = str(response_data)
                         status = 'completed'
+                        response_time_ms = 0
+                        token_count = None
                     
                     all_delegate_responses.append({
                         'delegate_name': delegate_name,
                         'response': response_text,
                         'status': status,
-                        'subquery_id': sq_id
+                        'subquery_id': sq_id,
+                        # Carry timing/token metadata forward for workflow statistics
+                        'response_time_ms': response_time_ms,
+                        'token_count': token_count
                     })
             
             return {
@@ -2003,6 +2029,10 @@ Delegation Metrics:
                 attempt_number = retry_count + 1
                 logger.info(f"📤 GROUP CHAT MANAGER (INTELLIGENT): Sending subquery {subquery_id[:8]} to {delegate_name} (attempt {attempt_number}/{max_retries + 1})")
                 
+                # Measure end-to-end delegate response time for this attempt
+                loop = asyncio.get_event_loop()
+                start_time = loop.time()
+                
                 # Execute delegate with delegation message
                 delegate_response = await asyncio.wait_for(
                     self._execute_delegate_with_delegation_message(
@@ -2015,6 +2045,8 @@ Delegation Metrics:
                     ),
                     timeout=delegation_timeout
                 )
+                end_time = loop.time()
+                response_time_ms = int((end_time - start_time) * 1000)
                 
                 # Log successful execution (only on first attempt, not retries)
                 if retry_count == 0:
@@ -2037,7 +2069,9 @@ Delegation Metrics:
                         'confidence': parsed_response.get('confidence', 1.0),
                         'metadata': parsed_response.get('metadata', {}),
                         'retry_count': retry_count,
-                        'error': None
+                        'error': None,
+                        # Propagate measured response time for downstream statistics
+                        'response_time_ms': response_time_ms
                     }
                 else:
                     return {
@@ -2047,7 +2081,9 @@ Delegation Metrics:
                         'confidence': 1.0,
                         'metadata': {},
                         'retry_count': retry_count,
-                        'error': None
+                        'error': None,
+                        # Propagate measured response time for downstream statistics
+                        'response_time_ms': response_time_ms
                     }
                     
             except asyncio.TimeoutError:
@@ -2089,7 +2125,9 @@ Delegation Metrics:
                             'retry_count': retry_count
                         },
                         'retry_count': retry_count,
-                        'error': str(e)
+                        'error': str(e),
+                        # No valid response time for failed execution
+                        'response_time_ms': 0
                     }
                 
                 retry_count += 1
@@ -2251,7 +2289,10 @@ Delegation Metrics:
                     'status': 'error',
                     'confidence': 0.0,
                     'metadata': {},
-                    'retry_count': 0
+                    'retry_count': 0,
+                    # No valid response time when execution raises an exception
+                    'response_time_ms': 0,
+                    'token_count': None
                 }
                 delegation_metrics['failed_delegations'] += 1
             elif result.get('success'):
@@ -2260,7 +2301,10 @@ Delegation Metrics:
                     'status': result['status'],
                     'confidence': result['confidence'],
                     'metadata': result['metadata'],
-                    'retry_count': result['retry_count']
+                    'retry_count': result['retry_count'],
+                    # Propagate timing/token metadata when available
+                    'response_time_ms': result.get('response_time_ms', 0),
+                    'token_count': result.get('token_count')
                 }
                 delegation_metrics['successful_delegations'] += 1
                 if result.get('retry_count', 0) > 0:
@@ -2272,7 +2316,9 @@ Delegation Metrics:
                     'status': result['status'],
                     'confidence': result['confidence'],
                     'metadata': result['metadata'],
-                    'retry_count': result['retry_count']
+                    'retry_count': result['retry_count'],
+                    'response_time_ms': result.get('response_time_ms', 0),
+                    'token_count': result.get('token_count')
                 }
                 delegation_metrics['failed_delegations'] += 1
                 if result.get('error'):
@@ -2323,7 +2369,6 @@ Delegation Metrics:
             # Safety fallback: Get project if None but project_id exists
             if project is None and project_id:
                 from users.models import IntelliDocProject
-                from asgiref.sync import sync_to_async
                 try:
                     project = await sync_to_async(IntelliDocProject.objects.get)(project_id=project_id)
                     logger.info(f"✅ DELEGATE (INTELLIGENT): Retrieved project {project.name} for {delegate_name} API keys")

@@ -92,10 +92,48 @@
     }
   }
   
+  // Track current node ID to detect changes
+  let currentNodeId = node.id;
+  
   // Initialize on component load
   $effect(() => {
     initializeNodeDefaults();
     console.log('🔧 SIMPLE NODE PROPERTIES: Panel opened for', node.type, node.id.slice(-4));
+  });
+  
+  // Watch for node changes and sync name/description
+  $effect(() => {
+    if (node && node.id) {
+      const isDifferentNode = node.id !== currentNodeId;
+      const currentName = node.data.name || node.data.label || node.type;
+      const currentDesc = node.data.description || '';
+      
+      if (isDifferentNode) {
+        console.log('🔄 SIMPLE NODE PROPERTIES: Node changed', {
+          from: currentNodeId?.slice(-4),
+          to: node.id.slice(-4),
+          oldName: nodeName,
+          newName: currentName,
+          oldDesc: nodeDescription.substring(0, 50),
+          newDesc: currentDesc.substring(0, 50)
+        });
+        
+        currentNodeId = node.id;
+        nodeName = currentName;
+        nodeDescription = currentDesc;
+        nodeConfig = { ...node.data };
+      } else {
+        // Same node but data might have changed externally
+        if (nodeName !== currentName) {
+          console.log('🔄 SIMPLE NODE PROPERTIES: Name changed externally', nodeName, '→', currentName);
+          nodeName = currentName;
+        }
+        if (nodeDescription !== currentDesc) {
+          console.log('🔄 SIMPLE NODE PROPERTIES: Description changed externally', nodeDescription.substring(0, 50), '→', currentDesc.substring(0, 50));
+          nodeDescription = currentDesc;
+        }
+      }
+    }
   });
   
   // Deep clone to prevent shared references
@@ -144,7 +182,9 @@
     updateNodeData();
   }
   
-  function handleDescriptionChange() {
+  function handleDescriptionChange(event: any) {
+    const newDesc = event?.target?.value || nodeDescription;
+    nodeDescription = newDesc;
     updateNodeData();
   }
   
@@ -221,8 +261,14 @@
       <label class="block text-sm font-medium text-gray-700 mb-2">Description</label>
       <textarea
         bind:value={nodeDescription}
-        on:input={handleDescriptionChange}
-        on:blur={handleDescriptionChange}
+        on:input={(e) => {
+          nodeDescription = e.target.value;
+          handleDescriptionChange(e);
+        }}
+        on:blur={(e) => {
+          nodeDescription = e.target.value;
+          handleDescriptionChange(e);
+        }}
         rows="2"
         class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20 transition-all resize-none"
         placeholder="Describe what this agent does..."

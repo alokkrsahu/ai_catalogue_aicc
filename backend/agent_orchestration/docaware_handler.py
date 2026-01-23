@@ -188,6 +188,7 @@ class DocAwareHandler:
                 logger.info(f"EXP_METRIC_DOCAWARE_SINGLE | {json.dumps(exp_payload, default=str)}")
                 
                 # Store in database
+                logger.info(f"📊 METRIC SAVE CHECK (DOCAWARE): project_id={project_id}, will_save={bool(project_id)}")
                 if project_id:
                     try:
                         from users.models import IntelliDocProject, ExperimentMetric
@@ -196,22 +197,32 @@ class DocAwareHandler:
                         def save_metric():
                             try:
                                 project_obj = IntelliDocProject.objects.get(project_id=project_id)
-                                ExperimentMetric.objects.create(
+                                logger.info(f"📊 METRIC SAVE: Project found, creating ExperimentMetric for docaware_single...")
+                                metric = ExperimentMetric.objects.create(
                                     project=project_obj,
                                     experiment_type='docaware_single',
                                     metric_data=exp_payload,
                                     configuration=configuration,
                                 )
-                                logger.info(f"✅ Stored DocAware experiment metric for project {project_id}")
+                                logger.info(f"✅ Stored DocAware experiment metric: id={metric.id}, project={project_id}")
+                                return metric.id
                             except IntelliDocProject.DoesNotExist:
                                 logger.warning(f"⚠️ Could not save experiment metric: Project {project_id} not found")
+                                return None
                             except Exception as e:
                                 logger.error(f"❌ Failed to save experiment metric to database: {e}", exc_info=True)
+                                return None
                         
                         # Use sync_to_async for database write (imported at module level)
-                        await sync_to_async(save_metric)()
+                        metric_id = await sync_to_async(save_metric)()
+                        if metric_id:
+                            logger.info(f"✅ METRIC SAVE SUCCESS: DocAware metric saved with ID {metric_id}")
+                        else:
+                            logger.warning(f"⚠️ METRIC SAVE FAILED: DocAware metric was not saved (check logs above)")
                     except Exception as db_error:
                         logger.warning(f"⚠️ Failed to store experiment metric in database: {db_error}", exc_info=True)
+                else:
+                    logger.warning(f"⚠️ METRIC SAVE SKIPPED (DOCAWARE): project_id is None or empty - metric will not be saved")
             except Exception as metric_error:
                 logger.error(f"❌ EXP_METRIC_DOCAWARE_SINGLE: Failed to log metrics: {metric_error}")
             
@@ -357,12 +368,14 @@ class DocAwareHandler:
                 logger.info(f"EXP_METRIC_DOCAWARE_CONTEXT | {json.dumps(exp_payload, default=str)}")
                 
                 # Store in database (sync method, so use direct DB call - no await needed)
+                logger.info(f"📊 METRIC SAVE CHECK (DOCAWARE_CONTEXT): project_id={project_id}, will_save={bool(project_id)}")
                 if project_id:
                     try:
                         from users.models import IntelliDocProject, ExperimentMetric
                         
                         try:
                             project_obj = IntelliDocProject.objects.get(project_id=project_id)
+                            logger.info(f"📊 METRIC SAVE: Project found, creating ExperimentMetric for docaware_context...")
                             metric = ExperimentMetric.objects.create(
                                 project=project_obj,
                                 experiment_type='docaware_context',
@@ -380,6 +393,8 @@ class DocAwareHandler:
                         logger.error(f"❌ Failed to store experiment metric in database: {db_error}", exc_info=True)
                         import traceback
                         logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+                else:
+                    logger.warning(f"⚠️ METRIC SAVE SKIPPED (DOCAWARE_CONTEXT): project_id is None or empty - metric will not be saved")
             except Exception as metric_error:
                 logger.error(f"❌ EXP_METRIC_DOCAWARE_CONTEXT: Failed to log metrics: {metric_error}")
             

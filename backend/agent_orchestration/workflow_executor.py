@@ -488,19 +488,34 @@ class WorkflowExecutor:
                         input_sources = self.workflow_parser.find_multiple_inputs_to_node(node_id, graph_json)
                         
                         try:
-                            if len(input_sources) > 1:
+                            # Get project for API keys
+                            project = await sync_to_async(lambda: workflow.project)()
+                            
+                            # DIAGNOSTIC: Log node data to see delegation_mode
+                            node_data = node.get('data', {})
+                            delegation_mode = node_data.get('delegation_mode', 'round_robin')
+                            logger.info(f"🔍 DIAGNOSTIC: Node data keys: {list(node_data.keys())}")
+                            logger.info(f"🔍 DIAGNOSTIC: Node delegation_mode: {delegation_mode}")
+                            logger.info(f"🔍 DIAGNOSTIC: Node max_subqueries: {node_data.get('max_subqueries')}")
+                            logger.info(f"🔍 DIAGNOSTIC: Node max_iterations: {node_data.get('max_iterations')}")
+                            logger.info(f"🔍 DIAGNOSTIC: Node max_rounds: {node_data.get('max_rounds')}")
+                            
+                            # CRITICAL FIX: Always use multi-input version if intelligent delegation is enabled
+                            # OR if there are multiple inputs. The multi-input version can handle single inputs too.
+                            if len(input_sources) > 1 or delegation_mode == 'intelligent':
                                 # Use enhanced multi-input version (supports both round-robin and intelligent delegation)
-                                logger.info(f"📥 ORCHESTRATOR: GroupChatManager {node_name} has {len(input_sources)} input sources - using multi-input mode")
-                                # Get project for API keys
-                                project = await sync_to_async(lambda: workflow.project)()
+                                # This version can handle both single and multiple inputs
+                                if len(input_sources) > 1:
+                                    logger.info(f"📥 ORCHESTRATOR: GroupChatManager {node_name} has {len(input_sources)} input sources - using multi-input mode")
+                                else:
+                                    logger.info(f"📥 ORCHESTRATOR: GroupChatManager {node_name} has 1 input source but intelligent delegation is enabled - using multi-input mode (supports intelligent delegation)")
+                                
                                 chat_result = await self.chat_manager.execute_group_chat_manager_with_multiple_inputs(
-                                    node, llm_provider, input_sources, executed_nodes, execution_sequence, graph_json, str(project_id), project
+                                    node, llm_provider, input_sources, executed_nodes, execution_sequence, graph_json, str(project_id), project, execution_id
                                 )
                             else:
-                                # Use traditional single-input version for backward compatibility
-                                logger.info(f"📥 ORCHESTRATOR: GroupChatManager {node_name} has {len(input_sources)} input source - using single-input mode")
-                                # Get project for API keys (same as multi-input mode)
-                                project = await sync_to_async(lambda: workflow.project)()
+                                # Use traditional single-input version for backward compatibility (only when round-robin and single input)
+                                logger.info(f"📥 ORCHESTRATOR: GroupChatManager {node_name} has {len(input_sources)} input source - using single-input mode (round-robin)")
                                 chat_result = await self.chat_manager.execute_group_chat_manager(
                                     node, llm_provider, conversation_history, execution_sequence, graph_json, str(project_id), project
                                 )
@@ -578,6 +593,9 @@ class WorkflowExecutor:
                                         delegate_name = delegate_response.get('delegate_name', 'Unknown Delegate')
                                         response_text = delegate_response.get('response', '')
                                         subquery_id = delegate_response.get('subquery_id', 'unknown')
+                                        # Timing/token metadata propagated from intelligent delegation engine
+                                        delegate_response_time_ms = delegate_response.get('response_time_ms', 0)
+                                        delegate_token_count = delegate_response.get('token_count')
                                         
                                         messages.append({
                                             'sequence': message_sequence,
@@ -586,8 +604,8 @@ class WorkflowExecutor:
                                             'content': response_text,
                                             'message_type': 'delegate_response',
                                             'timestamp': timezone.now().isoformat(),
-                                            'response_time_ms': 0,
-                                            'token_count': None,
+                                            'response_time_ms': delegate_response_time_ms,
+                                            'token_count': delegate_token_count,
                                             'metadata': {
                                                 'parent_manager': node_name,
                                                 'delegation_mode': 'intelligent',
@@ -1325,6 +1343,7 @@ class WorkflowExecutor:
                     logger.info(f"EXP_METRIC_WORKFLOW_EXECUTION | {json.dumps(exp_payload, default=str)}")
                 
                 # Store in database
+                logger.info(f"📊 METRIC SAVE CHECK: project_id={project_id}, execution_id={execution_id}, will_save={bool(project_id)}")
                 try:
                     from users.models import IntelliDocProject, ExperimentMetric
                     
@@ -1333,6 +1352,7 @@ class WorkflowExecutor:
                     def save_metric():
                         try:
                             project_obj = IntelliDocProject.objects.get(project_id=project_id)
+                            logger.info(f"📊 METRIC SAVE: Project found, creating ExperimentMetric for workflow_execution...")
                             metric = ExperimentMetric.objects.create(
                                 project=project_obj,
                                 experiment_type='workflow_execution',
@@ -1342,15 +1362,22 @@ class WorkflowExecutor:
                                 evaluation_id=evaluation_id_value,
                             )
                             logger.info(f"✅ Stored workflow execution experiment metric: id={metric.id}, project={project_id}, execution={execution_id}, evaluation={evaluation_id_value or 'N/A'}")
+                            return metric.id
                         except IntelliDocProject.DoesNotExist:
                             logger.warning(f"⚠️ Could not save experiment metric: Project {project_id} not found")
+                            return None
                         except Exception as e:
                             logger.error(f"❌ Failed to save experiment metric to database: {e}", exc_info=True)
                             import traceback
                             logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+                            return None
                     
                     # Use sync_to_async for database write
-                    await sync_to_async(save_metric)()
+                    metric_id = await sync_to_async(save_metric)()
+                    if metric_id:
+                        logger.info(f"✅ METRIC SAVE SUCCESS: Workflow execution metric saved with ID {metric_id}")
+                    else:
+                        logger.warning(f"⚠️ METRIC SAVE FAILED: Metric was not saved (check logs above)")
                 except Exception as db_error:
                     logger.error(f"❌ Failed to store experiment metric in database: {db_error}", exc_info=True)
                     import traceback
@@ -2113,14 +2140,22 @@ class WorkflowExecutor:
                     # Use the existing workflow_parser instance instead of creating a new one
                     execution_sequence = self.workflow_parser.parse_workflow_graph(graph_json)
                     
-                    # Use the same logic as sequential execution
-                    if len(input_sources) > 1:
-                        logger.info(f"📥 PARALLEL: GroupChatManager {node_name} has {len(input_sources)} input sources - using multi-input mode")
+                    # Check delegation mode to determine which version to use
+                    node_data = node.get('data', {})
+                    delegation_mode = node_data.get('delegation_mode', 'round_robin')
+                    
+                    # CRITICAL FIX: Always use multi-input version if intelligent delegation is enabled
+                    # OR if there are multiple inputs. The multi-input version can handle single inputs too.
+                    if len(input_sources) > 1 or delegation_mode == 'intelligent':
+                        if len(input_sources) > 1:
+                            logger.info(f"📥 PARALLEL: GroupChatManager {node_name} has {len(input_sources)} input sources - using multi-input mode")
+                        else:
+                            logger.info(f"📥 PARALLEL: GroupChatManager {node_name} has 1 input source but intelligent delegation is enabled - using multi-input mode")
                         chat_result = await self.chat_manager.execute_group_chat_manager_with_multiple_inputs(
-                            node, llm_provider, input_sources, executed_nodes, execution_sequence, graph_json, str(project_id), project
+                            node, llm_provider, input_sources, executed_nodes, execution_sequence, graph_json, str(project_id), project, execution_id
                         )
                     else:
-                        logger.info(f"📥 PARALLEL: GroupChatManager {node_name} has {len(input_sources)} input source - using single-input mode")
+                        logger.info(f"📥 PARALLEL: GroupChatManager {node_name} has {len(input_sources)} input source - using single-input mode (round-robin)")
                         chat_result = await self.chat_manager.execute_group_chat_manager(
                             node, llm_provider, conversation_history, execution_sequence, graph_json, str(project_id), project
                         )

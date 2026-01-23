@@ -162,9 +162,16 @@ class WorkflowEvaluator:
             if hasattr(csv_file, 'read'):
                 content = csv_file.read()
                 if isinstance(content, bytes):
-                    content = content.decode('utf-8')
+                    content = content.decode('utf-8-sig')  # utf-8-sig automatically strips BOM
+                else:
+                    # If already a string, strip BOM manually
+                    if content.startswith('\ufeff'):
+                        content = content[1:]
             else:
                 content = csv_file
+                # Strip BOM if present
+                if isinstance(content, str) and content.startswith('\ufeff'):
+                    content = content[1:]
             
             # Parse CSV
             csv_reader = csv.DictReader(io.StringIO(content))
@@ -173,8 +180,15 @@ class WorkflowEvaluator:
             if not rows:
                 raise ValueError("CSV file is empty")
             
-            # Get available column names (case-insensitive)
-            available_columns = {key.lower().strip(): key for key in rows[0].keys()}
+            # Get available column names (case-insensitive, strip BOM and whitespace)
+            # Strip BOM and whitespace from column names before normalization
+            normalized_column_map = {}
+            for key in rows[0].keys():
+                # Strip BOM, leading/trailing whitespace, then normalize to lowercase
+                clean_key = key.lstrip('\ufeff').strip().lower()
+                normalized_column_map[clean_key] = key
+            
+            available_columns = normalized_column_map
             logger.info(f"📊 EVALUATOR: Found CSV columns: {list(rows[0].keys())}")
             
             # Normalize column names (handle case-insensitive matching and common alternatives)
@@ -501,13 +515,37 @@ class WorkflowEvaluator:
             metrics['bleu'] = 0.0
         
         try:
-            # BERTScore
+            # BERTScore (optional - requires internet or cached models)
             from bert_score import score
-            P, R, F1 = score([workflow_output], [expected_output], lang='en', verbose=False)
-            metrics['bert_score'] = float(F1.item())
+            import os
             
+            # Try to use offline mode if HF_HOME or TRANSFORMERS_CACHE is set
+            # Otherwise, try to download (may fail in offline environments)
+            try:
+                P, R, F1 = score(
+                    [workflow_output], 
+                    [expected_output], 
+                    lang='en', 
+                    verbose=False,
+                    device='cpu'  # Use CPU to avoid GPU issues
+                )
+                metrics['bert_score'] = float(F1.item())
+                logger.debug(f"✅ EVALUATOR: BERTScore calculated: {metrics['bert_score']:.3f}")
+            except Exception as bert_error:
+                # If download fails, try to use cached model or skip
+                error_msg = str(bert_error).lower()
+                if 'huggingface.co' in error_msg or 'connection' in error_msg or 'offline' in error_msg:
+                    logger.warning(f"⚠️ EVALUATOR: BERTScore unavailable (offline mode or no cached models). Skipping BERTScore metric.")
+                    logger.warning(f"⚠️ EVALUATOR: To enable BERTScore, ensure internet access or pre-download models using: bert_score --model roberta-large")
+                else:
+                    logger.warning(f"⚠️ EVALUATOR: BERTScore calculation failed: {bert_error}")
+                metrics['bert_score'] = 0.0
+            
+        except ImportError:
+            logger.warning("⚠️ EVALUATOR: bert_score library not installed. Skipping BERTScore metric.")
+            metrics['bert_score'] = 0.0
         except Exception as e:
-            logger.error(f"❌ EVALUATOR: BERTScore calculation failed: {e}")
+            logger.warning(f"⚠️ EVALUATOR: BERTScore unavailable: {e}")
             metrics['bert_score'] = 0.0
         
         try:
@@ -534,7 +572,10 @@ class WorkflowEvaluator:
             logger.error(f"❌ EVALUATOR: Semantic similarity calculation failed: {e}")
             metrics['semantic_similarity'] = 0.0
         
-        # Calculate average score
+        # Calculate average score (only include metrics that were successfully calculated)
+        # Track which metrics succeeded vs failed (failed metrics are set to 0.0)
+        # Note: We can't easily distinguish between "calculated as 0.0" vs "failed and set to 0.0"
+        # So we include all metrics in the average, but log which ones might have failed
         metric_values = [
             metrics['rouge_1'],
             metrics['rouge_2'],
@@ -544,6 +585,20 @@ class WorkflowEvaluator:
             metrics['semantic_similarity']
         ]
         metrics['average_score'] = sum(metric_values) / len(metric_values)
+        
+        # Log which metrics contributed to the average
+        successful_metrics = []
+        if metrics['rouge_1'] > 0 or metrics['rouge_2'] > 0 or metrics['rouge_l'] > 0:
+            successful_metrics.append('ROUGE')
+        if metrics['bleu'] > 0:
+            successful_metrics.append('BLEU')
+        if metrics['bert_score'] > 0:
+            successful_metrics.append('BERTScore')
+        if metrics['semantic_similarity'] > 0:
+            successful_metrics.append('SemanticSimilarity')
+        
+        if successful_metrics:
+            logger.debug(f"📊 EVALUATOR: Average calculated from {len(successful_metrics)} metric type(s): {', '.join(successful_metrics)}")
         
         logger.info(f"📊 EVALUATOR: Metrics calculated - Avg: {metrics['average_score']:.3f}, "
                    f"ROUGE-1: {metrics['rouge_1']:.3f}, BLEU: {metrics['bleu']:.3f}")

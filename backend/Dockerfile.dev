@@ -107,6 +107,26 @@ RUN pip install --upgrade pip && \
         pytest \
         pytest-django
 
+# Pre-download BERTScore models during build (optional - don't fail build if it fails)
+# This ensures models are available offline during evaluation
+# BERTScore will download models on first use, so we trigger that here during build
+RUN set +e; \
+    echo "📥 Pre-downloading BERTScore models..." && \
+    python3 -c "\
+import sys; \
+try: \
+    from bert_score import score; \
+    print('Downloading BERTScore models for English...'); \
+    # Trigger model download by running a dummy score calculation \
+    P, R, F1 = score(['This is a test sentence.'], ['This is a test sentence.'], lang='en', verbose=False, device='cpu'); \
+    print('✅ BERTScore models downloaded successfully'); \
+except Exception as e: \
+    print(f'⚠️ Warning: BERTScore model pre-download failed: {e}'); \
+    print('Models will be downloaded on first use during evaluation'); \
+    sys.exit(0) \
+" || echo "⚠️ BERTScore model download skipped (will download on first use)"; \
+    echo "BERTScore model pre-download step completed"
+
 # Create necessary directories
 RUN mkdir -p /app/media /app/logs /app/volumes
 

@@ -366,7 +366,17 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
             # Read metrics from database
             try:
                 experiment_metrics = ExperimentMetric.objects.filter(project=project).order_by('-created_at')
-                logger.info(f"📊 PERFORMANCE: Found {experiment_metrics.count()} experiment metrics for project {project.project_id}")
+                total_count = experiment_metrics.count()
+                logger.info(f"📊 PERFORMANCE: Found {total_count} experiment metrics for project {project.project_id}")
+                
+                # Log breakdown by experiment type for debugging
+                if total_count > 0:
+                    type_counts = {}
+                    for exp_type in ['intelligent_delegation', 'workflow_execution', 'docaware_single', 'docaware_context']:
+                        count = experiment_metrics.filter(experiment_type=exp_type).count()
+                        if count > 0:
+                            type_counts[exp_type] = count
+                    logger.info(f"📊 PERFORMANCE: Metric breakdown by type: {type_counts}")
             except Exception as e:
                 logger.error(f"❌ PERFORMANCE: Failed to query ExperimentMetric table: {e}", exc_info=True)
                 # Table might not exist if migration hasn't run
