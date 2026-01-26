@@ -753,8 +753,14 @@ class ChatbotSecurityService:
             )
             
             # Reset daily count if it's a new day
+            from datetime import datetime, date
             current_date = timezone.now().date()
-            if usage.last_reset_date < current_date:
+            # Convert to date if it's a datetime
+            last_reset = usage.last_reset_date
+            if isinstance(last_reset, datetime):
+                last_reset = last_reset.date()
+
+            if last_reset < current_date:
                 usage.daily_request_count = 0
                 usage.last_reset_date = current_date
                 usage.save()
