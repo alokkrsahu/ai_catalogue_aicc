@@ -1002,7 +1002,7 @@ def _generate_streaming_llm_response(message: str, context_results: list, conver
                     # Map to standard roles
                     if role.lower() == 'assistant':
                         messages.append({"role": "assistant", "content": content})
-        else:
+                    else:
                         messages.append({"role": "user", "content": content})
 
         # Add current user message
