@@ -73,10 +73,38 @@ class DocAwareEmbeddingService:
                 try:
                     self.model = SentenceTransformer(self.model_name, cache_folder=str(cache_dir))
                 except Exception as e:
-                    logger.warning(f"⚠️ EMBEDDING: Error loading from cache, will try with network: {e}")
-                    # If offline mode fails, try with network (cache might be incomplete)
-                    os.environ.pop('HF_HUB_OFFLINE', None)
-                    self.model = SentenceTransformer(self.model_name, cache_folder=str(cache_dir))
+                    error_msg = str(e)
+                    # Check if this is a corrupted cache error (meta tensor issue)
+                    is_corrupted_cache = (
+                        'meta tensor' in error_msg.lower() or
+                        'Cannot copy out of meta tensor' in error_msg or
+                        'to_empty' in error_msg.lower()
+                    )
+                    
+                    if is_corrupted_cache:
+                        logger.warning(f"⚠️ EMBEDDING: Detected corrupted cache (meta tensor error). Clearing cache and re-downloading...")
+                        # Clear the corrupted cache
+                        import shutil
+                        try:
+                            if old_format_path.exists():
+                                logger.info(f"🗑️ EMBEDDING: Removing corrupted cache (old format): {old_format_path}")
+                                shutil.rmtree(old_format_path, ignore_errors=True)
+                            if new_format_path.exists():
+                                logger.info(f"🗑️ EMBEDDING: Removing corrupted cache (new format): {new_format_path}")
+                                shutil.rmtree(new_format_path, ignore_errors=True)
+                            logger.info(f"✅ EMBEDDING: Corrupted cache cleared")
+                        except Exception as clear_error:
+                            logger.warning(f"⚠️ EMBEDDING: Error clearing cache: {clear_error}")
+                        
+                        # Remove offline mode and download fresh
+                        os.environ.pop('HF_HUB_OFFLINE', None)
+                        logger.info(f"📥 EMBEDDING: Downloading fresh model (corrupted cache was cleared)")
+                        self.model = SentenceTransformer(self.model_name, cache_folder=str(cache_dir))
+                    else:
+                        logger.warning(f"⚠️ EMBEDDING: Error loading from cache, will try with network: {e}")
+                        # If offline mode fails, try with network (cache might be incomplete)
+                        os.environ.pop('HF_HUB_OFFLINE', None)
+                        self.model = SentenceTransformer(self.model_name, cache_folder=str(cache_dir))
                 # Keep HF_HUB_OFFLINE set for subsequent loads (better performance)
             else:
                 logger.info(f"📥 EMBEDDING: Model not in cache, will download (this may take a few minutes)")

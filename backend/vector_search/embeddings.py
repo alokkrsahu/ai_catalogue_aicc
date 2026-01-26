@@ -55,15 +55,59 @@ class DocumentEmbedder:
                 logger.info(f"Found model in cache (old format). Loading from {old_format_path}")
                 # Set offline mode to skip network checks
                 os.environ['HF_HUB_OFFLINE'] = '1'
-                self.model = SentenceTransformer(str(old_format_path))
-                model_cached = True
+                try:
+                    self.model = SentenceTransformer(str(old_format_path))
+                    model_cached = True
+                except Exception as e:
+                    error_msg = str(e)
+                    # Check if this is a corrupted cache error (meta tensor issue)
+                    is_corrupted_cache = (
+                        'meta tensor' in error_msg.lower() or
+                        'Cannot copy out of meta tensor' in error_msg or
+                        'to_empty' in error_msg.lower()
+                    )
+                    if is_corrupted_cache:
+                        logger.warning(f"⚠️ EMBEDDING: Detected corrupted cache (meta tensor error). Clearing cache and re-downloading...")
+                        import shutil
+                        try:
+                            logger.info(f"🗑️ EMBEDDING: Removing corrupted cache (old format): {old_format_path}")
+                            shutil.rmtree(old_format_path, ignore_errors=True)
+                            logger.info(f"✅ EMBEDDING: Corrupted cache cleared")
+                        except Exception as clear_error:
+                            logger.warning(f"⚠️ EMBEDDING: Error clearing cache: {clear_error}")
+                        os.environ.pop('HF_HUB_OFFLINE', None)
+                        model_cached = False  # Force re-download
+                    else:
+                        raise
             elif new_format_path.exists() and any(new_format_path.iterdir()):
                 logger.info(f"Found model in cache (new format). Loading from {new_format_path}")
                 # Set offline mode to skip network checks
                 os.environ['HF_HUB_OFFLINE'] = '1'
-                # For new format, use model name directly - SentenceTransformer will find it
-                self.model = SentenceTransformer(model_name, cache_folder=str(cache_dir))
-                model_cached = True
+                try:
+                    # For new format, use model name directly - SentenceTransformer will find it
+                    self.model = SentenceTransformer(model_name, cache_folder=str(cache_dir))
+                    model_cached = True
+                except Exception as e:
+                    error_msg = str(e)
+                    # Check if this is a corrupted cache error (meta tensor issue)
+                    is_corrupted_cache = (
+                        'meta tensor' in error_msg.lower() or
+                        'Cannot copy out of meta tensor' in error_msg or
+                        'to_empty' in error_msg.lower()
+                    )
+                    if is_corrupted_cache:
+                        logger.warning(f"⚠️ EMBEDDING: Detected corrupted cache (meta tensor error). Clearing cache and re-downloading...")
+                        import shutil
+                        try:
+                            logger.info(f"🗑️ EMBEDDING: Removing corrupted cache (new format): {new_format_path}")
+                            shutil.rmtree(new_format_path, ignore_errors=True)
+                            logger.info(f"✅ EMBEDDING: Corrupted cache cleared")
+                        except Exception as clear_error:
+                            logger.warning(f"⚠️ EMBEDDING: Error clearing cache: {clear_error}")
+                        os.environ.pop('HF_HUB_OFFLINE', None)
+                        model_cached = False  # Force re-download
+                    else:
+                        raise
             
             if not model_cached:
                 # Ensure offline mode is not set when downloading

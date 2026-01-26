@@ -661,6 +661,9 @@ class DocAwareHandler:
                 logger.warning(f"📚 QUERY REFINEMENT: Could not create LLM provider, using original query")
                 return query
             
+            # Get agent's system message for context-aware refinement
+            agent_system_message = agent_data.get('system_message', '')
+            
             # Create refinement prompt
             refinement_prompt = f"""You are a search query optimizer. Your task is to create an optimal search query that preserves all key concepts from the input while being concise and effective for document retrieval.
 
@@ -672,7 +675,16 @@ Create an optimized search query that:
 2. Combines related concepts intelligently
 3. Removes redundancy and filler words
 4. Maintains the semantic meaning and intent
-5. Is optimized for vector similarity search
+5. Is optimized for vector similarity search"""
+            
+            # Add agent-specific context if system message exists
+            if agent_system_message and agent_system_message.strip():
+                refinement_prompt += f"""
+
+Refine the query to extract helpful insights to achieve the below:
+{agent_system_message}"""
+            
+            refinement_prompt += """
 
 Return ONLY the refined search query, nothing else. Do not add explanations or commentary.
 

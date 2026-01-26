@@ -239,6 +239,12 @@ class ChatManager:
                     logger.info(f"🔄 GROUP CHAT MANAGER (MULTI-INPUT): Skipping completed delegate {delegate_name}")
                     continue
                 
+                # Also skip if max_iterations reached (even if not marked completed yet)
+                if status['iterations'] >= status['max_iterations']:
+                    logger.info(f"🔄 GROUP CHAT MANAGER (MULTI-INPUT): Skipping delegate {delegate_name} - reached max_iterations ({status['iterations']}/{status['max_iterations']})")
+                    status['completed'] = True  # Mark as completed to prevent future execution
+                    continue
+                
                 logger.info(f"🔄 GROUP CHAT MANAGER (MULTI-INPUT): About to execute delegate {delegate_name}")
                 
                 # Create async task for delegate execution (don't await yet)
@@ -949,6 +955,12 @@ class ChatManager:
                     logger.info(f"🔄 GROUP CHAT MANAGER: Skipping completed delegate {delegate_name}")
                     continue
                 
+                # Also skip if max_iterations reached (even if not marked completed yet)
+                if status['iterations'] >= status['max_iterations']:
+                    logger.info(f"🔄 GROUP CHAT MANAGER: Skipping delegate {delegate_name} - reached max_iterations ({status['iterations']}/{status['max_iterations']})")
+                    status['completed'] = True  # Mark as completed to prevent future execution
+                    continue
+                
                 logger.info(f"🔄 GROUP CHAT MANAGER: About to execute delegate {delegate_name}")
                 delegates_processed_this_round += 1
                 
@@ -1334,6 +1346,144 @@ class ChatManager:
             logger.error(f"❌ DELEGATE: Traceback: {traceback.format_exc()}")
             return f"ERROR: {error_msg}"
 
+    def _get_model_max_context(self, model_name: str) -> int:
+        """
+        Get maximum context length for a model (in tokens)
+        
+        Args:
+            model_name: Name of the LLM model
+            
+        Returns:
+            Maximum context length in tokens
+        """
+        # Model context limits (conservative estimates)
+        context_limits = {
+            # OpenAI models
+            'gpt-3.5-turbo': 16385,
+            'gpt-3.5-turbo-16k': 16385,
+            'gpt-4': 8192,
+            'gpt-4-turbo': 128000,
+            'gpt-4o': 128000,
+            'gpt-4o-mini': 128000,
+            'gpt-5': 128000,
+            'gpt-5.2-chat-latest': 16385,  # Based on error message
+            # Claude models
+            'claude-3-opus': 200000,
+            'claude-3-sonnet': 200000,
+            'claude-3-haiku': 200000,
+            'claude-3-5-sonnet': 200000,
+            # Gemini models
+            'gemini-pro': 32768,
+            'gemini-1.5-pro': 2097152,
+            'gemini-1.5-flash': 1048576,
+        }
+        
+        # Check for exact match
+        if model_name in context_limits:
+            return context_limits[model_name]
+        
+        # Check for partial matches (e.g., "gpt-4-turbo-preview" matches "gpt-4-turbo")
+        for model_key, limit in context_limits.items():
+            if model_key in model_name.lower() or model_name.lower() in model_key:
+                return limit
+        
+        # Default to conservative limit for unknown models
+        logger.warning(f"⚠️ DELEGATE: Unknown model '{model_name}', using default context limit of 8192 tokens")
+        return 8192
+    
+    def _estimate_messages_tokens(self, messages: List[Dict[str, str]]) -> int:
+        """
+        Estimate total token count for a list of messages
+        
+        Args:
+            messages: List of message dictionaries with 'role' and 'content'
+            
+        Returns:
+            Estimated token count
+        """
+        total_tokens = 0
+        for msg in messages:
+            content = msg.get('content', '')
+            # Rough estimation: ~4 characters per token, plus overhead for message structure
+            # More accurate: count words and multiply by 1.33 (average tokens per word)
+            words = content.split()
+            tokens = int(len(words) * 1.33) + 4  # +4 for message overhead (role, etc.)
+            total_tokens += tokens
+        return total_tokens
+    
+    def _truncate_messages_to_fit(self, messages: List[Dict[str, str]], max_tokens: int, system_message: str) -> List[Dict[str, str]]:
+        """
+        Truncate messages to fit within token limit, preserving system message and most recent messages
+        
+        Args:
+            messages: List of message dictionaries
+            max_tokens: Maximum allowed tokens
+            system_message: System message to preserve
+            
+        Returns:
+            Truncated list of messages
+        """
+        if not messages:
+            return messages
+        
+        # Always preserve system message
+        system_msg = None
+        other_messages = []
+        for msg in messages:
+            if msg.get('role') == 'system':
+                system_msg = msg
+            else:
+                other_messages.append(msg)
+        
+        # Estimate system message tokens
+        system_tokens = self._estimate_messages_tokens([system_msg]) if system_msg is not None else 0
+        
+        # Reserve tokens for system message + buffer (20% buffer for safety)
+        available_tokens = int((max_tokens - system_tokens) * 0.8)
+        
+        # Keep most recent messages that fit
+        truncated_messages = []
+        if system_msg:
+            truncated_messages.append(system_msg)
+        
+        # Add messages from the end (most recent) until we hit the limit
+        current_tokens = 0
+        for msg in reversed(other_messages):
+            msg_tokens = self._estimate_messages_tokens([msg])
+            if current_tokens + msg_tokens <= available_tokens:
+                truncated_messages.insert(1 if system_msg else 0, msg)  # Insert after system message
+                current_tokens += msg_tokens
+            else:
+                # If we can't fit the full message, truncate the content of the oldest non-system message
+                if truncated_messages and truncated_messages[-1].get('role') != 'system':
+                    # Truncate the last message's content
+                    last_msg = truncated_messages[-1]
+                    content = last_msg.get('content', '')
+                    # Estimate how much we can keep
+                    remaining_tokens = available_tokens - current_tokens
+                    if remaining_tokens > 50:  # Only truncate if we have meaningful space
+                        # Rough truncation: ~4 chars per token
+                        max_chars = remaining_tokens * 3  # Conservative estimate
+                        if len(content) > max_chars:
+                            truncated_content = content[:max_chars].rsplit(' ', 1)[0] + "... [truncated]"
+                            last_msg['content'] = truncated_content
+                            logger.warning(f"⚠️ DELEGATE: Truncated message content to fit context limit")
+                break
+        
+        # If we still have space and there are more messages, add a summary note
+        if len(truncated_messages) < len(messages):
+            summary_note = {
+                'role': 'system',
+                'content': f"[Note: {len(messages) - len(truncated_messages)} earlier messages were truncated to fit context limit]"
+            }
+            # Insert after system message if present, otherwise at start
+            if system_msg:
+                truncated_messages.insert(1, summary_note)
+            else:
+                truncated_messages.insert(0, summary_note)
+        
+        return truncated_messages
+    
     def check_termination_strategy(self, delegate_status: Dict[str, Dict], strategy: str) -> bool:
         """
         Check if termination strategy conditions are met
