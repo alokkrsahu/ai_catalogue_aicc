@@ -26,6 +26,7 @@
   // Processing state
   let processing = false;
   let processingStatus: any = null;
+  let statusPollingInterval: ReturnType<typeof setInterval> | null = null;
   
   // Deployment state for Activity Tracker
   let deployment: any = null;
@@ -83,6 +84,15 @@
     loadProject();
     // Don't force refresh on initial load - use cache if available
     loadLLMModels(false);
+    
+    // Return cleanup function for onDestroy behavior
+    return () => {
+      if (statusPollingInterval) {
+        console.log('⏹️ CLEANUP: Stopping status polling on component destroy');
+        clearInterval(statusPollingInterval);
+        statusPollingInterval = null;
+      }
+    };
   });
   
   async function loadLLMModels(forceRefresh = false) {
@@ -266,9 +276,63 @@
       console.log(`📊 UNIVERSAL: Loading processing status for project ${projectId}`);
       processingStatus = await cleanUniversalApi.getProcessingStatus(projectId);
       
-      console.log('✅ UNIVERSAL: Processing status loaded');
+      console.log('✅ UNIVERSAL: Processing status loaded', processingStatus?.vector_status);
+      
+      // Auto-start polling if processing is already in progress (e.g., page refresh during processing)
+      const isProcessing = processingStatus?.vector_status?.is_processing;
+      if (isProcessing && !statusPollingInterval) {
+        console.log('🔄 UNIVERSAL: Processing already in progress, starting status polling');
+        startStatusPolling();
+      }
     } catch (error) {
       console.error('❌ UNIVERSAL: Failed to load processing status:', error);
+    }
+  }
+  
+  // Polling helpers for background processing
+  let pollingAttempts = 0;
+  const MAX_POLLING_ATTEMPTS = 200; // ~10 minutes max polling
+  
+  function startStatusPolling() {
+    if (statusPollingInterval) return; // Already polling
+    pollingAttempts = 0;
+    console.log('🔄 POLLING: Starting status polling every 3 seconds');
+    statusPollingInterval = setInterval(async () => {
+      pollingAttempts++;
+      await loadProcessingStatus();
+      const status = processingStatus?.vector_status?.processing_status || processingStatus?.vector_status?.collection_status;
+      const isProcessing = processingStatus?.vector_status?.is_processing;
+      const vectorCount = processingStatus?.vector_status?.vector_count || 0;
+      
+      console.log(`🔄 POLLING: Attempt ${pollingAttempts} - status=${status}, isProcessing=${isProcessing}, vectors=${vectorCount}`);
+      
+      // Continue polling if:
+      // 1. isProcessing flag is true, OR
+      // 2. Status indicates processing/pending/not_created (collection being built), OR
+      // 3. We just started (first few attempts) to allow backend time to update status
+      const shouldContinuePolling = isProcessing || 
+        ['processing', 'pending', 'not_created'].includes(status) ||
+        pollingAttempts <= 3;
+      
+      // Stop polling when we have a definitive completed/failed status AND not processing
+      if (!shouldContinuePolling || pollingAttempts >= MAX_POLLING_ATTEMPTS) {
+        stopStatusPolling();
+        if (status === 'completed') {
+          toasts.success('Document processing completed!');
+        } else if (status === 'failed' || status === 'error') {
+          toasts.error('Document processing failed. Check logs for details.');
+        } else if (pollingAttempts >= MAX_POLLING_ATTEMPTS) {
+          toasts.info('Processing is taking longer than expected. Check status manually.');
+        }
+      }
+    }, 3000);
+  }
+  
+  function stopStatusPolling() {
+    if (statusPollingInterval) {
+      console.log('⏹️ POLLING: Stopping status polling');
+      clearInterval(statusPollingInterval);
+      statusPollingInterval = null;
     }
   }
   
@@ -453,15 +517,28 @@
         enable_summary: llmConfig.enableSummary
       });
       
-      console.log('✅ UNIVERSAL: Document processing started');
-      toasts.success('Document processing started successfully');
+      console.log('✅ UNIVERSAL: Document processing started', result);
       
-      // Reload status
+      // Handle 409 (already running) gracefully
+      if (result.status === 'already_running') {
+        toasts.info('Processing is already running for this project');
+      } else {
+        toasts.success('Document processing started in background');
+      }
+      
+      // Reload status and start polling for progress
       await loadProcessingStatus();
+      startStatusPolling();
       
-    } catch (error) {
+    } catch (error: any) {
       console.error('❌ UNIVERSAL: Document processing failed:', error);
-      toasts.error(`Processing failed: ${error.message}`);
+      // 409 returned as error from fetch; show friendly message
+      if (error.message?.includes('409') || error.message?.toLowerCase().includes('already')) {
+        toasts.info('Processing is already running for this project');
+        startStatusPolling();
+      } else {
+        toasts.error(`Processing failed: ${error.message}`);
+      }
     } finally {
       processing = false;
     }

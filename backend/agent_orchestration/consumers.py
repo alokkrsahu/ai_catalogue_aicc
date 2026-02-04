@@ -184,15 +184,13 @@ class AgentOrchestrationConsumer(AsyncWebsocketConsumer):
     
     @database_sync_to_async
     def check_project_access(self):
-        """Check if user has access to the project"""
+        """Check if user has access to the project using proper permission system"""
         try:
             from users.models import IntelliDocProject
             
-            project = IntelliDocProject.objects.get(
-                project_id=self.project_id,
-                created_by=self.user
-            )
-            return True
+            project = IntelliDocProject.objects.get(project_id=self.project_id)
+            # Use proper permission system that handles admin, shared projects, and group permissions
+            return project.has_user_access(self.user)
             
         except IntelliDocProject.DoesNotExist:
             return False

@@ -306,9 +306,21 @@ class IntelliDocProjectViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-        """Return projects for the authenticated user"""
+        """Return projects accessible to current user based on permissions"""
         from users.models import IntelliDocProject
-        return IntelliDocProject.objects.filter(created_by=self.request.user).order_by('-created_at')
+        from django.db.models import Q
+        user = self.request.user
+        
+        # Superusers and admin users can see all projects
+        if user.is_superuser or user.is_admin:
+            return IntelliDocProject.objects.all().order_by('-created_at')
+        
+        # Regular users see projects they created + projects they have permission to access
+        return IntelliDocProject.objects.filter(
+            Q(created_by=user) | 
+            Q(user_permissions__user=user) | 
+            Q(group_permissions__group__in=user.groups.all())
+        ).distinct().order_by('-created_at')
     
     def create(self, request, *args, **kwargs):
         """Create project with complete template configuration cloning"""

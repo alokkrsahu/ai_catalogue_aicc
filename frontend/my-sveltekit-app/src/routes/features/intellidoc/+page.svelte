@@ -179,13 +179,15 @@
     </div>
     
     <div class="header-actions">
-      <button 
-        class="create-button secondary"
-        on:click={() => goto('/features/intellidoc/manage-templates')}
-      >
-        <i class="fas fa-cogs"></i>
-        Manage Templates
-      </button>
+      {#if $isAdmin}
+        <button 
+          class="create-button secondary"
+          on:click={() => goto('/features/intellidoc/manage-templates')}
+        >
+          <i class="fas fa-cogs"></i>
+          Manage Templates
+        </button>
+      {/if}
       {#if $isAdmin}
         <button 
           class="create-button"

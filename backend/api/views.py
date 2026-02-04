@@ -390,8 +390,20 @@ class IntelliDocProjectViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-        """Return projects for the current user"""
-        return IntelliDocProject.objects.filter(created_by=self.request.user)
+        """Return projects accessible to current user based on permissions"""
+        from django.db.models import Q
+        user = self.request.user
+        
+        # Superusers and admin users can see all projects
+        if user.is_superuser or user.is_admin:
+            return IntelliDocProject.objects.all()
+        
+        # Regular users see projects they created + projects they have permission to access
+        return IntelliDocProject.objects.filter(
+            Q(created_by=user) | 
+            Q(user_permissions__user=user) | 
+            Q(group_permissions__group__in=user.groups.all())
+        ).distinct()
     
     def get_serializer_class(self):
         """Return appropriate serializer based on action"""
@@ -643,16 +655,16 @@ def process_project_documents(request, project_id):
         # Get the project using either integer ID or UUID
         try:
             # First try as integer ID (pk)
-            project = IntelliDocProject.objects.get(
-                id=int(project_id),
-                created_by=request.user
-            )
+            project = IntelliDocProject.objects.get(id=int(project_id))
         except (ValueError, IntelliDocProject.DoesNotExist):
             # If that fails, try as UUID
-            project = IntelliDocProject.objects.get(
-                project_id=project_id,
-                created_by=request.user
-            )
+            project = IntelliDocProject.objects.get(project_id=project_id)
+        
+        # Verify user has access using proper permission system
+        if not project.has_user_access(request.user):
+            return Response({
+                "detail": "You do not have access to this project"
+            }, status=status.HTTP_403_FORBIDDEN)
         
         # Get or create vector collection record
         collection, created = ProjectVectorCollection.objects.get_or_create(
@@ -745,16 +757,16 @@ def get_project_vector_status(request, project_id):
         # Get the project using either integer ID or UUID
         try:
             # First try as integer ID (pk)
-            project = IntelliDocProject.objects.get(
-                id=int(project_id),
-                created_by=request.user
-            )
+            project = IntelliDocProject.objects.get(id=int(project_id))
         except (ValueError, IntelliDocProject.DoesNotExist):
             # If that fails, try as UUID
-            project = IntelliDocProject.objects.get(
-                project_id=project_id,
-                created_by=request.user
-            )
+            project = IntelliDocProject.objects.get(project_id=project_id)
+        
+        # Verify user has access using proper permission system
+        if not project.has_user_access(request.user):
+            return Response({
+                "detail": "You do not have access to this project"
+            }, status=status.HTTP_403_FORBIDDEN)
         
         try:
             collection = project.vector_collection
@@ -815,16 +827,16 @@ def search_project_documents(request, project_id):
         # Get the project using either integer ID or UUID
         try:
             # First try as integer ID (pk)
-            project = IntelliDocProject.objects.get(
-                id=int(project_id),
-                created_by=request.user
-            )
+            project = IntelliDocProject.objects.get(id=int(project_id))
         except (ValueError, IntelliDocProject.DoesNotExist):
             # If that fails, try as UUID
-            project = IntelliDocProject.objects.get(
-                project_id=project_id,
-                created_by=request.user
-            )
+            project = IntelliDocProject.objects.get(project_id=project_id)
+        
+        # Verify user has access using proper permission system
+        if not project.has_user_access(request.user):
+            return Response({
+                "detail": "You do not have access to this project"
+            }, status=status.HTTP_403_FORBIDDEN)
         
         # Check if project has been processed
         try:

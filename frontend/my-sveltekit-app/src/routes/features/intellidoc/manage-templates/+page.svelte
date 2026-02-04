@@ -3,7 +3,7 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { toasts } from '$lib/stores/toast';
-  import authStore from '$lib/stores/auth';
+  import authStore, { isAdmin } from '$lib/stores/auth';
   import { get } from 'svelte/store';
   import { templateManagement, type Template, type TemplateDuplicationRequest } from '$lib/services/templateManagement';
   
@@ -30,6 +30,13 @@
   $: currentUser = get(authStore)?.user;
   
   onMount(() => {
+    // Only allow admin users to access this page
+    if (!get(isAdmin)) {
+      toasts.error('Access denied. Admin privileges required.');
+      goto('/features/intellidoc');
+      return;
+    }
+    
     fetchTemplates();
     if (currentUser) {
       duplicationForm.author = `${currentUser.first_name} ${currentUser.last_name}`.trim() || currentUser.email;

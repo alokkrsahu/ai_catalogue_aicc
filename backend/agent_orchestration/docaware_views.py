@@ -193,7 +193,7 @@ class DocAwareConfigViewSet(viewsets.ViewSet):
             project = get_object_or_404(IntelliDocProject, project_id=project_id)
             print(f"🔍 DEBUG: Found project: {project.name} (owner: {project.created_by})")
             
-            if project.created_by != request.user:
+            if not project.has_user_access(request.user):
                 print(f"🔍 DEBUG ERROR: Access denied - project owner: {project.created_by}, request user: {request.user}")
                 return Response(
                     {'error': 'You do not have access to this project'},
@@ -294,7 +294,7 @@ class DocAwareConfigViewSet(viewsets.ViewSet):
             
             # Verify project access
             project = get_object_or_404(IntelliDocProject, project_id=project_id)
-            if project.created_by != request.user:
+            if not project.has_user_access(request.user):
                 return Response(
                     {'error': 'You do not have access to this project'},
                     status=status.HTTP_403_FORBIDDEN

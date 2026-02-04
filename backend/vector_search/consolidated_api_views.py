@@ -8,7 +8,7 @@ from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from users.models import IntelliDocProject
-from .services_enhanced import EnhancedVectorSearchManager
+from .services_enhanced import EnhancedVectorSearchManager, PROCESSING_CONTROL
 from .unified_services_fixed import UnifiedVectorSearchManager, fix_existing_documents
 from .detailed_logger import DocumentProcessingTracker, doc_logger
 import logging
@@ -17,31 +17,52 @@ import time
 
 logger = logging.getLogger(__name__)
 
-# Global processing threads
+# Global processing threads (shared across views for this module)
 PROCESSING_THREADS = {}
 
-def run_processing_in_background(project_id: str, processing_mode: str = 'enhanced'):
-    """Run enhanced document processing in background thread"""
+def run_processing_in_background(project_id: str, processing_mode: str = 'enhanced', llm_config=None):
+    """Run enhanced document processing in background thread (project-isolated)."""
     try:
-        # Create detailed logging for this processing session
+        cfg = llm_config or {}
         doc_logger.info(f"🚀 CONSOLIDATED PROCESSING STARTED | Project: {project_id} | Mode: {processing_mode}")
+        logger.info(f"Starting consolidated processing for project {project_id} (background)")
         
-        logger.info(f"Starting consolidated processing for project {project_id}")
+        # Update PROCESSING_CONTROL so status endpoint shows is_processing=True
+        PROCESSING_CONTROL[project_id] = {
+            'status': 'PROCESSING',
+            'stop_requested': False,
+            'current_document_id': None,
+        }
         
-        # Use enhanced UnifiedVectorSearchManager
-        result = UnifiedVectorSearchManager.process_project_documents(project_id, processing_mode=processing_mode)
+        result = UnifiedVectorSearchManager.process_project_documents(
+            project_id,
+            processing_mode=processing_mode,
+            llm_provider=cfg.get('llm_provider'),
+            llm_model=cfg.get('llm_model'),
+            enable_summary=cfg.get('enable_summary', True),
+        )
+        
+        # Update PROCESSING_CONTROL on completion
+        PROCESSING_CONTROL[project_id] = {
+            'status': 'COMPLETED' if result.get('status') == 'completed' else 'FAILED',
+            'stop_requested': False,
+            'current_document_id': None,
+        }
         
         doc_logger.info(f"✅ CONSOLIDATED PROCESSING COMPLETED | Project: {project_id} | Result: {result.get('status', 'unknown')}")
-        logger.info(f"Consolidated processing completed for project {project_id}: {result.get('status', 'unknown')}")
+        logger.info(f"📦 PROJECT ISOLATION: Completed processing thread for project {project_id} (Total active: {len(PROCESSING_THREADS) - 1})")
         
-        # Clean up thread reference
         if project_id in PROCESSING_THREADS:
             del PROCESSING_THREADS[project_id]
-            
     except Exception as e:
         doc_logger.error(f"❌ CONSOLIDATED PROCESSING FAILED | Project: {project_id} | Error: {str(e)}")
         logger.error(f"Consolidated processing failed for project {project_id}: {e}")
-        # Clean up thread reference
+        # Update PROCESSING_CONTROL on failure
+        PROCESSING_CONTROL[project_id] = {
+            'status': 'FAILED',
+            'stop_requested': False,
+            'current_document_id': None,
+        }
         if project_id in PROCESSING_THREADS:
             del PROCESSING_THREADS[project_id]
 
@@ -61,6 +82,17 @@ def process_unified_consolidated(request, project_id, llm_config=None, processin
     try:
         # Verify project exists and user has access
         project = get_object_or_404(IntelliDocProject, project_id=project_id)
+        
+        # Duplicate-run guard: do not start if this project is already processing (multi-project isolation)
+        if project_id in PROCESSING_THREADS and PROCESSING_THREADS[project_id].is_alive():
+            logger.warning(f"⚠️ CONSOLIDATED: Processing already in progress for project {project_id}, rejecting duplicate request")
+            return Response({
+                'success': False,
+                'status': 'already_running',
+                'error': 'Processing already in progress',
+                'message': 'Processing is already running for this project. Wait for it to finish or check status.',
+                'project_id': str(project_id),
+            }, status=status.HTTP_409_CONFLICT)
         
         logger.info(f"🚀 CONSOLIDATED: Processing request for project {project.name} (ID: {project_id})")
         
@@ -111,19 +143,25 @@ def process_unified_consolidated(request, project_id, llm_config=None, processin
         
         logger.info(f"📋 CONSOLIDATED: LLM Config - Provider: {llm_config.get('llm_provider')}, Model: {llm_config.get('llm_model')}, Enable Summary: {llm_config.get('enable_summary')}")
         
-        # Use the enhanced UnifiedVectorSearchManager for processing
-        result = UnifiedVectorSearchManager.process_project_documents(
-            project_id=str(project.project_id),
-            processing_mode=processing_mode,
-            llm_provider=llm_config.get('llm_provider'),
-            llm_model=llm_config.get('llm_model'),
-            enable_summary=llm_config.get('enable_summary', True)
+        # Run processing in background thread so request returns immediately and multiple projects can run in parallel
+        processing_thread = threading.Thread(
+            target=run_processing_in_background,
+            args=(str(project.project_id), processing_mode),
+            kwargs={'llm_config': llm_config},
+            daemon=True,
         )
+        processing_thread.start()
+        PROCESSING_THREADS[project_id] = processing_thread
+        logger.info(f"📦 PROJECT ISOLATION: Started background processing for project {project_id} (Total active threads: {len(PROCESSING_THREADS)})")
         
-        # Enhanced result metadata
+        time.sleep(0.3)  # Brief delay so thread is registered before client may poll status
+        
+        # Return immediately so frontend can poll vector-status for progress
         enhanced_result = {
-            **result,
-            'project_id': project_id,
+            'success': True,
+            'status': 'started',
+            'message': 'Document processing started in background. Poll vector-status for progress.',
+            'project_id': str(project_id),
             'project_name': project.name,
             'template_type': project.template_type,
             'template_name': project.template_name,
@@ -135,18 +173,14 @@ def process_unified_consolidated(request, project_id, llm_config=None, processin
                 'enhanced_hierarchical_support': processing_mode == 'enhanced_hierarchical',
                 'content_preservation': True,
                 'category_filtering': processing_capabilities.get('category_filtered_search', False),
-                'advanced_search': processing_capabilities.get('multi_filter_search', False)
+                'advanced_search': processing_capabilities.get('multi_filter_search', False),
+                'background_processing': True,
             },
             'user_email': request.user.email if hasattr(request, 'user') and request.user else 'unknown',
-            'processed_at': timezone.now().isoformat(),
             'ready_documents': ready_documents.count(),
-            'total_documents': project.documents.count()
+            'total_documents': project.documents.count(),
         }
-        
-        # Return response with appropriate status
-        status_code = status.HTTP_200_OK if result.get('status') == 'completed' else status.HTTP_500_INTERNAL_SERVER_ERROR
-        
-        return Response(enhanced_result, status=status_code)
+        return Response(enhanced_result, status=status.HTTP_200_OK)
         
     except Exception as e:
         logger.error(f"❌ CONSOLIDATED: Processing failed for project {project_id}: {e}")
@@ -372,12 +406,16 @@ def get_vector_status_consolidated(request, project_id):
             except ProjectVectorCollection.DoesNotExist:
                 logger.info(f"📊 CONSOLIDATED FALLBACK: No collection found for project {project_id}")
                 total_docs = project.documents.count()
+                # CRITICAL: Check for active background thread even if no collection exists yet
+                thread_active = project_id in PROCESSING_THREADS and PROCESSING_THREADS[project_id].is_alive()
+                if thread_active:
+                    logger.info(f"📊 CONSOLIDATED FALLBACK: Background processing thread IS active for project {project_id}")
                 status_data = {
-                    'collection_status': 'not_created',
+                    'collection_status': 'processing' if thread_active else 'not_created',
                     'processing_progress': {'completed': 0, 'total': total_docs, 'percentage': 0},
                     'total_documents': total_docs,
                     'ready_documents': project.documents.filter(upload_status='ready').count(),
-                    'is_processing': False,
+                    'is_processing': thread_active,
                     'last_processed_at': None
                 }
             except Exception as db_error:

@@ -242,8 +242,13 @@ class EnhancedDocAwareAgentService:
             return "IP"  # Based on error logs, collections use IP
             
         except Exception as e:
-            logger.error(f"❌ METRIC DETECTION: Failed to detect metric for {collection_name}: {e}")
-            return "IP"  # Safe default based on error analysis
+            # Collection may not exist yet (documents not processed) - treat as expected, not error
+            err_msg = str(e).lower()
+            if "not exist" in err_msg or "does not exist" in err_msg or "schemanotready" in err_msg:
+                logger.debug(f"METRIC DETECTION: Collection {collection_name} not found (may not be created yet), defaulting to IP")
+            else:
+                logger.error(f"❌ METRIC DETECTION: Failed to detect metric for {collection_name}: {e}")
+            return "IP"  # Safe default
     
     def _build_content_filter_expression(self, content_filter: str) -> str:
         """
@@ -949,6 +954,15 @@ class EnhancedDocAwareAgentService:
             List of folder entries (and optionally file entries)
         """
         try:
+            # Return empty list early if collection does not exist (documents not processed yet)
+            try:
+                existing = self.milvus_service.list_collections()
+            except Exception:
+                existing = []
+            if self.collection_name not in existing:
+                logger.info(f"📚 HIERARCHICAL PATHS: Collection '{self.collection_name}' not created yet (run Start Processing). Returning empty list.")
+                return []
+
             logger.info(f"📚 HIERARCHICAL PATHS: Getting paths (include_files={include_files}) for {self.collection_name}")
 
             # Create search request to get all documents

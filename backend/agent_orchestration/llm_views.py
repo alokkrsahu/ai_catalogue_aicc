@@ -327,16 +327,18 @@ def get_agent_llm_config(request, project_id, agent_id):
     try:
         logger.info(f"🎯 LLM API: Fetching agent LLM config (project: {project_id}, agent: {agent_id})")
         
-        # Verify project ownership
+        # Verify project access using proper permission system
         try:
-            project = IntelliDocProject.objects.get(
-                project_id=project_id,
-                created_by=request.user
-            )
+            project = IntelliDocProject.objects.get(project_id=project_id)
         except IntelliDocProject.DoesNotExist:
             return Response({
-                'error': 'Project not found or access denied'
+                'error': 'Project not found'
             }, status=status.HTTP_404_NOT_FOUND)
+        
+        if not project.has_user_access(request.user):
+            return Response({
+                'error': 'You do not have access to this project'
+            }, status=status.HTTP_403_FORBIDDEN)
         
         # Return default configuration based on available providers
         available_providers = []
@@ -400,16 +402,18 @@ def update_agent_llm_config(request, project_id, agent_id):
     try:
         logger.info(f"💾 LLM API: Updating agent LLM config (project: {project_id}, agent: {agent_id})")
         
-        # Verify project ownership
+        # Verify project access using proper permission system
         try:
-            project = IntelliDocProject.objects.get(
-                project_id=project_id,
-                created_by=request.user
-            )
+            project = IntelliDocProject.objects.get(project_id=project_id)
         except IntelliDocProject.DoesNotExist:
             return Response({
-                'error': 'Project not found or access denied'
+                'error': 'Project not found'
             }, status=status.HTTP_404_NOT_FOUND)
+        
+        if not project.has_user_access(request.user):
+            return Response({
+                'error': 'You do not have access to this project'
+            }, status=status.HTTP_403_FORBIDDEN)
         
         # Extract and validate configuration
         config_data = {

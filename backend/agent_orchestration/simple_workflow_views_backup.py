@@ -25,13 +25,18 @@ class SimpleAgentWorkflowViewSet(viewsets.ViewSet):
         try:
             logger.info(f"🔍 SIMPLE: Listing workflows for project {project_id}")
             
-            # Get project
+            # Get project and verify access
             project = get_object_or_404(IntelliDocProject, project_id=project_id)
             
-            # Get workflows for this project and user
+            # Check user has access using proper permission system
+            if not project.has_user_access(request.user):
+                return Response({
+                    'error': 'You do not have access to this project'
+                }, status=status.HTTP_403_FORBIDDEN)
+            
+            # Get all workflows for this project (project access already verified)
             workflows = AgentWorkflow.objects.filter(
-                project=project, 
-                created_by=request.user
+                project=project
             ).order_by('-updated_at')
             
             # Build simple response data
@@ -76,10 +81,10 @@ class SimpleAgentWorkflowViewSet(viewsets.ViewSet):
             # Get project
             project = get_object_or_404(IntelliDocProject, project_id=project_id)
             
-            # Ensure user has access
-            if project.created_by != request.user:
+            # Ensure user has access using proper permission system
+            if not project.has_user_access(request.user):
                 return Response({
-                    'error': 'Permission denied'
+                    'error': 'You do not have access to this project'
                 }, status=status.HTTP_403_FORBIDDEN)
             
             # Get data from request
@@ -122,13 +127,17 @@ class SimpleAgentWorkflowViewSet(viewsets.ViewSet):
         try:
             logger.info(f"📄 SIMPLE: Retrieving workflow {workflow_id}")
             
-            # Get project and workflow
+            # Get project and verify access
             project = get_object_or_404(IntelliDocProject, project_id=project_id)
+            if not project.has_user_access(request.user):
+                return Response({
+                    'error': 'You do not have access to this project'
+                }, status=status.HTTP_403_FORBIDDEN)
+            
             workflow = get_object_or_404(
                 AgentWorkflow, 
                 workflow_id=workflow_id, 
-                project=project,
-                created_by=request.user
+                project=project
             )
             
             return Response({
@@ -153,13 +162,17 @@ class SimpleAgentWorkflowViewSet(viewsets.ViewSet):
         try:
             logger.info(f"📝 SIMPLE: Updating workflow {workflow_id}")
             
-            # Get project and workflow
+            # Get project and verify access
             project = get_object_or_404(IntelliDocProject, project_id=project_id)
+            if not project.has_user_access(request.user):
+                return Response({
+                    'error': 'You do not have access to this project'
+                }, status=status.HTTP_403_FORBIDDEN)
+            
             workflow = get_object_or_404(
                 AgentWorkflow, 
                 workflow_id=workflow_id, 
-                project=project,
-                created_by=request.user
+                project=project
             )
             
             # Update fields
@@ -204,13 +217,17 @@ class SimpleAgentWorkflowViewSet(viewsets.ViewSet):
         try:
             logger.info(f"🗝 SIMPLE: Deleting workflow {workflow_id}")
             
-            # Get project and workflow
+            # Get project and verify access
             project = get_object_or_404(IntelliDocProject, project_id=project_id)
+            if not project.has_user_access(request.user):
+                return Response({
+                    'error': 'You do not have access to this project'
+                }, status=status.HTTP_403_FORBIDDEN)
+            
             workflow = get_object_or_404(
                 AgentWorkflow, 
                 workflow_id=workflow_id, 
-                project=project,
-                created_by=request.user
+                project=project
             )
             
             workflow_name = workflow.name
@@ -237,13 +254,17 @@ class SimpleAgentWorkflowViewSet(viewsets.ViewSet):
         try:
             logger.info(f"🚀 SIMPLE: Executing workflow {workflow_id} for project {project_id}")
             
-            # Get project and workflow
+            # Get project and verify access
             project = get_object_or_404(IntelliDocProject, project_id=project_id)
+            if not project.has_user_access(request.user):
+                return Response({
+                    'error': 'You do not have access to this project'
+                }, status=status.HTTP_403_FORBIDDEN)
+            
             workflow = get_object_or_404(
                 AgentWorkflow, 
                 workflow_id=workflow_id, 
-                project=project,
-                created_by=request.user
+                project=project
             )
             
             # Validate workflow has nodes
@@ -309,13 +330,17 @@ class SimpleAgentWorkflowViewSet(viewsets.ViewSet):
         try:
             logger.info(f"📊 SIMPLE: Getting history for workflow {workflow_id}")
             
-            # Get project and workflow
+            # Get project and verify access
             project = get_object_or_404(IntelliDocProject, project_id=project_id)
+            if not project.has_user_access(request.user):
+                return Response({
+                    'error': 'You do not have access to this project'
+                }, status=status.HTTP_403_FORBIDDEN)
+            
             workflow = get_object_or_404(
                 AgentWorkflow, 
                 workflow_id=workflow_id, 
-                project=project,
-                created_by=request.user
+                project=project
             )
             
             # Get execution summary using conversation orchestrator
@@ -339,13 +364,17 @@ class SimpleAgentWorkflowViewSet(viewsets.ViewSet):
         try:
             logger.info(f"✅ SIMPLE: Validating workflow {workflow_id}")
             
-            # Get project and workflow
+            # Get project and verify access
             project = get_object_or_404(IntelliDocProject, project_id=project_id)
+            if not project.has_user_access(request.user):
+                return Response({
+                    'error': 'You do not have access to this project'
+                }, status=status.HTTP_403_FORBIDDEN)
+            
             workflow = get_object_or_404(
                 AgentWorkflow, 
                 workflow_id=workflow_id, 
-                project=project,
-                created_by=request.user
+                project=project
             )
             
             errors = []
@@ -419,13 +448,17 @@ class SimpleAgentWorkflowViewSet(viewsets.ViewSet):
             
             logger.info(f"💬 SIMPLE: Getting conversation for run {run_id}")
             
-            # Get project and workflow
+            # Get project and verify access
             project = get_object_or_404(IntelliDocProject, project_id=project_id)
+            if not project.has_user_access(request.user):
+                return Response({
+                    'error': 'You do not have access to this project'
+                }, status=status.HTTP_403_FORBIDDEN)
+            
             workflow = get_object_or_404(
                 AgentWorkflow, 
                 workflow_id=workflow_id, 
-                project=project,
-                created_by=request.user
+                project=project
             )
             
             # Get the specific run
