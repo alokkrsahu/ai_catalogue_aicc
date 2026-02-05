@@ -1,7 +1,8 @@
 <!-- NodePropertiesPanel.svelte - Enhanced Agent Node Configuration Panel with API Key Based Models -->
 <script lang="ts">
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { createEventDispatcher, onMount, onDestroy } from 'svelte';
   import { toasts } from '$lib/stores/toast';
+  import EnhancedTextArea from './EnhancedTextArea.svelte';
   import { dynamicModelsService, type ModelInfo, type ProviderStatus } from '$lib/services/dynamicModelsService';
   import { docAwareService, type SearchMethod, type SearchMethodParameter } from '$lib/services/docAwareService';
   import type { BulkModelData } from '$lib/stores/llmModelsStore';
@@ -27,6 +28,7 @@
   export let hierarchicalPaths: any[] = []; // Hierarchical paths for Content Filter
   export let hierarchicalPathsLoaded: boolean = false; // Whether hierarchical paths are loaded
   export let documentsInfo: any = null; // Document and processing status info
+  export let isMaximized: boolean = false; // Whether the panel is maximized as modal
   
   const dispatch = createEventDispatcher();
   
@@ -501,6 +503,8 @@
   
   // Use controlled updates instead of reactive statements
   let isUpdatingFromNode = false; // Flag to prevent update loops
+  let isUserEditing = false; // Flag to prevent reactive sync while user is typing
+  let userEditingTimer: ReturnType<typeof setTimeout> | null = null;
   
   function updateLocalStateFromNode() {
     if (!node || !node.id || isUpdatingFromNode) return;
@@ -551,12 +555,14 @@
         nodeDataName: node.data?.name,
         nodeDataDesc: (node.data?.description || '').substring(0, 50)
       });
-    } else if (hasNameChanged || hasDescChanged || (hasConfigChanged && !document.activeElement?.closest('.node-properties-panel'))) {
+    } else if (!isUserEditing && (hasNameChanged || hasDescChanged || (hasConfigChanged && !document.activeElement?.closest('.node-properties-panel')))) {
       // Update if name/description changed OR if config changed and user is not actively editing
+      // Skip entirely if user is actively typing to prevent overriding their input
       console.log('🔄 NODE SYNC: Node data changed, updating local state', {
         hasNameChanged,
         hasDescChanged,
         hasConfigChanged,
+        isUserEditing,
         oldName: nodeName,
         newName: currentName,
         oldDesc: nodeDescription.substring(0, 50),
@@ -759,6 +765,20 @@
       }, 500);
     }
   });
+
+  // Cleanup on component destroy
+  onDestroy(() => {
+    // Clear user editing timer to prevent memory leaks
+    if (userEditingTimer) {
+      clearTimeout(userEditingTimer);
+      userEditingTimer = null;
+    }
+    // Clear description debounce timer
+    if (descriptionDebounceTimer) {
+      clearTimeout(descriptionDebounceTimer);
+      descriptionDebounceTimer = null;
+    }
+  });
   
   // Call update function when node changes
   $: if (node && node.id) {
@@ -832,18 +852,20 @@
       mcpAvailableTools = [];
       
       console.log('🔄 NODE PROPERTIES: Node changed, cleared all state and reset name/description/system_message/models');
-    } else if (hasNameChanged || hasDescChanged) {
+    } else if ((hasNameChanged || hasDescChanged) && !isUserEditing) {
       // Same node but name/description changed externally (e.g., from another component or after save)
+      // Skip if user is actively editing to prevent overriding their input
       console.log('🔄 NODE PROPERTIES: Same node but name/description changed externally', {
         hasNameChanged,
         hasDescChanged,
         oldName: nodeName,
         newName: currentName,
         oldDesc: nodeDescription.substring(0, 50),
-        newDesc: currentDesc.substring(0, 50)
+        newDesc: currentDesc.substring(0, 50),
+        isUserEditing
       });
       
-      // Update local state to match node data
+      // Update local state to match node data (only if not actively editing)
       if (hasNameChanged) {
         nodeName = currentName;
       }
@@ -864,12 +886,13 @@
   
   // Deep clone to prevent shared references
   function updateNodeData() {
-    const trimmedName = nodeName.trim();
-    const trimmedDesc = nodeDescription.trim();
+    // Preserve spaces in names and descriptions - don't trim during editing
+    const saveName = nodeName;
+    const saveDesc = nodeDescription;
     
     console.log('🔥 UPDATE NODE DATA: Starting update for node', node.id.slice(-4));
-    console.log('🔥 UPDATE NODE DATA: Name change:', (node.data.name || 'undefined') + ' → ' + trimmedName);
-    console.log('🔥 UPDATE NODE DATA: Description change:', (node.data.description || 'undefined').substring(0, 50) + ' → ' + trimmedDesc.substring(0, 50));
+    console.log('🔥 UPDATE NODE DATA: Name change:', (node.data.name || 'undefined') + ' → ' + saveName);
+    console.log('🔥 UPDATE NODE DATA: Description change:', (node.data.description || 'undefined').substring(0, 50) + ' → ' + saveDesc.substring(0, 50));
     console.log('🔥 NODE CONFIG CHECK:', JSON.stringify(nodeConfig));
     console.log('📚 DOC AWARE STATUS:', nodeConfig.doc_aware);
     
@@ -884,10 +907,10 @@
     const updatedData = {
       ...baseData,
       ...configData,
-      // These MUST come last to override any conflicts
-      name: trimmedName,
-      label: trimmedName,
-      description: trimmedDesc
+      // These MUST come last to override any conflicts - preserve spaces
+      name: saveName,
+      label: saveName,
+      description: saveDesc
     };
     
     const updatedNode = {
@@ -900,9 +923,9 @@
     console.log('🔥 UPDATE NODE DATA DEBUG:', {
       nodeId: node.id.slice(-4),
       originalName: node.data.name || node.data.label,
-      newName: trimmedName,
+      newName: saveName,
       originalDesc: (node.data.description || '').substring(0, 50),
-      newDesc: trimmedDesc.substring(0, 50),
+      newDesc: saveDesc.substring(0, 50),
       updatedData: JSON.stringify(updatedNode.data),
       docAwareValue: updatedNode.data.doc_aware,
       dataMemoryCheck: {
@@ -927,23 +950,32 @@
       isUpdatingFromNode = false;
     }, 100);
     
-    console.log('✅ NODE PROPERTIES: Update dispatched for node', node.id.slice(-4), 'new name:', trimmedName, 'new desc:', trimmedDesc.substring(0, 50), 'doc_aware:', updatedNode.data.doc_aware);
+    console.log('✅ NODE PROPERTIES: Update dispatched for node', node.id.slice(-4), 'new name:', saveName, 'new desc:', saveDesc.substring(0, 50), 'doc_aware:', updatedNode.data.doc_aware);
   }
   
-  function handleNameChange(event) {
-    const newName = event?.target?.value || nodeName;
+  function handleNameChange(event: Event | null) {
+    const target = event?.target as HTMLInputElement | null;
+    const newName = target?.value ?? nodeName;
     const currentName = node.data.name || node.data.label || node.type;
     
-    console.log('📝 HANDLE NAME CHANGE: Called with newName=', newName, 'currentName=', currentName);
-    console.log('📝 BINDING CHECK: nodeName variable=', nodeName, 'input value=', newName);
+    console.log('📝 HANDLE NAME CHANGE: Called with newName=', JSON.stringify(newName), 'currentName=', JSON.stringify(currentName));
+    console.log('📝 BINDING CHECK: nodeName variable=', JSON.stringify(nodeName), 'input value=', JSON.stringify(newName));
+    
+    // Set user editing flag to prevent reactive sync from overriding user input
+    isUserEditing = true;
+    if (userEditingTimer) clearTimeout(userEditingTimer);
+    userEditingTimer = setTimeout(() => {
+      isUserEditing = false;
+    }, 500); // Reset after 500ms of no input
     
     // Always update nodeName to match input (bind:value should handle this, but ensure it)
     nodeName = newName;
     
-    if (newName.trim() !== currentName) {
+    // Compare raw values to allow spaces
+    if (newName !== currentName) {
       console.log('📝 NAME CHANGE DEBUG:', {
         from: currentName,
-        to: newName.trim(),
+        to: newName,
         nodeId: node.id.slice(-4),
         currentNodeData: node.data
       });
@@ -955,19 +987,28 @@
     }
   }
   
-  function handleDescriptionChange(event) {
-    const newDesc = event?.target?.value || nodeDescription;
+  function handleDescriptionChange(event: Event | null) {
+    const target = event?.target as HTMLTextAreaElement | null;
+    const newDesc = target?.value ?? nodeDescription;
     const currentDesc = node.data.description || '';
     
-    console.log('📝 HANDLE DESC CHANGE: Called with newDesc=', newDesc.substring(0, 50), 'currentDesc=', currentDesc.substring(0, 50));
+    console.log('📝 HANDLE DESC CHANGE: Called with newDesc=', JSON.stringify(newDesc.substring(0, 50)), 'currentDesc=', JSON.stringify(currentDesc.substring(0, 50)));
+    
+    // Set user editing flag to prevent reactive sync from overriding user input
+    isUserEditing = true;
+    if (userEditingTimer) clearTimeout(userEditingTimer);
+    userEditingTimer = setTimeout(() => {
+      isUserEditing = false;
+    }, 500); // Reset after 500ms of no input
     
     // Always update nodeDescription to match input (bind:value should handle this, but ensure it)
     nodeDescription = newDesc;
     
-    if (newDesc.trim() !== currentDesc) {
+    // Compare raw values to allow spaces
+    if (newDesc !== currentDesc) {
       console.log('📝 DESC CHANGE DEBUG:', {
         from: currentDesc.substring(0, 50),
-        to: newDesc.trim().substring(0, 50),
+        to: newDesc.substring(0, 50),
         nodeId: node.id.slice(-4),
         currentNodeData: node.data
       });
@@ -1197,6 +1238,10 @@
     dispatch('close');
   }
   
+  function toggleMaximize() {
+    dispatch('toggleMaximize');
+  }
+  
   function getNodeIcon(nodeType: string) {
     switch (nodeType) {
       case 'StartNode': return 'fa-play';
@@ -1246,13 +1291,24 @@
           <p class="text-sm text-gray-600">{node.type}</p>
         </div>
       </div>
-      <button
-        class="p-1 rounded hover:bg-gray-100 transition-colors"
-        on:click={closePanel}
-        title="Close Panel"
-      >
-        <i class="fas fa-times text-gray-500"></i>
-      </button>
+      <div class="flex items-center space-x-1">
+        <!-- Maximize/Restore Button -->
+        <button
+          class="p-1.5 rounded hover:bg-gray-100 transition-colors"
+          on:click={toggleMaximize}
+          title={isMaximized ? "Restore to sidebar" : "Maximize panel"}
+        >
+          <i class="fas {isMaximized ? 'fa-compress' : 'fa-expand'} text-gray-500"></i>
+        </button>
+        <!-- Close Button -->
+        <button
+          class="p-1.5 rounded hover:bg-gray-100 transition-colors"
+          on:click={closePanel}
+          title="Close Panel"
+        >
+          <i class="fas fa-times text-gray-500"></i>
+        </button>
+      </div>
     </div>
   </div>
   
@@ -1326,39 +1382,28 @@
             </button>
           </div>
         </div>
-        <textarea
+        <EnhancedTextArea
           bind:value={nodeDescription}
           on:input={(e) => {
-            nodeDescription = e.target.value;
-            handleDescriptionChange(e);
+            nodeDescription = e.detail.value;
+            handleDescriptionChange({ target: { value: e.detail.value } });
           }}
-          on:blur={(e) => {
-            nodeDescription = e.target.value;
-            handleDescriptionChange(e);
-          }}
-          rows="2"
-          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20 transition-all resize-none"
+          rows={4}
+          enableLineNumbers={false}
+          enableSyntaxHighlight={false}
           placeholder={node.type === 'DelegateAgent' 
             ? "Describe this delegate's capabilities and expertise (e.g., 'Financial analyst specializing in quarterly reports and budget analysis')..."
             : "Describe what this agent does (e.g., 'A research assistant that helps users find information in documents')..."}
-        ></textarea>
-        <p class="text-xs text-gray-500 mt-1">
-          {nodeDescription.length}/10,000 characters
-          {#if nodeDescription.length < 10 && nodeDescription.length > 0}
-            <span class="text-yellow-600"> (minimum 10 characters)</span>
-          {/if}
-          {#if node.type === 'DelegateAgent'}
-            {#if nodeDescription.length >= 100 && nodeDescription.length <= 300}
-              <span class="text-green-600 ml-2">
-                <i class="fas fa-check-circle"></i> Good length for capability matching
-              </span>
-            {:else if nodeDescription.length > 0 && nodeDescription.length < 100}
-              <span class="text-yellow-600 ml-2">
-                <i class="fas fa-exclamation-triangle"></i> Consider adding more detail (100-300 chars recommended)
-              </span>
-            {/if}
-          {/if}
-        </p>
+          showCharCount={true}
+          maxLength={10000}
+          helperText={node.type === 'DelegateAgent' && nodeDescription.length >= 100 && nodeDescription.length <= 300 
+            ? "Good length for capability matching" 
+            : node.type === 'DelegateAgent' && nodeDescription.length > 0 && nodeDescription.length < 100 
+            ? "Consider adding more detail (100-300 chars recommended)" 
+            : nodeDescription.length < 10 && nodeDescription.length > 0 
+            ? "Minimum 10 characters required" 
+            : ""}
+        />
         
         <!-- Generated Prompt Preview -->
         {#if showPromptPreview && generatedPromptPreview}
@@ -1410,21 +1455,18 @@
       </div>
     {:else}
       <div>
-        <label class="block text-sm font-medium text-gray-700 mb-2">Description</label>
-        <textarea
+        <EnhancedTextArea
+          label="Description"
           bind:value={nodeDescription}
           on:input={(e) => {
-            nodeDescription = e.target.value;
-            handleDescriptionChange(e);
+            nodeDescription = e.detail.value;
+            handleDescriptionChange({ target: { value: e.detail.value } });
           }}
-          on:blur={(e) => {
-            nodeDescription = e.target.value;
-            handleDescriptionChange(e);
-          }}
-          rows="2"
-          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20 transition-all resize-none"
+          rows={4}
+          enableLineNumbers={false}
+          enableSyntaxHighlight={false}
           placeholder="Describe what this agent does..."
-        ></textarea>
+        />
       </div>
     {/if}
     
@@ -1450,17 +1492,19 @@
             </button>
           {/if}
         </div>
-        <textarea
+        <EnhancedTextArea
           bind:value={nodeConfig.system_message}
-          on:input={updateNodeData}
-          rows="3"
-          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20 transition-all resize-none"
+          on:input={() => updateNodeData()}
+          rows={6}
+          enableLineNumbers={true}
+          enableSyntaxHighlight={true}
+          syntaxLanguage="markdown"
           placeholder={node.type === 'AssistantAgent' 
             ? "You are a helpful AI assistant specialized in..." 
             : node.type === 'GroupChatManager'
             ? "You are a Group Chat Manager responsible for coordinating multiple specialized agents..."
             : "You are a specialized delegate agent that works with the Group Chat Manager..."}
-        ></textarea>
+        />
         {#if node.type === 'GroupChatManager' && findConnectedDelegates().length > 0}
           <p class="text-xs text-gray-500 mt-1">
             <i class="fas fa-info-circle mr-1"></i>
@@ -1471,14 +1515,16 @@
       </div>
     {:else if node.type === 'StartNode'}
       <div>
-        <label class="block text-sm font-medium text-gray-700 mb-2">Initial Prompt</label>
-        <textarea
+        <EnhancedTextArea
+          label="Initial Prompt"
           bind:value={nodeConfig.prompt}
-          on:input={updateNodeData}
-          rows="3"
-          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20 transition-all resize-none"
+          on:input={() => updateNodeData()}
+          rows={6}
+          enableLineNumbers={true}
+          enableSyntaxHighlight={true}
+          syntaxLanguage="markdown"
           placeholder="Enter the initial prompt to start the workflow..."
-        ></textarea>
+        />
       </div>
     {/if}
     
@@ -1993,14 +2039,16 @@
         
         <!-- SYSTEM MESSAGE - Only visible when DocAware is enabled -->
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-2">System Message</label>
-          <textarea
+          <EnhancedTextArea
+            label="System Message"
             bind:value={nodeConfig.system_message}
-            on:input={updateNodeData}
-            rows="3"
-            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20 transition-all resize-none"
+            on:input={() => updateNodeData()}
+            rows={6}
+            enableLineNumbers={true}
+            enableSyntaxHighlight={true}
+            syntaxLanguage="markdown"
             placeholder="You are a helpful assistant that uses retrieved documents to answer user questions..."
-          ></textarea>
+          />
         </div>
         
         <!-- DOCAWARE CONFIGURATION - Show when DocAware is enabled for UserProxy -->

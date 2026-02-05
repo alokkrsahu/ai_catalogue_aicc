@@ -89,6 +89,7 @@
   let showProperties = false;
   let saving = false;
   let showInstructions = true; // State for dismissable instructions overlay
+  let isPanelMaximized = false; // Whether the properties panel is maximized as modal
   
   // Drag and drop state
   let draggedNodeType: string | null = null;
@@ -2296,68 +2297,123 @@
   
 
   
-  <!-- Node Properties Panel (Right Sidebar) -->
+  <!-- Node Properties Panel (Right Sidebar or Modal) -->
   {#if showProperties && selectedNode}
-    <div class="w-80 border-l border-gray-200 bg-white">
-      <NodePropertiesPanel
-        node={selectedNode}
-        {capabilities}
-        {projectId}
-        workflowData={{ nodes, edges, workflow }}
-        {bulkModelData}
-        {modelsLoaded}
-        {hierarchicalPaths}
-        {hierarchicalPathsLoaded}
-        documentsInfo={documentsInfo}
-        on:nodeUpdate={(e) => {
-          const updatedNode = e.detail;
-          const nodeIndex = nodes.findIndex(n => n.id === updatedNode.id);
+    {#if isPanelMaximized}
+      <!-- Maximized Modal View -->
+      <div 
+        class="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4"
+        on:click|self={() => isPanelMaximized = false}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Agent Properties Modal"
+      >
+        <div class="bg-white rounded-xl shadow-2xl w-[85vw] h-[90vh] overflow-hidden flex flex-col">
+          <NodePropertiesPanel
+            node={selectedNode}
+            {capabilities}
+            {projectId}
+            workflowData={{ nodes, edges, workflow }}
+            {bulkModelData}
+            {modelsLoaded}
+            {hierarchicalPaths}
+            {hierarchicalPathsLoaded}
+            documentsInfo={documentsInfo}
+            isMaximized={true}
+            on:nodeUpdate={(e) => {
+              const updatedNode = e.detail;
+              const nodeIndex = nodes.findIndex(n => n.id === updatedNode.id);
 
-          console.log('🔄 WORKFLOW: Node update received for', updatedNode.id.slice(-4));
+              console.log('🔄 WORKFLOW: Node update received for', updatedNode.id.slice(-4));
 
-          if (nodeIndex >= 0) {
-            // 🔥 CRITICAL FIX: Prevent shared references in nodes array
-            const newNode = {
-              id: updatedNode.id,
-              type: updatedNode.type,
-              position: { ...updatedNode.position },
-              data: {
-                // Deep clone to prevent shared references between nodes
-                ...JSON.parse(JSON.stringify(updatedNode.data))
+              if (nodeIndex >= 0) {
+                const newNode = {
+                  id: updatedNode.id,
+                  type: updatedNode.type,
+                  position: { ...updatedNode.position },
+                  data: {
+                    ...JSON.parse(JSON.stringify(updatedNode.data))
+                  }
+                };
+
+                nodes = nodes.map((n, idx) => idx === nodeIndex ? newNode : n);
+
+                if (selectedNode && selectedNode.id === newNode.id) {
+                  selectedNode = newNode;
+                }
+
+                saveWorkflowToDatabase(false);
               }
-            };
+            }}
+            on:toggleMaximize={() => isPanelMaximized = false}
+            on:close={() => {
+              showProperties = false;
+              selectedNode = null;
+              isPanelMaximized = false;
+            }}
+          />
+        </div>
+      </div>
+    {:else}
+      <!-- Normal Sidebar View -->
+      <div class="w-80 border-l border-gray-200 bg-white">
+        <NodePropertiesPanel
+          node={selectedNode}
+          {capabilities}
+          {projectId}
+          workflowData={{ nodes, edges, workflow }}
+          {bulkModelData}
+          {modelsLoaded}
+          {hierarchicalPaths}
+          {hierarchicalPathsLoaded}
+          documentsInfo={documentsInfo}
+          isMaximized={false}
+          on:nodeUpdate={(e) => {
+            const updatedNode = e.detail;
+            const nodeIndex = nodes.findIndex(n => n.id === updatedNode.id);
 
-            console.log('🔄 WORKFLOW: Node update details', {
-              nodeId: updatedNode.id.slice(-4),
-              oldName: nodes[nodeIndex].data?.name || nodes[nodeIndex].data?.label,
-              newName: newNode.data?.name || newNode.data?.label,
-              oldDesc: (nodes[nodeIndex].data?.description || '').substring(0, 50),
-              newDesc: (newNode.data?.description || '').substring(0, 50),
-              oldData: nodes[nodeIndex].data,
-              newData: newNode.data
-            });
+            console.log('🔄 WORKFLOW: Node update received for', updatedNode.id.slice(-4));
 
-            // Update the nodes array with completely new node object
-            // CRITICAL: Use array assignment to trigger reactivity
-            nodes = nodes.map((n, idx) => idx === nodeIndex ? newNode : n);
+            if (nodeIndex >= 0) {
+              const newNode = {
+                id: updatedNode.id,
+                type: updatedNode.type,
+                position: { ...updatedNode.position },
+                data: {
+                  ...JSON.parse(JSON.stringify(updatedNode.data))
+                }
+              };
 
-            // Update selectedNode reference to new object if it's the selected node
-            if (selectedNode && selectedNode.id === newNode.id) {
-              selectedNode = newNode;
+              console.log('🔄 WORKFLOW: Node update details', {
+                nodeId: updatedNode.id.slice(-4),
+                oldName: nodes[nodeIndex].data?.name || nodes[nodeIndex].data?.label,
+                newName: newNode.data?.name || newNode.data?.label,
+                oldDesc: (nodes[nodeIndex].data?.description || '').substring(0, 50),
+                newDesc: (newNode.data?.description || '').substring(0, 50),
+                oldData: nodes[nodeIndex].data,
+                newData: newNode.data
+              });
+
+              nodes = nodes.map((n, idx) => idx === nodeIndex ? newNode : n);
+
+              if (selectedNode && selectedNode.id === newNode.id) {
+                selectedNode = newNode;
+              }
+
+              console.log('✅ WORKFLOW: Node updated successfully - name:', newNode.data?.name || newNode.data?.label, 'description:', (newNode.data?.description || '').substring(0, 50));
+              saveWorkflowToDatabase(false);
+            } else {
+              console.error('❌ WORKFLOW: Node not found in array!', updatedNode.id);
             }
-
-            console.log('✅ WORKFLOW: Node updated successfully - name:', newNode.data?.name || newNode.data?.label, 'description:', (newNode.data?.description || '').substring(0, 50));
-            saveWorkflowToDatabase(false); // Silent auto-save - no toast for property updates
-          } else {
-            console.error('❌ WORKFLOW: Node not found in array!', updatedNode.id);
-          }
-        }}
-        on:close={() => {
-          showProperties = false;
-          selectedNode = null;
-        }}
-      />
-    </div>
+          }}
+          on:toggleMaximize={() => isPanelMaximized = true}
+          on:close={() => {
+            showProperties = false;
+            selectedNode = null;
+          }}
+        />
+      </div>
+    {/if}
   {/if}
   
   <!-- Connection Properties Panel (Right Sidebar) -->
