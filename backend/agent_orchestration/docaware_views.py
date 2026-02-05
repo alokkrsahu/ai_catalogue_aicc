@@ -239,13 +239,19 @@ class DocAwareConfigViewSet(viewsets.ViewSet):
                 print(f"🔍 DEBUG ERROR: Search traceback: {traceback.format_exc()}")
                 raise search_error
             
-            # Format results for response
+            # Get search_limit from parameters (default to 10 if not provided)
+            search_limit = parameters.get('search_limit', 10)
+            print(f"🔍 DEBUG: Using search_limit: {search_limit}")
+            
+            # Format results for response - use search_limit instead of hardcoded 3
             formatted_results = []
-            for i, result in enumerate(search_results[:3]):  # Limit to top 3 for testing
+            for i, result in enumerate(search_results[:search_limit]):
                 print(f"🔍 DEBUG: Processing result {i+1}: {type(result)}")
                 try:
+                    content = result['content']
                     formatted_results.append({
-                        'content_preview': result['content'][:200] + "..." if len(result['content']) > 200 else result['content'],
+                        'content': content,  # Full content for display
+                        'content_preview': content[:200] + "..." if len(content) > 200 else content,  # Preview for header
                         'score': result['metadata'].get('score', 0),
                         'source': result['metadata'].get('source', 'Unknown'),
                         'page': result['metadata'].get('page'),
@@ -260,10 +266,12 @@ class DocAwareConfigViewSet(viewsets.ViewSet):
                 'query': query,
                 'method': method_id,
                 'results_count': len(search_results),
+                'search_limit_used': search_limit,
+                'results_returned': len(formatted_results),
                 'sample_results': formatted_results,
                 'parameters_used': parameters,
                 'content_filters_used': content_filters,
-                'note': 'Results from real query execution (hardcoded queries disabled)'
+                'note': f'Showing {len(formatted_results)} results (search_limit: {search_limit})'
             }
             
             print(f"🔍 DEBUG: Final response: success={response_data['success']}, count={response_data['results_count']}")

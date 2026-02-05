@@ -59,6 +59,8 @@
   let searchParameters: Record<string, any> = {};
   let testingSearch = false;
   let testSearchResults: any = null;
+  let testSearchQuery = ''; // Custom test search query entered by user
+  let expandedResults: Set<number> = new Set(); // Track which results are expanded
   
   // 🔧 MCP Server state
   let mcpGoogleDriveCredentials = {
@@ -275,56 +277,64 @@
     try {
       testingSearch = true;
       testSearchResults = null;
+      expandedResults = new Set(); // Reset expanded state for new search
       
       console.log('📚 DOCAWARE: Testing search with method:', selectedSearchMethod.id);
       
       let actualQuery = '';
       let inputSource = 'no input available';
       
-      // Only use aggregated input from directly connected nodes
-      if (workflowData && workflowData.nodes && workflowData.edges) {
-        // Find all nodes that connect TO this current node (input sources)
-        const currentNodeId = node.id;
-        const inputEdges = workflowData.edges.filter(edge => edge.target === currentNodeId);
-        
-        console.log('📚 DOCAWARE: Found', inputEdges.length, 'input connections to current node');
-        
-        if (inputEdges.length > 0) {
-          const inputContents = [];
+      // Priority: Use custom test query if provided by user
+      if (testSearchQuery && testSearchQuery.trim().length > 0) {
+        actualQuery = testSearchQuery.trim();
+        inputSource = 'custom test query';
+        console.log('📚 DOCAWARE: Using custom test query:', actualQuery);
+      } else {
+        // Fallback: Use aggregated input from directly connected nodes
+        if (workflowData && workflowData.nodes && workflowData.edges) {
+          // Find all nodes that connect TO this current node (input sources)
+          const currentNodeId = node.id;
+          const inputEdges = workflowData.edges.filter(edge => edge.target === currentNodeId);
           
-          for (const edge of inputEdges) {
-            const sourceNode = workflowData.nodes.find(n => n.id === edge.source);
-            if (sourceNode) {
-              console.log('📚 DOCAWARE: Processing connected node:', sourceNode.type, sourceNode.data.name);
-              
-              if (sourceNode.type === 'StartNode' && sourceNode.data.prompt) {
-                inputContents.push(sourceNode.data.prompt);
-                console.log('📚 DOCAWARE: Added StartNode prompt:', sourceNode.data.prompt);
-              } else if (sourceNode.data.system_message) {
-                inputContents.push(sourceNode.data.system_message);
-                console.log('📚 DOCAWARE: Added system message from:', sourceNode.data.name || sourceNode.type);
+          console.log('📚 DOCAWARE: Found', inputEdges.length, 'input connections to current node');
+          
+          if (inputEdges.length > 0) {
+            const inputContents = [];
+            
+            for (const edge of inputEdges) {
+              const sourceNode = workflowData.nodes.find(n => n.id === edge.source);
+              if (sourceNode) {
+                console.log('📚 DOCAWARE: Processing connected node:', sourceNode.type, sourceNode.data.name);
+                
+                if (sourceNode.type === 'StartNode' && sourceNode.data.prompt) {
+                  inputContents.push(sourceNode.data.prompt);
+                  console.log('📚 DOCAWARE: Added StartNode prompt:', sourceNode.data.prompt);
+                } else if (sourceNode.data.system_message) {
+                  inputContents.push(sourceNode.data.system_message);
+                  console.log('📚 DOCAWARE: Added system message from:', sourceNode.data.name || sourceNode.type);
+                }
               }
             }
-          }
-          
-          if (inputContents.length > 0) {
-            actualQuery = inputContents.join('; ');
-            inputSource = `aggregated input from ${inputEdges.length} connected nodes`;
-            console.log('📚 DOCAWARE: Using aggregated input:', actualQuery);
+            
+            if (inputContents.length > 0) {
+              actualQuery = inputContents.join('; ');
+              inputSource = `aggregated input from ${inputEdges.length} connected nodes`;
+              console.log('📚 DOCAWARE: Using aggregated input:', actualQuery);
+            }
           }
         }
       }
       
-      // If no valid query found from connected nodes, show error
+      // If no valid query found (neither custom nor from connected nodes), show error
       if (!actualQuery || actualQuery.trim().length === 0) {
-        console.error('📚 DOCAWARE: No valid input found from connected nodes');
+        console.error('📚 DOCAWARE: No valid input found');
         testSearchResults = {
           success: false,
-          error: 'No input available from connected agents. Please connect this DocAware agent to other agents that provide input (StartNode, AssistantAgent, etc.) or ensure connected agents have configured prompts/system messages.',
+          error: 'No test query provided. Please enter a custom test query or connect this DocAware agent to other agents that provide input (StartNode, AssistantAgent, etc.).',
           query: '',
           method: selectedSearchMethod.id
         };
-        toasts?.error('No input available from connected agents');
+        toasts?.error('No test query provided. Enter a custom query or connect agents with input.');
         return;
       }
       
@@ -843,6 +853,8 @@
       selectedSearchMethod = null;
       searchParameters = {};
       testSearchResults = null;
+      testSearchQuery = ''; // Clear custom test query when switching nodes
+      expandedResults = new Set(); // Clear expanded results when switching nodes
       
       // Reset MCP state
       mcpGoogleDriveCredentials = { client_id: '', client_secret: '', refresh_token: '' };
@@ -1829,6 +1841,7 @@
                   selectedSearchMethod = null;
                   searchParameters = {};
                   testSearchResults = null;
+                  expandedResults = new Set();
                   
                   // Clear LLM configuration when DocAware is disabled
                   nodeConfig.llm_provider = '';
@@ -2542,6 +2555,7 @@
                   selectedSearchMethod = null;
                   searchParameters = {};
                   testSearchResults = null;
+                  expandedResults = new Set();
                 }
                 
                 nodeConfig = { ...nodeConfig };
@@ -2832,9 +2846,29 @@
               {/each}
             </div>
             
-            <!-- Test Search Button -->
+            <!-- Test Search Section -->
             {#if projectId}
               <div class="mt-4 pt-3 border-t border-blue-200">
+                <!-- Custom Test Query Input -->
+                <div class="mb-3">
+                  <label class="block text-xs font-medium text-gray-600 mb-1">
+                    Test Query
+                    <i class="fas fa-info-circle text-gray-400 ml-1" title="Enter a custom query to test search. Leave empty to use input from connected agents."></i>
+                  </label>
+                  <input
+                    type="text"
+                    bind:value={testSearchQuery}
+                    placeholder="Enter test query or leave empty to use connected agent input..."
+                    class="w-full px-2 py-1.5 border border-gray-200 rounded text-xs focus:border-blue-600 focus:ring-1 focus:ring-blue-600 focus:ring-opacity-20"
+                  />
+                  {#if !testSearchQuery}
+                    <p class="text-xs text-gray-400 mt-1">
+                      <i class="fas fa-link mr-1"></i>
+                      Will use input from connected agents if empty
+                    </p>
+                  {/if}
+                </div>
+                
                 <div class="flex items-center justify-between mb-2">
                   <span class="text-xs font-medium text-gray-700">Test Search</span>
                   <button
@@ -2873,11 +2907,23 @@
                       <!-- Search Results List -->
                       {#if testSearchResults.sample_results && testSearchResults.sample_results.length > 0}
                         <div class="p-2">
-                          <div class="text-green-800 font-medium mb-2">
-                            Sample Results ({testSearchResults.sample_results.length} shown):
+                          <div class="text-green-800 font-medium mb-2 flex items-center justify-between">
+                            <span>Search Results ({testSearchResults.sample_results.length} of {testSearchResults.results_count}):</span>
+                            <button
+                              class="text-xs text-green-600 hover:text-green-800 underline"
+                              on:click={() => {
+                                if (expandedResults.size === testSearchResults.sample_results.length) {
+                                  expandedResults = new Set();
+                                } else {
+                                  expandedResults = new Set(testSearchResults.sample_results.map((_, i) => i));
+                                }
+                              }}
+                            >
+                              {expandedResults.size === testSearchResults.sample_results.length ? 'Collapse All' : 'Expand All'}
+                            </button>
                           </div>
                           
-                          <div class="space-y-2 max-h-64 overflow-y-auto">
+                          <div class="space-y-2 max-h-96 overflow-y-auto">
                             {#each testSearchResults.sample_results as result, index}
                               <div class="bg-green-100 border border-green-200 rounded p-2">
                                 <!-- Result Header -->
@@ -2902,11 +2948,33 @@
                                   </div>
                                 </div>
                                 
-                                <!-- Content Preview -->
+                                <!-- Content Display with Expand/Collapse -->
                                 <div class="bg-white border border-green-300 rounded p-2 text-gray-800">
-                                  <div class="text-xs text-gray-600 mb-1">Content Preview:</div>
-                                  <div class="text-sm leading-relaxed">
-                                    {result.content_preview || 'No content preview available'}
+                                  <div class="flex items-center justify-between text-xs text-gray-600 mb-1">
+                                    <span>Content:</span>
+                                    {#if result.content && result.content.length > 200}
+                                      <button
+                                        class="text-blue-600 hover:text-blue-800 underline"
+                                        on:click={() => {
+                                          if (expandedResults.has(index)) {
+                                            expandedResults.delete(index);
+                                            expandedResults = expandedResults;
+                                          } else {
+                                            expandedResults.add(index);
+                                            expandedResults = expandedResults;
+                                          }
+                                        }}
+                                      >
+                                        {expandedResults.has(index) ? 'Show Less' : 'Show Full Content'}
+                                      </button>
+                                    {/if}
+                                  </div>
+                                  <div class="text-sm leading-relaxed whitespace-pre-wrap {expandedResults.has(index) ? 'max-h-96 overflow-y-auto' : ''}">
+                                    {#if expandedResults.has(index)}
+                                      {result.content || result.content_preview || 'No content available'}
+                                    {:else}
+                                      {result.content_preview || result.content?.substring(0, 200) + '...' || 'No content available'}
+                                    {/if}
                                   </div>
                                 </div>
                                 
@@ -2920,14 +2988,16 @@
                             {/each}
                           </div>
                           
-                          <!-- Show More Results Hint -->
+                          <!-- Results Info -->
                           {#if testSearchResults.results_count > testSearchResults.sample_results.length}
-                            <div class="mt-2 p-2 bg-green-100 border border-green-200 rounded text-center text-green-700">
+                            <div class="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded text-center text-yellow-700">
                               <i class="fas fa-info-circle mr-1"></i>
-                              Showing {testSearchResults.sample_results.length} of {testSearchResults.results_count} total results
-                              <div class="text-xs mt-1">
-                                The full search will return all {testSearchResults.results_count} results during workflow execution
-                              </div>
+                              Showing {testSearchResults.sample_results.length} of {testSearchResults.results_count} total results (limited by search_limit parameter)
+                            </div>
+                          {:else}
+                            <div class="mt-2 p-2 bg-green-100 border border-green-200 rounded text-center text-green-700">
+                              <i class="fas fa-check-circle mr-1"></i>
+                              Showing all {testSearchResults.sample_results.length} results
                             </div>
                           {/if}
                           
