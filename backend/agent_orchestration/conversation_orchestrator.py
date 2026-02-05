@@ -19,6 +19,7 @@ from .reflection_handler import ReflectionHandler
 from .workflow_parser import WorkflowParser
 from .chat_manager import ChatManager
 from .docaware_handler import DocAwareHandler
+from .websearch_handler import WebSearchHandler
 from .human_input_handler import HumanInputHandler
 from .workflow_executor import WorkflowExecutor
 
@@ -45,6 +46,7 @@ class ConversationOrchestrator:
         self.llm_provider_manager = LLMProviderManager()
         self.workflow_parser = WorkflowParser()
         self.docaware_handler = DocAwareHandler(self.llm_provider_manager)
+        self.websearch_handler = WebSearchHandler(self.llm_provider_manager)
         
         # Initialize reflection handler with LLM provider manager
         self.reflection_handler = ReflectionHandler(self.llm_provider_manager)
@@ -53,7 +55,8 @@ class ConversationOrchestrator:
         self.chat_manager = ChatManager(
             self.llm_provider_manager,
             self.workflow_parser,
-            self.docaware_handler
+            self.docaware_handler,
+            self.websearch_handler
         )
         
         # Initialize human input handler with dependencies
@@ -61,7 +64,8 @@ class ConversationOrchestrator:
             self.workflow_parser,
             self.docaware_handler,
             self.llm_provider_manager,
-            self.reflection_handler
+            self.reflection_handler,
+            self.websearch_handler
         )
         
         # Set the human input handler reference in reflection handler
@@ -162,6 +166,13 @@ class ConversationOrchestrator:
         """
         return self.docaware_handler.is_docaware_enabled(agent_node)
     
+    def is_websearch_enabled(self, agent_node: Dict[str, Any]) -> bool:
+        """
+        Check if WebSearch is enabled for this agent
+        Delegates to WebSearchHandler for actual implementation
+        """
+        return self.websearch_handler.is_websearch_enabled(agent_node)
+    
     async def craft_conversation_prompt(self, conversation_history: str, agent_node: Dict[str, Any], project_id: Optional[str] = None) -> List[Dict[str, str]]:
         """
         Craft conversation messages array for an agent including full conversation history
@@ -218,6 +229,10 @@ class ConversationOrchestrator:
     def get_docaware_handler(self) -> DocAwareHandler:
         """Get direct access to DocAware handler"""
         return self.docaware_handler
+    
+    def get_websearch_handler(self) -> WebSearchHandler:
+        """Get direct access to WebSearch handler"""
+        return self.websearch_handler
     
     def get_human_input_handler(self) -> HumanInputHandler:
         """Get direct access to human input handler"""

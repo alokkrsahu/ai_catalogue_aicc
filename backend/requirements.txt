@@ -74,6 +74,9 @@ aiofiles>=23.0.0       # Async file operations
 watchdog>=3.0.0        # File system monitoring
 timeout-decorator>=0.5.0  # Function timeouts
 
+# 🌐 WEB SEARCH DEPENDENCIES
+duckduckgo-search>=6.0.0  # DuckDuckGo web search API for WebSearch feature
+
 # ❌ COMPLETELY REMOVED: All AutoGen dependencies
 # pyautogen - REMOVED
 # autogen-agentchat - REMOVED

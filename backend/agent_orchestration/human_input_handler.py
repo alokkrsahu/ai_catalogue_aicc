@@ -21,11 +21,12 @@ class HumanInputHandler:
     Handles workflow pause/resume for human input
     """
     
-    def __init__(self, workflow_parser, docaware_handler, llm_provider_manager, reflection_handler):
+    def __init__(self, workflow_parser, docaware_handler, llm_provider_manager, reflection_handler, websearch_handler=None):
         self.workflow_parser = workflow_parser
         self.docaware_handler = docaware_handler
         self.llm_provider_manager = llm_provider_manager
         self.reflection_handler = reflection_handler
+        self.websearch_handler = websearch_handler
     
     async def pause_for_human_input(self, workflow, node, executed_nodes, conversation_history, execution_record):
         """
@@ -389,7 +390,8 @@ class HumanInputHandler:
                     chat_manager = ChatManager(
                         self.llm_provider_manager,
                         self.workflow_parser,
-                        self.docaware_handler
+                        self.docaware_handler,
+                        self.websearch_handler
                     )
                     
                     # Create workflow executor instance
@@ -542,7 +544,8 @@ class HumanInputHandler:
                     chat_manager = ChatManager(
                         self.llm_provider_manager,
                         self.workflow_parser,
-                        self.docaware_handler
+                        self.docaware_handler,
+                        self.websearch_handler
                     )
                     
                     # Create workflow executor instance

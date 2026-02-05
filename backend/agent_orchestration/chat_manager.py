@@ -23,10 +23,11 @@ class ChatManager:
     Manages group chat orchestration and delegate conversations
     """
     
-    def __init__(self, llm_provider_manager, workflow_parser, docaware_handler):
+    def __init__(self, llm_provider_manager, workflow_parser, docaware_handler, websearch_handler=None):
         self.llm_provider_manager = llm_provider_manager
         self.workflow_parser = workflow_parser
         self.docaware_handler = docaware_handler
+        self.websearch_handler = websearch_handler
     
     async def execute_group_chat_manager_with_multiple_inputs(self, chat_manager_node: Dict[str, Any], llm_provider, input_sources: List[Dict[str, Any]], executed_nodes: Dict[str, str], execution_sequence: List[Dict[str, Any]], graph_json: Dict[str, Any], project_id: Optional[str] = None, project: Optional[Any] = None, execution_id: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -537,6 +538,39 @@ class ChatManager:
             system_parts.append("=== END DOCUMENTS ===")
             system_parts.append("\nCRITICAL: Use the document content provided above to conduct your review. The documents above ARE the paper content.")
         
+        # 🌐 WEBSEARCH INTEGRATION FOR DELEGATE AGENTS (MULTI-INPUT PATH)
+        websearch_context = ""
+        websearch_enabled = self.websearch_handler.is_websearch_enabled(delegate_node) if self.websearch_handler else False
+        logger.info(f"🌐 WEBSEARCH CHECK (MULTI-INPUT): Delegate {delegate_name} - WebSearch enabled: {websearch_enabled}, Project ID: {project_id}")
+        
+        if websearch_enabled and project_id:
+            try:
+                logger.info(f"🌐 WEBSEARCH (MULTI-INPUT): Processing WebSearch for delegate {delegate_name}")
+                
+                # Use aggregated input as search query for WebSearch
+                search_query = self.websearch_handler.extract_search_query_from_aggregated_input(aggregated_context)
+                
+                if search_query:
+                    websearch_context = await self.websearch_handler.get_websearch_context_from_query(
+                        delegate_node, search_query, project_id
+                    )
+                    
+                    if websearch_context:
+                        logger.info(f"🌐 WEBSEARCH (MULTI-INPUT): Added web context to delegate {delegate_name} ({len(websearch_context)} chars)")
+                    
+            except Exception as e:
+                logger.error(f"❌ WEBSEARCH (MULTI-INPUT): Failed to get web context for delegate {delegate_name}: {e}")
+                import traceback
+                logger.error(f"❌ WEBSEARCH (MULTI-INPUT): Traceback: {traceback.format_exc()}")
+        
+        # Add web search context to system message if available
+        if websearch_context:
+            system_parts.append("\n=== WEB SEARCH RESULTS ===")
+            system_parts.append("The following information was retrieved from web search and may contain recent or relevant information:")
+            system_parts.append("")
+            system_parts.append(websearch_context)
+            system_parts.append("=== END WEB SEARCH ===")
+        
         system_parts.extend([
             f"\nInstructions:",
             f"- Analyze and synthesize information from ALL input sources"
@@ -545,6 +579,9 @@ class ChatManager:
         if document_context:
             system_parts.append(f"- Use the relevant documents to provide accurate and contextual information")
             system_parts.append(f"- Reference specific information from the documents when applicable")
+        
+        if websearch_context:
+            system_parts.append(f"- Consider the web search results for recent or external information")
         
         system_parts.extend([
             f"- Provide specialized analysis based on your role and the multiple inputs",
@@ -696,6 +733,31 @@ class ChatManager:
             system_parts.append("=== END DOCUMENTS ===")
             system_parts.append("\nCRITICAL: Use the document content provided above to conduct your review. The documents above ARE the paper content.")
         
+        # 🌐 WEBSEARCH INTEGRATION: Add web search context if enabled
+        websearch_context = ""
+        if self.websearch_handler and self.websearch_handler.is_websearch_enabled(agent_node) and project_id:
+            try:
+                logger.info(f"🌐 WEBSEARCH: Single agent {agent_name} - WebSearch enabled")
+                websearch_context = await self.websearch_handler.get_websearch_context(
+                    agent_node, conversation_history, project_id
+                )
+                
+                if websearch_context:
+                    logger.info(f"🌐 WEBSEARCH: Added web context to single agent {agent_name} ({len(websearch_context)} chars)")
+                    
+            except Exception as e:
+                logger.error(f"❌ WEBSEARCH: Failed to get web context for single agent {agent_name}: {e}")
+                import traceback
+                logger.error(f"❌ WEBSEARCH: Traceback: {traceback.format_exc()}")
+        
+        # Add web search context to system message if available
+        if websearch_context:
+            system_parts.append("\n=== WEB SEARCH RESULTS ===")
+            system_parts.append("The following information was retrieved from web search and may contain recent or relevant information:")
+            system_parts.append("")
+            system_parts.append(websearch_context)
+            system_parts.append("=== END WEB SEARCH ===")
+        
         # Build full system message
         system_message = "\n".join(system_parts) if system_parts else None
         
@@ -775,6 +837,35 @@ class ChatManager:
             system_parts.append(document_context)
             system_parts.append("=== END DOCUMENTS ===")
             system_parts.append("\nCRITICAL: Use the document content provided above to conduct your review. The documents above ARE the paper content.")
+        
+        # 🌐 WEBSEARCH INTEGRATION: Add web search context if enabled
+        websearch_context = ""
+        if self.websearch_handler and self.websearch_handler.is_websearch_enabled(agent_node) and project_id:
+            try:
+                logger.info(f"🌐 WEBSEARCH: Agent {agent_name} with aggregated input - WebSearch enabled")
+                # Use aggregated input for web search query extraction
+                search_query = self.websearch_handler.extract_search_query_from_aggregated_input(aggregated_context)
+                
+                if search_query:
+                    websearch_context = await self.websearch_handler.get_websearch_context_from_query(
+                        agent_node, search_query, project_id
+                    )
+                    
+                    if websearch_context:
+                        logger.info(f"🌐 WEBSEARCH: Added web context to agent {agent_name} ({len(websearch_context)} chars)")
+                    
+            except Exception as e:
+                logger.error(f"❌ WEBSEARCH: Failed to get web context for agent {agent_name}: {e}")
+                import traceback
+                logger.error(f"❌ WEBSEARCH: Traceback: {traceback.format_exc()}")
+        
+        # Add web search context to system message if available
+        if websearch_context:
+            system_parts.append("\n=== WEB SEARCH RESULTS ===")
+            system_parts.append("The following information was retrieved from web search and may contain recent or relevant information:")
+            system_parts.append("")
+            system_parts.append(websearch_context)
+            system_parts.append("=== END WEB SEARCH ===")
         
         # Build full system message
         system_message = "\n".join(system_parts) if system_parts else None
@@ -1216,6 +1307,27 @@ class ChatManager:
         elif not project_id:
             logger.warning(f"📚 DOCAWARE (SINGLE-INPUT): Project ID is missing for delegate {delegate_name}, cannot perform DocAware search")
         
+        # 🌐 WEBSEARCH INTEGRATION FOR DELEGATE AGENTS (SINGLE-INPUT PATH)
+        websearch_context = ""
+        websearch_enabled = self.websearch_handler.is_websearch_enabled(delegate_node) if self.websearch_handler else False
+        logger.info(f"🌐 WEBSEARCH CHECK (SINGLE-INPUT): Delegate {delegate_name} - WebSearch enabled: {websearch_enabled}, Project ID: {project_id}")
+        
+        if websearch_enabled and project_id:
+            try:
+                logger.info(f"🌐 WEBSEARCH (SINGLE-INPUT): Processing WebSearch for delegate {delegate_name}")
+                
+                websearch_context = await self.websearch_handler.get_websearch_context(
+                    delegate_node, conversation_history, project_id
+                )
+                
+                if websearch_context:
+                    logger.info(f"🌐 WEBSEARCH (SINGLE-INPUT): Added web context to delegate {delegate_name} ({len(websearch_context)} chars)")
+                    
+            except Exception as e:
+                logger.error(f"❌ WEBSEARCH (SINGLE-INPUT): Failed to get web context for delegate {delegate_name}: {e}")
+                import traceback
+                logger.error(f"❌ WEBSEARCH (SINGLE-INPUT): Traceback: {traceback.format_exc()}")
+        
         # Build system message for delegate
         system_message_parts = [
             f"You are {delegate_name}, a specialized delegate agent.",
@@ -1241,15 +1353,25 @@ class ChatManager:
             system_message_parts.append("=== END DOCUMENTS ===")
             system_message_parts.append("\nCRITICAL: Use the document content provided above to conduct your review. The documents above ARE the paper content.")
         
+        # Add web search context to system message if available
+        if websearch_context:
+            system_message_parts.append("\n=== WEB SEARCH RESULTS ===")
+            system_message_parts.append("The following information was retrieved from web search and may contain recent or relevant information:")
+            system_message_parts.append("")
+            system_message_parts.append(websearch_context)
+            system_message_parts.append("=== END WEB SEARCH ===")
+        
         system_message = "\n".join(system_message_parts)
         
         # Debug logging for system message verification
         system_message_length = len(system_message)
         has_documents = "RELEVANT DOCUMENTS" in system_message
+        has_websearch = "WEB SEARCH RESULTS" in system_message
         system_message_preview = system_message[:500] if len(system_message) > 500 else system_message
         
         logger.info(f"📚 SYSTEM MESSAGE DEBUG: System message length: {system_message_length} chars")
         logger.info(f"📚 SYSTEM MESSAGE DEBUG: Contains document context: {has_documents}")
+        logger.info(f"🌐 SYSTEM MESSAGE DEBUG: Contains web search context: {has_websearch}")
         if has_documents:
             logger.info(f"📚 SYSTEM MESSAGE DEBUG: System message preview (first 500 chars): {system_message_preview}...")
         elif document_context:

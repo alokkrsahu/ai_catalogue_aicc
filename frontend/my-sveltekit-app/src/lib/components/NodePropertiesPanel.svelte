@@ -2282,6 +2282,178 @@
         </div>
       {/if}
       
+      <!-- WEBSEARCH TOGGLE - For UserProxyAgent -->
+      <div>
+        <div class="flex items-center justify-between">
+          <label class="text-sm font-medium text-gray-700">WebSearch</label>
+          <label class="relative inline-flex items-center cursor-pointer">
+            <input
+              type="checkbox"
+              checked={nodeConfig.web_search_enabled}
+              on:change={(e) => {
+                nodeConfig.web_search_enabled = e.target.checked;
+                
+                if (e.target.checked) {
+                  // Set default values when enabling WebSearch
+                  if (!nodeConfig.web_search_mode) {
+                    nodeConfig.web_search_mode = 'general';
+                  }
+                  if (!nodeConfig.web_search_cache_ttl) {
+                    nodeConfig.web_search_cache_ttl = 3600; // 1 hour default
+                  }
+                  if (!nodeConfig.web_search_max_results) {
+                    nodeConfig.web_search_max_results = 5;
+                  }
+                  if (!nodeConfig.web_search_urls) {
+                    nodeConfig.web_search_urls = [];
+                  }
+                  if (!nodeConfig.web_search_domains) {
+                    nodeConfig.web_search_domains = [];
+                  }
+                } else {
+                  // Clear configuration when disabling WebSearch
+                  nodeConfig.web_search_mode = '';
+                  nodeConfig.web_search_urls = [];
+                  nodeConfig.web_search_domains = [];
+                }
+                
+                nodeConfig = { ...nodeConfig };
+                updateNodeData();
+              }}
+              class="sr-only peer"
+            />
+            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-green-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-600"></div>
+          </label>
+        </div>
+        <p class="text-xs text-gray-500 mt-1">Enable web search capabilities to retrieve real-time information from the internet</p>
+      </div>
+      
+      <!-- WEBSEARCH CONFIGURATION - Show when WebSearch is enabled (UserProxyAgent) -->
+      {#if nodeConfig.web_search_enabled}
+        <div class="border border-green-200 rounded-lg p-4 bg-green-50">
+          <div class="flex items-center mb-3">
+            <i class="fas fa-globe text-green-600 mr-2"></i>
+            <h4 class="font-medium text-green-900">Web Search Configuration</h4>
+          </div>
+          
+          <!-- Search Mode Selection -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-2">Search Mode</label>
+            <select
+              bind:value={nodeConfig.web_search_mode}
+              on:change={updateNodeData}
+              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20 bg-white"
+            >
+              <option value="general">General Web Search</option>
+              <option value="domains">Search Specific Domains</option>
+              <option value="urls">Fetch Specific URLs</option>
+            </select>
+            <p class="text-xs text-gray-500 mt-1">
+              {#if nodeConfig.web_search_mode === 'general'}
+                Search the entire web using DuckDuckGo
+              {:else if nodeConfig.web_search_mode === 'domains'}
+                Restrict search to specific domains/websites
+              {:else if nodeConfig.web_search_mode === 'urls'}
+                Fetch content from specific URLs directly
+              {:else}
+                Select a search mode to configure web search
+              {/if}
+            </p>
+          </div>
+          
+          <!-- Domain List (for 'domains' mode) -->
+          {#if nodeConfig.web_search_mode === 'domains'}
+            <div class="mb-4">
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                Search Domains
+                <span class="text-xs text-gray-500 ml-1">(one per line)</span>
+              </label>
+              <textarea
+                value={(nodeConfig.web_search_domains || []).join('\n')}
+                on:input={(e) => {
+                  const domains = e.target.value.split('\n').filter(d => d.trim());
+                  nodeConfig.web_search_domains = domains;
+                  updateNodeData();
+                }}
+                rows="3"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
+                placeholder="wikipedia.org&#10;docs.python.org&#10;developer.mozilla.org"
+              ></textarea>
+              <p class="text-xs text-gray-500 mt-1">Enter domain names (without https://) to restrict search results</p>
+            </div>
+          {/if}
+          
+          <!-- URL List (for 'urls' mode) -->
+          {#if nodeConfig.web_search_mode === 'urls'}
+            <div class="mb-4">
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                URLs to Fetch
+                <span class="text-xs text-gray-500 ml-1">(one per line)</span>
+              </label>
+              <textarea
+                value={(nodeConfig.web_search_urls || []).join('\n')}
+                on:input={(e) => {
+                  const urls = e.target.value.split('\n').filter(u => u.trim());
+                  nodeConfig.web_search_urls = urls;
+                  updateNodeData();
+                }}
+                rows="4"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
+                placeholder="https://example.com/page1&#10;https://docs.example.com/api&#10;https://wiki.example.org/article"
+              ></textarea>
+              <p class="text-xs text-gray-500 mt-1">Enter full URLs (with https://) to fetch content from specific pages</p>
+            </div>
+          {/if}
+          
+          <!-- Max Results (for 'general' and 'domains' modes) -->
+          {#if nodeConfig.web_search_mode === 'general' || nodeConfig.web_search_mode === 'domains'}
+            <div class="mb-4">
+              <label class="block text-sm font-medium text-gray-700 mb-2">Max Results</label>
+              <input
+                type="number"
+                bind:value={nodeConfig.web_search_max_results}
+                on:input={updateNodeData}
+                min="1"
+                max="20"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
+              />
+              <p class="text-xs text-gray-500 mt-1">Maximum number of search results to retrieve (1-20)</p>
+            </div>
+          {/if}
+          
+          <!-- Cache TTL -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-2">Cache Duration (seconds)</label>
+            <input
+              type="number"
+              bind:value={nodeConfig.web_search_cache_ttl}
+              on:input={updateNodeData}
+              min="0"
+              max="86400"
+              step="300"
+              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
+            />
+            <p class="text-xs text-gray-500 mt-1">
+              How long to cache results before re-fetching. 0 = no caching, 3600 = 1 hour, 86400 = 24 hours
+            </p>
+          </div>
+          
+          <!-- Current Configuration Summary -->
+          <div class="mt-3 p-2 bg-green-100 border border-green-200 rounded text-xs text-green-700">
+            <i class="fas fa-info-circle mr-1"></i>
+            <strong>Mode:</strong> {nodeConfig.web_search_mode || 'Not set'} |
+            {#if nodeConfig.web_search_mode === 'urls'}
+              <strong>URLs:</strong> {(nodeConfig.web_search_urls || []).length} configured
+            {:else if nodeConfig.web_search_mode === 'domains'}
+              <strong>Domains:</strong> {(nodeConfig.web_search_domains || []).length} configured
+            {:else}
+              <strong>Max Results:</strong> {nodeConfig.web_search_max_results || 5}
+            {/if}
+            | <strong>Cache:</strong> {nodeConfig.web_search_cache_ttl || 3600}s
+          </div>
+        </div>
+      {/if}
+      
     {/if}
     
     <!-- DOCAWARE TOGGLE - For other applicable agents (excluding UserProxyAgent) -->
@@ -2770,6 +2942,178 @@
               </div>
             {/if}
           {/if}
+        </div>
+      {/if}
+      
+      <!-- WEBSEARCH TOGGLE - For AssistantAgent, DelegateAgent -->
+      <div>
+        <div class="flex items-center justify-between">
+          <label class="text-sm font-medium text-gray-700">WebSearch</label>
+          <label class="relative inline-flex items-center cursor-pointer">
+            <input
+              type="checkbox"
+              checked={nodeConfig.web_search_enabled}
+              on:change={(e) => {
+                nodeConfig.web_search_enabled = e.target.checked;
+                
+                if (e.target.checked) {
+                  // Set default values when enabling WebSearch
+                  if (!nodeConfig.web_search_mode) {
+                    nodeConfig.web_search_mode = 'general';
+                  }
+                  if (!nodeConfig.web_search_cache_ttl) {
+                    nodeConfig.web_search_cache_ttl = 3600; // 1 hour default
+                  }
+                  if (!nodeConfig.web_search_max_results) {
+                    nodeConfig.web_search_max_results = 5;
+                  }
+                  if (!nodeConfig.web_search_urls) {
+                    nodeConfig.web_search_urls = [];
+                  }
+                  if (!nodeConfig.web_search_domains) {
+                    nodeConfig.web_search_domains = [];
+                  }
+                } else {
+                  // Clear configuration when disabling WebSearch
+                  nodeConfig.web_search_mode = '';
+                  nodeConfig.web_search_urls = [];
+                  nodeConfig.web_search_domains = [];
+                }
+                
+                nodeConfig = { ...nodeConfig };
+                updateNodeData();
+              }}
+              class="sr-only peer"
+            />
+            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-green-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-600"></div>
+          </label>
+        </div>
+        <p class="text-xs text-gray-500 mt-1">Enable web search capabilities to retrieve real-time information from the internet</p>
+      </div>
+      
+      <!-- WEBSEARCH CONFIGURATION - Show when WebSearch is enabled -->
+      {#if nodeConfig.web_search_enabled}
+        <div class="border border-green-200 rounded-lg p-4 bg-green-50">
+          <div class="flex items-center mb-3">
+            <i class="fas fa-globe text-green-600 mr-2"></i>
+            <h4 class="font-medium text-green-900">Web Search Configuration</h4>
+          </div>
+          
+          <!-- Search Mode Selection -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-2">Search Mode</label>
+            <select
+              bind:value={nodeConfig.web_search_mode}
+              on:change={updateNodeData}
+              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20 bg-white"
+            >
+              <option value="general">General Web Search</option>
+              <option value="domains">Search Specific Domains</option>
+              <option value="urls">Fetch Specific URLs</option>
+            </select>
+            <p class="text-xs text-gray-500 mt-1">
+              {#if nodeConfig.web_search_mode === 'general'}
+                Search the entire web using DuckDuckGo
+              {:else if nodeConfig.web_search_mode === 'domains'}
+                Restrict search to specific domains/websites
+              {:else if nodeConfig.web_search_mode === 'urls'}
+                Fetch content from specific URLs directly
+              {:else}
+                Select a search mode to configure web search
+              {/if}
+            </p>
+          </div>
+          
+          <!-- Domain List (for 'domains' mode) -->
+          {#if nodeConfig.web_search_mode === 'domains'}
+            <div class="mb-4">
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                Search Domains
+                <span class="text-xs text-gray-500 ml-1">(one per line)</span>
+              </label>
+              <textarea
+                value={(nodeConfig.web_search_domains || []).join('\n')}
+                on:input={(e) => {
+                  const domains = e.target.value.split('\n').filter(d => d.trim());
+                  nodeConfig.web_search_domains = domains;
+                  updateNodeData();
+                }}
+                rows="3"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
+                placeholder="wikipedia.org&#10;docs.python.org&#10;developer.mozilla.org"
+              ></textarea>
+              <p class="text-xs text-gray-500 mt-1">Enter domain names (without https://) to restrict search results</p>
+            </div>
+          {/if}
+          
+          <!-- URL List (for 'urls' mode) -->
+          {#if nodeConfig.web_search_mode === 'urls'}
+            <div class="mb-4">
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                URLs to Fetch
+                <span class="text-xs text-gray-500 ml-1">(one per line)</span>
+              </label>
+              <textarea
+                value={(nodeConfig.web_search_urls || []).join('\n')}
+                on:input={(e) => {
+                  const urls = e.target.value.split('\n').filter(u => u.trim());
+                  nodeConfig.web_search_urls = urls;
+                  updateNodeData();
+                }}
+                rows="4"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
+                placeholder="https://example.com/page1&#10;https://docs.example.com/api&#10;https://wiki.example.org/article"
+              ></textarea>
+              <p class="text-xs text-gray-500 mt-1">Enter full URLs (with https://) to fetch content from specific pages</p>
+            </div>
+          {/if}
+          
+          <!-- Max Results (for 'general' and 'domains' modes) -->
+          {#if nodeConfig.web_search_mode === 'general' || nodeConfig.web_search_mode === 'domains'}
+            <div class="mb-4">
+              <label class="block text-sm font-medium text-gray-700 mb-2">Max Results</label>
+              <input
+                type="number"
+                bind:value={nodeConfig.web_search_max_results}
+                on:input={updateNodeData}
+                min="1"
+                max="20"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
+              />
+              <p class="text-xs text-gray-500 mt-1">Maximum number of search results to retrieve (1-20)</p>
+            </div>
+          {/if}
+          
+          <!-- Cache TTL -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-2">Cache Duration (seconds)</label>
+            <input
+              type="number"
+              bind:value={nodeConfig.web_search_cache_ttl}
+              on:input={updateNodeData}
+              min="0"
+              max="86400"
+              step="300"
+              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
+            />
+            <p class="text-xs text-gray-500 mt-1">
+              How long to cache results before re-fetching. 0 = no caching, 3600 = 1 hour, 86400 = 24 hours
+            </p>
+          </div>
+          
+          <!-- Current Configuration Summary -->
+          <div class="mt-3 p-2 bg-green-100 border border-green-200 rounded text-xs text-green-700">
+            <i class="fas fa-info-circle mr-1"></i>
+            <strong>Mode:</strong> {nodeConfig.web_search_mode || 'Not set'} |
+            {#if nodeConfig.web_search_mode === 'urls'}
+              <strong>URLs:</strong> {(nodeConfig.web_search_urls || []).length} configured
+            {:else if nodeConfig.web_search_mode === 'domains'}
+              <strong>Domains:</strong> {(nodeConfig.web_search_domains || []).length} configured
+            {:else}
+              <strong>Max Results:</strong> {nodeConfig.web_search_max_results || 5}
+            {/if}
+            | <strong>Cache:</strong> {nodeConfig.web_search_cache_ttl || 3600}s
+          </div>
         </div>
       {/if}
     {/if}

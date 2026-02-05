@@ -22,6 +22,24 @@ services:
     networks:
       - ai_catalogue_network
 
+  # Redis Cache (for WebSearch caching and rate limiting)
+  redis:
+    image: redis:7-alpine
+    container_name: ai_catalogue_redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ai_catalogue_network
+
   # Milvus Vector Database Components
   etcd:
     container_name: ai_catalogue_etcd
@@ -309,6 +327,8 @@ volumes:
   backend_logs:
     driver: local
   chromadb_data:
+    driver: local
+  redis_data:
     driver: local
 
 networks:

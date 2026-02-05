@@ -263,6 +263,33 @@ MILVUS_CONFIG = {
     'secure': False,  # Set to True for TLS connections
 }
 
+# Redis Cache Configuration (for WebSearch caching, rate limiting, etc.)
+REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
+REDIS_PORT = os.getenv('REDIS_PORT', '6379')
+REDIS_DB = os.getenv('REDIS_DB', '0')
+
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}",
+        'KEY_PREFIX': 'ai_catalogue',
+        'TIMEOUT': 3600,  # Default timeout: 1 hour
+        'OPTIONS': {
+            'socket_connect_timeout': 5,
+            'socket_timeout': 5,
+            'retry_on_timeout': True,
+        }
+    }
+}
+
+# WebSearch Configuration
+WEBSEARCH_CONFIG = {
+    'DEFAULT_CACHE_TTL': 3600,  # 1 hour default
+    'MAX_RESULTS': 10,
+    'REQUEST_TIMEOUT': 30,  # seconds
+    'MAX_CONTENT_LENGTH': 100000,  # chars per page
+}
+
 # Vector Search Settings
 VECTOR_EMBEDDING_MODEL = 'sentence-transformers/all-MiniLM-L6-v2'  # Full name for proper cache detection
 VECTOR_DIMENSION = 384
