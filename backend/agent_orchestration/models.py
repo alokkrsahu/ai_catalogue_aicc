@@ -51,6 +51,33 @@ class WorkflowDeployment(models.Model):
         help_text='Initial greeting message shown by the embedded chatbot'
     )
     
+    # Chatbot branding customization
+    chatbot_title = models.CharField(
+        max_length=100,
+        default='AI Assistant',
+        help_text='Title displayed in the chatbot header'
+    )
+    chatbot_subtitle = models.CharField(
+        max_length=200,
+        default='Powered by AICC IntelliDoc',
+        help_text='Subtitle displayed below the chatbot title'
+    )
+    primary_color = models.CharField(
+        max_length=7,
+        default='#78b2e8',
+        help_text='Primary color for header and user messages (hex format)'
+    )
+    secondary_color = models.CharField(
+        max_length=7,
+        default='#3a6d98',
+        help_text='Secondary color for gradient effects (hex format)'
+    )
+    logo_url = models.URLField(
+        blank=True,
+        null=True,
+        help_text='Optional URL to a logo image displayed in the header'
+    )
+    
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

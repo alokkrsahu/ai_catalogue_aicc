@@ -199,6 +199,12 @@ class DeploymentViewSet(viewsets.ViewSet):
                     'endpoint_path': deployment.endpoint_path,
                     'rate_limit_per_minute': deployment.rate_limit_per_minute,
                     'initial_greeting': getattr(deployment, 'initial_greeting', ''),
+                    # Chatbot branding customization
+                    'chatbot_title': getattr(deployment, 'chatbot_title', 'AI Assistant'),
+                    'chatbot_subtitle': getattr(deployment, 'chatbot_subtitle', 'Powered by AICC IntelliDoc'),
+                    'primary_color': getattr(deployment, 'primary_color', '#78b2e8'),
+                    'secondary_color': getattr(deployment, 'secondary_color', '#3a6d98'),
+                    'logo_url': getattr(deployment, 'logo_url', None),
                     'created_at': deployment.created_at.isoformat(),
                     'updated_at': deployment.updated_at.isoformat()
                 },
@@ -244,7 +250,13 @@ class DeploymentViewSet(viewsets.ViewSet):
                     'created_by': request.user,
                     'is_active': False,
                     'rate_limit_per_minute': request.data.get('rate_limit_per_minute', 10),
-                    'initial_greeting': request.data.get('initial_greeting', 'Hi! I am your AI assistant.')
+                    'initial_greeting': request.data.get('initial_greeting', 'Hi! I am your AI assistant.'),
+                    # Chatbot branding customization
+                    'chatbot_title': request.data.get('chatbot_title', 'AI Assistant'),
+                    'chatbot_subtitle': request.data.get('chatbot_subtitle', 'Powered by AICC IntelliDoc'),
+                    'primary_color': request.data.get('primary_color', '#78b2e8'),
+                    'secondary_color': request.data.get('secondary_color', '#3a6d98'),
+                    'logo_url': request.data.get('logo_url', None)
                 }
             )
             
@@ -259,6 +271,17 @@ class DeploymentViewSet(viewsets.ViewSet):
                     deployment.rate_limit_per_minute = request.data['rate_limit_per_minute']
                 if 'initial_greeting' in request.data:
                     deployment.initial_greeting = request.data['initial_greeting']
+                # Handle chatbot branding customization
+                if 'chatbot_title' in request.data:
+                    deployment.chatbot_title = request.data['chatbot_title']
+                if 'chatbot_subtitle' in request.data:
+                    deployment.chatbot_subtitle = request.data['chatbot_subtitle']
+                if 'primary_color' in request.data:
+                    deployment.primary_color = request.data['primary_color']
+                if 'secondary_color' in request.data:
+                    deployment.secondary_color = request.data['secondary_color']
+                if 'logo_url' in request.data:
+                    deployment.logo_url = request.data['logo_url']
                 deployment.save()
             
             logger.info(f"✅ DEPLOYMENT: {'Created' if created else 'Updated'} deployment for project {project.name}")
@@ -271,6 +294,12 @@ class DeploymentViewSet(viewsets.ViewSet):
                 'endpoint_path': deployment.endpoint_path,
                 'rate_limit_per_minute': deployment.rate_limit_per_minute,
                 'initial_greeting': getattr(deployment, 'initial_greeting', 'Hi! I am your AI assistant.'),
+                # Chatbot branding customization
+                'chatbot_title': getattr(deployment, 'chatbot_title', 'AI Assistant'),
+                'chatbot_subtitle': getattr(deployment, 'chatbot_subtitle', 'Powered by AICC IntelliDoc'),
+                'primary_color': getattr(deployment, 'primary_color', '#78b2e8'),
+                'secondary_color': getattr(deployment, 'secondary_color', '#3a6d98'),
+                'logo_url': getattr(deployment, 'logo_url', None),
                 'message': 'Deployment created successfully' if created else 'Deployment updated successfully'
             }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
             
@@ -1453,6 +1482,7 @@ def embed_chatbot_html(request, project_id):
     """
     Serve the chatbot HTML for iframe embedding.
     This endpoint returns a complete HTML page with the chatbot interface.
+    Features a modern glassmorphism design with customizable branding.
     """
     from django.shortcuts import get_object_or_404
     from django.http import HttpResponse
@@ -1467,93 +1497,600 @@ def embed_chatbot_html(request, project_id):
         
         if not deployment or not deployment.workflow:
             return HttpResponse(
-                '<html><body><p>Chatbot not available. Please ensure deployment is active and a workflow is configured.</p></body></html>',
+                '<html><body style="font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#f5f5f7;"><p style="color:#6b7280;">Chatbot not available. Please ensure deployment is active and a workflow is configured.</p></body></html>',
                 status=404,
                 content_type='text/html'
             )
         
-        # Get the endpoint URL
+        # Get the endpoint URL and customization settings
         base_url = request.build_absolute_uri('/').rstrip('/')
         endpoint_url = f"{base_url}{deployment.endpoint_path}"
         initial_greeting = getattr(deployment, 'initial_greeting', 'Hi! I am your AI assistant.')
         
-        # Generate the HTML
+        # Get branding customization with defaults
+        chatbot_title = getattr(deployment, 'chatbot_title', 'AI Assistant')
+        chatbot_subtitle = getattr(deployment, 'chatbot_subtitle', 'Powered by AICC IntelliDoc')
+        primary_color = getattr(deployment, 'primary_color', '#0b3b66')
+        secondary_color = getattr(deployment, 'secondary_color', '#1e5a8a')
+        logo_url = getattr(deployment, 'logo_url', None) or ''
+        
+        # Generate the modern HTML with glassmorphism design
         html_content = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AICC Workflow Chatbot</title>
+  <title>{chatbot_title}</title>
   <style>
-    body {{ font-family: system-ui, -apple-system, sans-serif; background:#f5f5f7; margin:0; padding:0; display:flex; justify-content:center; align-items:center; height:100vh; }}
-    .chat-container {{ width: 420px; max-width: 100%; height: 620px; background:#ffffff; border-radius:16px; box-shadow:0 18px 45px rgba(15,23,42,0.18); display:flex; flex-direction:column; overflow:hidden; }}
-    .chat-header {{ padding:14px 18px; background:#0b3b66; color:#fff; display:flex; align-items:center; justify-content:space-between; }}
-    .chat-header-title {{ font-weight:600; font-size:15px; }}
-    .chat-header-sub {{ font-size:11px; opacity:0.8; }}
-    .chat-messages {{ flex:1; padding:14px 16px; overflow-y:auto; background:#f9fafb; font-size:14px; }}
-    .msg {{ margin-bottom:10px; display:flex; }}
-    .msg.user {{ justify-content:flex-end; }}
-    .msg.assistant {{ justify-content:flex-start; }}
-    .bubble {{ max-width:80%; padding:8px 11px; border-radius:12px; line-height:1.4; }}
-    .msg.user .bubble {{ background:#0b3b66; color:#fff; border-bottom-right-radius:4px; }}
-    .msg.assistant .bubble {{ background:#ffffff; border:1px solid #e5e7eb; color:#111827; border-bottom-left-radius:4px; }}
-    .chat-input {{ padding:10px 12px; border-top:1px solid #e5e7eb; background:#ffffff; display:flex; gap:8px; }}
-    .chat-input textarea {{ flex:1; resize:none; border:1px solid #d1d5db; border-radius:10px; padding:8px 10px; font-size:13px; max-height:80px; }}
-    .chat-input button {{ background:#0b3b66; color:#fff; border:none; border-radius:10px; padding:0 14px; font-size:13px; cursor:pointer; display:flex; align-items:center; gap:6px; }}
-    .chat-input button:disabled {{ opacity:0.6; cursor:not-allowed; }}
-    .status {{ font-size:11px; color:#6b7280; padding:4px 12px 8px; }}
-    .human-input-modal {{ display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index:1000; justify-content:center; align-items:center; }}
-    .human-input-modal.active {{ display:flex; }}
-    .human-input-box {{ background:#fff; border-radius:12px; padding:24px; max-width:500px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.3); }}
-    .human-input-title {{ font-size:18px; font-weight:600; color:#0b3b66; margin-bottom:12px; }}
-    .human-input-message {{ background:#f9fafb; border:1px solid #e5e7eb; border-radius:8px; padding:12px; margin-bottom:16px; font-size:14px; color:#374151; line-height:1.5; }}
-    .human-input-textarea {{ width:100%; min-height:80px; border:1px solid #d1d5db; border-radius:8px; padding:10px; font-size:14px; resize:vertical; font-family:inherit; }}
-    .human-input-buttons {{ display:flex; gap:8px; justify-content:flex-end; margin-top:16px; }}
-    .human-input-buttons button {{ padding:8px 16px; border-radius:8px; font-size:14px; cursor:pointer; border:none; }}
-    .human-input-buttons .submit-btn {{ background:#0b3b66; color:#fff; }}
-    .human-input-buttons .submit-btn:disabled {{ opacity:0.6; cursor:not-allowed; }}
-    .human-input-buttons .cancel-btn {{ background:#f3f4f6; color:#374151; }}
-    .thinking-indicator {{ display:flex; align-items:center; gap:6px; padding:8px 11px; }}
-    .thinking-dots {{ display:flex; gap:4px; }}
-    .thinking-dot {{ width:6px; height:6px; background:#9ca3af; border-radius:50%; animation:thinking 1.4s infinite; }}
-    .thinking-dot:nth-child(2) {{ animation-delay:0.2s; }}
-    .thinking-dot:nth-child(3) {{ animation-delay:0.4s; }}
-    @keyframes thinking {{
-      0%, 60%, 100% {{ opacity:0.3; transform:scale(0.8); }}
-      30% {{ opacity:1; transform:scale(1); }}
+    :root {{
+      --primary-color: {primary_color};
+      --secondary-color: {secondary_color};
+      --primary-rgb: {int(primary_color[1:3], 16)}, {int(primary_color[3:5], 16)}, {int(primary_color[5:7], 16)};
+      --secondary-rgb: {int(secondary_color[1:3], 16)}, {int(secondary_color[3:5], 16)}, {int(secondary_color[5:7], 16)};
     }}
-    .bubble markdown {{ display:block; }}
-    .bubble markdown strong {{ font-weight:600; }}
-    .bubble markdown em {{ font-style:italic; }}
-    .bubble markdown code {{ background:#f3f4f6; padding:2px 4px; border-radius:3px; font-family:monospace; font-size:0.9em; }}
-    .bubble markdown pre {{ background:#f3f4f6; padding:8px; border-radius:6px; overflow-x:auto; }}
-    .bubble markdown pre code {{ background:none; padding:0; }}
-    .bubble markdown ul, .bubble markdown ol {{ margin:4px 0; padding-left:20px; }}
-    .bubble markdown li {{ margin:2px 0; }}
+    
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    
+    html, body {{
+      font-family: 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: transparent;
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }}
+    
+    .chat-container {{
+      width: 100%;
+      height: 100%;
+      background: rgba(255, 255, 255, 0.95);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-radius: 24px;
+      box-shadow: 
+        0 25px 50px -12px rgba(0, 0, 0, 0.25),
+        0 0 0 1px rgba(255, 255, 255, 0.1);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      transition: transform 0.3s ease, box-shadow 0.3s ease;
+    }}
+    
+    .chat-container:hover {{
+      transform: translateY(-2px);
+      box-shadow: 
+        0 30px 60px -12px rgba(0, 0, 0, 0.3),
+        0 0 0 1px rgba(255, 255, 255, 0.15);
+    }}
+    
+    .chat-header {{
+      padding: 20px 24px;
+      background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      position: relative;
+      overflow: hidden;
+    }}
+    
+    .chat-header::before {{
+      content: '';
+      position: absolute;
+      top: -50%;
+      right: -50%;
+      width: 100%;
+      height: 200%;
+      background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
+      pointer-events: none;
+    }}
+    
+    .header-logo {{
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      backdrop-filter: blur(10px);
+      overflow: hidden;
+    }}
+    
+    .header-logo img {{
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      border-radius: 12px;
+    }}
+    
+    .header-logo-placeholder {{
+      font-size: 20px;
+      font-weight: 700;
+      color: #fff;
+      text-transform: uppercase;
+    }}
+    
+    .header-text {{
+      flex: 1;
+      min-width: 0;
+    }}
+    
+    .chat-header-title {{
+      font-weight: 700;
+      font-size: 17px;
+      letter-spacing: -0.3px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }}
+    
+    .chat-header-sub {{
+      font-size: 12px;
+      opacity: 0.85;
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }}
+    
+    .online-indicator {{
+      width: 10px;
+      height: 10px;
+      background: #22c55e;
+      border-radius: 50%;
+      box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.3);
+      animation: pulse 2s infinite;
+    }}
+    
+    @keyframes pulse {{
+      0%, 100% {{ box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.3); }}
+      50% {{ box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.1); }}
+    }}
+    
+    .chat-messages {{
+      flex: 1;
+      padding: 20px;
+      overflow-y: auto;
+      background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+      font-size: 14px;
+      scroll-behavior: smooth;
+    }}
+    
+    .chat-messages::-webkit-scrollbar {{
+      width: 6px;
+    }}
+    
+    .chat-messages::-webkit-scrollbar-track {{
+      background: transparent;
+    }}
+    
+    .chat-messages::-webkit-scrollbar-thumb {{
+      background: rgba(0, 0, 0, 0.1);
+      border-radius: 3px;
+    }}
+    
+    .chat-messages::-webkit-scrollbar-thumb:hover {{
+      background: rgba(0, 0, 0, 0.2);
+    }}
+    
+    .msg {{
+      margin-bottom: 16px;
+      display: flex;
+      animation: slideIn 0.3s ease-out;
+    }}
+    
+    @keyframes slideIn {{
+      from {{
+        opacity: 0;
+        transform: translateY(10px);
+      }}
+      to {{
+        opacity: 1;
+        transform: translateY(0);
+      }}
+    }}
+    
+    .msg.user {{
+      justify-content: flex-end;
+    }}
+    
+    .msg.assistant {{
+      justify-content: flex-start;
+    }}
+    
+    .bubble {{
+      max-width: 85%;
+      padding: 12px 16px;
+      border-radius: 18px;
+      line-height: 1.5;
+      position: relative;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    }}
+    
+    .msg.user .bubble {{
+      background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+      color: #fff;
+      border-bottom-right-radius: 6px;
+    }}
+    
+    .msg.assistant .bubble {{
+      background: #ffffff;
+      color: #1e293b;
+      border: 1px solid rgba(0, 0, 0, 0.06);
+      border-bottom-left-radius: 6px;
+    }}
+    
+    .chat-input-container {{
+      padding: 16px 20px 20px;
+      background: #ffffff;
+      border-top: 1px solid rgba(0, 0, 0, 0.06);
+    }}
+    
+    .chat-input {{
+      display: flex;
+      align-items: flex-end;
+      gap: 12px;
+      background: #f1f5f9;
+      border-radius: 16px;
+      padding: 8px 8px 8px 16px;
+      transition: box-shadow 0.2s ease, background 0.2s ease;
+    }}
+    
+    .chat-input:focus-within {{
+      background: #fff;
+      box-shadow: 0 0 0 2px var(--primary-color), 0 4px 12px rgba(var(--primary-rgb), 0.15);
+    }}
+    
+    .chat-input textarea {{
+      flex: 1;
+      resize: none;
+      border: none;
+      background: transparent;
+      padding: 8px 0;
+      font-size: 14px;
+      line-height: 1.5;
+      color: #1e293b;
+      font-family: inherit;
+      min-height: 24px;
+      max-height: 120px;
+      overflow-y: auto;
+    }}
+    
+    .chat-input textarea::placeholder {{
+      color: #94a3b8;
+    }}
+    
+    .chat-input textarea:focus {{
+      outline: none;
+    }}
+    
+    .chat-input button {{
+      width: 40px;
+      height: 40px;
+      background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+      flex-shrink: 0;
+    }}
+    
+    .chat-input button:hover:not(:disabled) {{
+      transform: scale(1.05);
+      box-shadow: 0 4px 12px rgba(var(--primary-rgb), 0.4);
+    }}
+    
+    .chat-input button:active:not(:disabled) {{
+      transform: scale(0.95);
+    }}
+    
+    .chat-input button:disabled {{
+      opacity: 0.5;
+      cursor: not-allowed;
+    }}
+    
+    .chat-input button svg {{
+      width: 20px;
+      height: 20px;
+      transition: transform 0.2s ease;
+    }}
+    
+    .chat-input button:hover:not(:disabled) svg {{
+      transform: translateX(2px);
+    }}
+    
+    .status {{
+      font-size: 11px;
+      color: #64748b;
+      padding: 8px 20px 0;
+      text-align: center;
+    }}
+    
+    .human-input-modal {{
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(15, 23, 42, 0.6);
+      backdrop-filter: blur(4px);
+      z-index: 1000;
+      justify-content: center;
+      align-items: center;
+      padding: 16px;
+    }}
+    
+    .human-input-modal.active {{
+      display: flex;
+    }}
+    
+    .human-input-box {{
+      background: #fff;
+      border-radius: 20px;
+      padding: 28px;
+      max-width: 480px;
+      width: 100%;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.4);
+      animation: modalSlideIn 0.3s ease-out;
+    }}
+    
+    @keyframes modalSlideIn {{
+      from {{
+        opacity: 0;
+        transform: scale(0.95) translateY(10px);
+      }}
+      to {{
+        opacity: 1;
+        transform: scale(1) translateY(0);
+      }}
+    }}
+    
+    .human-input-title {{
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--primary-color);
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }}
+    
+    .human-input-title::before {{
+      content: '';
+      width: 4px;
+      height: 20px;
+      background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+      border-radius: 2px;
+    }}
+    
+    .human-input-message {{
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 20px;
+      font-size: 14px;
+      color: #475569;
+      line-height: 1.6;
+    }}
+    
+    .human-input-textarea {{
+      width: 100%;
+      min-height: 100px;
+      border: 2px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 14px;
+      font-size: 14px;
+      resize: vertical;
+      font-family: inherit;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }}
+    
+    .human-input-textarea:focus {{
+      outline: none;
+      border-color: var(--primary-color);
+      box-shadow: 0 0 0 3px rgba(var(--primary-rgb), 0.1);
+    }}
+    
+    .human-input-buttons {{
+      display: flex;
+      gap: 12px;
+      justify-content: flex-end;
+      margin-top: 20px;
+    }}
+    
+    .human-input-buttons button {{
+      padding: 12px 24px;
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: all 0.2s ease;
+    }}
+    
+    .human-input-buttons .submit-btn {{
+      background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+      color: #fff;
+    }}
+    
+    .human-input-buttons .submit-btn:hover:not(:disabled) {{
+      box-shadow: 0 4px 12px rgba(var(--primary-rgb), 0.4);
+      transform: translateY(-1px);
+    }}
+    
+    .human-input-buttons .submit-btn:disabled {{
+      opacity: 0.6;
+      cursor: not-allowed;
+    }}
+    
+    .human-input-buttons .cancel-btn {{
+      background: #f1f5f9;
+      color: #475569;
+    }}
+    
+    .human-input-buttons .cancel-btn:hover {{
+      background: #e2e8f0;
+    }}
+    
+    .thinking-indicator {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 16px;
+    }}
+    
+    .thinking-dots {{
+      display: flex;
+      gap: 5px;
+    }}
+    
+    .thinking-dot {{
+      width: 8px;
+      height: 8px;
+      background: var(--primary-color);
+      border-radius: 50%;
+      animation: bounce 1.4s infinite ease-in-out both;
+    }}
+    
+    .thinking-dot:nth-child(1) {{ animation-delay: -0.32s; }}
+    .thinking-dot:nth-child(2) {{ animation-delay: -0.16s; }}
+    .thinking-dot:nth-child(3) {{ animation-delay: 0s; }}
+    
+    @keyframes bounce {{
+      0%, 80%, 100% {{
+        transform: scale(0.6);
+        opacity: 0.4;
+      }}
+      40% {{
+        transform: scale(1);
+        opacity: 1;
+      }}
+    }}
+    
+    /* Markdown Styles */
+    .bubble markdown {{
+      display: block;
+    }}
+    
+    .bubble markdown p {{
+      margin: 8px 0;
+    }}
+    
+    .bubble markdown p:first-child {{
+      margin-top: 0;
+    }}
+    
+    .bubble markdown p:last-child {{
+      margin-bottom: 0;
+    }}
+    
+    .bubble markdown strong {{
+      font-weight: 600;
+    }}
+    
+    .bubble markdown em {{
+      font-style: italic;
+    }}
+    
+    .bubble markdown code {{
+      background: rgba(0, 0, 0, 0.06);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: 'SF Mono', 'Consolas', monospace;
+      font-size: 0.875em;
+    }}
+    
+    .msg.user .bubble markdown code {{
+      background: rgba(255, 255, 255, 0.2);
+    }}
+    
+    .bubble markdown pre {{
+      background: #1e293b;
+      color: #e2e8f0;
+      padding: 14px;
+      border-radius: 10px;
+      overflow-x: auto;
+      margin: 10px 0;
+    }}
+    
+    .bubble markdown pre code {{
+      background: none;
+      padding: 0;
+      color: inherit;
+    }}
+    
+    .bubble markdown ul, .bubble markdown ol {{
+      margin: 8px 0;
+      padding-left: 24px;
+    }}
+    
+    .bubble markdown li {{
+      margin: 4px 0;
+    }}
+    
+    .bubble markdown blockquote {{
+      border-left: 3px solid var(--primary-color);
+      padding-left: 12px;
+      margin: 10px 0;
+      color: #64748b;
+      font-style: italic;
+    }}
+    
+    .bubble markdown a {{
+      color: var(--primary-color);
+      text-decoration: underline;
+    }}
+    
+    .msg.user .bubble markdown a {{
+      color: #fff;
+    }}
+    
+    .bubble markdown h1 {{ font-size: 1.4em; font-weight: 700; margin: 14px 0 8px; }}
+    .bubble markdown h2 {{ font-size: 1.25em; font-weight: 700; margin: 12px 0 6px; }}
+    .bubble markdown h3 {{ font-size: 1.1em; font-weight: 600; margin: 10px 0 4px; }}
+    .bubble markdown hr {{ border: none; border-top: 1px solid #e2e8f0; margin: 12px 0; }}
   </style>
 </head>
 <body>
 <div class="chat-container">
   <div class="chat-header">
-    <div>
-      <div class="chat-header-title">AICC Workflow Chatbot</div>
-      <div class="chat-header-sub">Powered by your deployed agent workflow</div>
+    <div class="header-logo">
+      {f'<img src="{logo_url}" alt="Logo" />' if logo_url else f'<span class="header-logo-placeholder">{chatbot_title[0] if chatbot_title else "A"}</span>'}
     </div>
+    <div class="header-text">
+      <div class="chat-header-title">{chatbot_title}</div>
+      <div class="chat-header-sub">{chatbot_subtitle}</div>
+    </div>
+    <div class="online-indicator"></div>
   </div>
   <div id="messages" class="chat-messages"></div>
   <div id="status" class="status"></div>
-  <div class="chat-input">
-    <textarea id="input" rows="1" placeholder="Ask a question about your documents..."></textarea>
-    <button id="sendBtn">
-      <span>Send</span>
-    </button>
+  <div class="chat-input-container">
+    <div class="chat-input">
+      <textarea id="input" rows="1" placeholder="Type your message..."></textarea>
+      <button id="sendBtn" title="Send message">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"></line>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+        </svg>
+      </button>
+    </div>
   </div>
 </div>
 
 <!-- Human Input Modal -->
 <div id="humanInputModal" class="human-input-modal">
   <div class="human-input-box">
-    <div class="human-input-title" id="humanInputTitle">USER INPUT REQUIRED</div>
+    <div class="human-input-title" id="humanInputTitle">Input Required</div>
     <div class="human-input-message" id="humanInputMessage"></div>
     <textarea id="humanInputTextarea" class="human-input-textarea" placeholder="Enter your response..."></textarea>
     <div class="human-input-buttons">
@@ -1565,35 +2102,95 @@ def embed_chatbot_html(request, project_id):
 
 <script>
   const ENDPOINT_URL = {json.dumps(endpoint_url)};
-  const STREAM_URL = ENDPOINT_URL.replace(/\/$/, '') + '/stream/';
-  const SUBMIT_INPUT_URL = ENDPOINT_URL.replace(/\/$/, '') + '/submit-input/';
+  const STREAM_URL = ENDPOINT_URL.replace(/\\/$/, '') + '/stream/';
+  const SUBMIT_INPUT_URL = ENDPOINT_URL.replace(/\\/$/, '') + '/submit-input/';
   const INITIAL_GREETING = {json.dumps(initial_greeting)};
   
-  // Simple markdown renderer
+  // Enhanced markdown renderer
   function renderMarkdown(text) {{
     if (!text) return '';
-    // Escape HTML first
     let html = text
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
     
-    // Bold
-    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    html = html.replace(/__(.+?)__/g, '<strong>$1</strong>');
+    // Headers
+    html = html.replace(/^######\\s+(.+)$/gm, '<h6>$1</h6>');
+    html = html.replace(/^#####\\s+(.+)$/gm, '<h5>$1</h5>');
+    html = html.replace(/^####\\s+(.+)$/gm, '<h4>$1</h4>');
+    html = html.replace(/^###\\s+(.+)$/gm, '<h3>$1</h3>');
+    html = html.replace(/^##\\s+(.+)$/gm, '<h2>$1</h2>');
+    html = html.replace(/^#\\s+(.+)$/gm, '<h1>$1</h1>');
     
-    // Italic
-    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-    html = html.replace(/_(.+?)_/g, '<em>$1</em>');
+    // Horizontal rules
+    html = html.replace(/^\\s*[-*]{{3,}}\\s*$/gm, '<hr>');
     
     // Code blocks
-    html = html.replace(/```([\\s\\S]*?)```/g, '<pre><code>$1</code></pre>');
+    html = html.replace(/```(\\w+)?[\\n\\r]+([\\s\\S]*?)```/g, function(match, lang, code) {{
+      return '<pre><code>' + code.trim() + '</code></pre>';
+    }});
+    
+    // Blockquotes
+    html = html.replace(/^>\\s+(.+)$/gm, '<blockquote>$1</blockquote>');
+    
+    // Process lists
+    const lines = html.split('\\n');
+    const processedLines = [];
+    let inOrderedList = false;
+    let inUnorderedList = false;
+    
+    for (let i = 0; i < lines.length; i++) {{
+      const line = lines[i];
+      const orderedMatch = line.match(/^(\\d+)\\.\\s+(.+)$/);
+      const unorderedMatch = line.match(/^[-*]\\s+(.+)$/);
+      
+      if (orderedMatch) {{
+        if (!inOrderedList) {{
+          if (inUnorderedList) {{ processedLines.push('</ul>'); inUnorderedList = false; }}
+          processedLines.push('<ol>');
+          inOrderedList = true;
+        }}
+        processedLines.push('<li>' + orderedMatch[2] + '</li>');
+      }} else if (unorderedMatch) {{
+        if (!inUnorderedList) {{
+          if (inOrderedList) {{ processedLines.push('</ol>'); inOrderedList = false; }}
+          processedLines.push('<ul>');
+          inUnorderedList = true;
+        }}
+        processedLines.push('<li>' + unorderedMatch[1] + '</li>');
+      }} else {{
+        if (inOrderedList) {{ processedLines.push('</ol>'); inOrderedList = false; }}
+        if (inUnorderedList) {{ processedLines.push('</ul>'); inUnorderedList = false; }}
+        processedLines.push(line);
+      }}
+    }}
+    if (inOrderedList) processedLines.push('</ol>');
+    if (inUnorderedList) processedLines.push('</ul>');
+    html = processedLines.join('\\n');
+    
+    // Links
+    html = html.replace(/\\[([^\\]]+)\\]\\(([^\\)]+)\\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    
+    // Bold
+    html = html.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+    html = html.replace(/__(?!_)([^_]+)__/g, '<strong>$1</strong>');
+    
+    // Italic
+    html = html.replace(/\\*(?!\\*)([^*]+)\\*(?!\\*)/g, '<em>$1</em>');
+    html = html.replace(/_(?!_)([^_]+)_(?!_)/g, '<em>$1</em>');
     
     // Inline code
     html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
     
-    // Line breaks
-    html = html.replace(/\\n/g, '<br>');
+    // Paragraphs
+    const paragraphs = html.split(/\\n\\n+/);
+    html = paragraphs.map(function(p) {{
+      p = p.trim();
+      if (!p) return '';
+      if (/^<(pre|blockquote|ul|ol|hr|h[1-6])/i.test(p)) return p;
+      p = p.replace(/\\n/g, '<br>');
+      return '<p>' + p + '</p>';
+    }}).filter(function(p) {{ return p; }}).join('');
     
     return html;
   }}
@@ -1613,6 +2210,13 @@ def embed_chatbot_html(request, project_id):
   const humanInputTextarea = document.getElementById('humanInputTextarea');
   const humanInputSubmit = document.getElementById('humanInputSubmit');
   const humanInputCancel = document.getElementById('humanInputCancel');
+  
+  // Auto-resize textarea
+  function autoResize() {{
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+  }}
+  inputEl.addEventListener('input', autoResize);
 
   function appendMessage(role, text, isStreaming = false) {{
     const msg = document.createElement('div');
@@ -1621,12 +2225,11 @@ def embed_chatbot_html(request, project_id):
     bubble.className = 'bubble';
     
     if (role === 'assistant' && !isStreaming) {{
-      // Render markdown for assistant messages
       const markdownEl = document.createElement('markdown');
       markdownEl.innerHTML = renderMarkdown(text);
       bubble.appendChild(markdownEl);
     }} else {{
-    bubble.textContent = text;
+      bubble.textContent = text;
     }}
     
     msg.appendChild(bubble);
@@ -1649,13 +2252,11 @@ def embed_chatbot_html(request, project_id):
   
   function hideThinkingIndicator() {{
     const indicator = document.getElementById('thinking-indicator');
-    if (indicator) {{
-      indicator.remove();
-    }}
+    if (indicator) indicator.remove();
   }}
 
   function showHumanInputModal(title, message) {{
-    humanInputTitle.textContent = title || 'USER INPUT REQUIRED';
+    humanInputTitle.textContent = title || 'Input Required';
     humanInputMessage.textContent = message || 'Please provide your input to continue.';
     humanInputTextarea.value = '';
     humanInputModal.classList.add('active');
@@ -1680,16 +2281,13 @@ def embed_chatbot_html(request, project_id):
     }}
 
     humanInputSubmit.disabled = true;
-    statusEl.textContent = 'Submitting your response...';
+    statusEl.textContent = 'Submitting...';
 
     try {{
       const resp = await fetch(SUBMIT_INPUT_URL, {{
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json' }},
-        body: JSON.stringify({{
-          session_id: sessionId,
-          user_input: userInput
-        }})
+        body: JSON.stringify({{ session_id: sessionId, user_input: userInput }})
       }});
 
       if (!resp.ok) {{
@@ -1698,15 +2296,11 @@ def embed_chatbot_html(request, project_id):
       }}
 
       const data = await resp.json();
-      
-      // Add user input to conversation
       appendMessage('user', userInput);
       messages.push({{ role: 'user', content: userInput }});
-      
       hideHumanInputModal();
 
       if (data.status === 'awaiting_human_input') {{
-        // Another UserProxyAgent requires input
         showHumanInputModal(data.title, data.last_conversation_message);
         currentExecutionId = data.execution_id;
       }} else if (data.status === 'success') {{
@@ -1716,19 +2310,16 @@ def embed_chatbot_html(request, project_id):
         statusEl.textContent = '';
         currentExecutionId = null;
       }} else if (data.status === 'processing') {{
-        statusEl.textContent = 'Workflow is processing. Please wait...';
-        // Poll for completion or show message
-        setTimeout(() => {{
-          statusEl.textContent = 'Processing complete. Check the conversation.';
-        }}, 2000);
+        statusEl.textContent = 'Processing...';
+        setTimeout(() => {{ statusEl.textContent = ''; }}, 2000);
       }} else {{
         appendMessage('assistant', 'Error: ' + (data.error || 'Unexpected error'));
-        statusEl.textContent = 'Error from workflow endpoint';
+        statusEl.textContent = '';
       }}
     }} catch (e) {{
-      console.error('Submit input error:', e);
-      appendMessage('assistant', 'Sorry, there was a problem submitting your input.');
-      statusEl.textContent = e.message || 'Network error';
+      console.error('Submit error:', e);
+      appendMessage('assistant', 'Sorry, there was a problem.');
+      statusEl.textContent = e.message || 'Error';
     }} finally {{
       humanInputSubmit.disabled = false;
     }}
@@ -1736,53 +2327,28 @@ def embed_chatbot_html(request, project_id):
 
   async function sendMessage() {{
     const text = inputEl.value.trim();
-    if (!text) return;
-
-    if (awaitingHumanInput) {{
-      alert('Please respond to the human input request first');
-      return;
-    }}
+    if (!text || awaitingHumanInput) return;
 
     appendMessage('user', text);
     messages.push({{ role: 'user', content: text }});
 
     inputEl.value = '';
+    inputEl.style.height = 'auto';
     sendBtn.disabled = true;
     statusEl.textContent = '';
-    
-    // Show thinking indicator
     showThinkingIndicator();
 
     try {{
-      // Use streaming endpoint
       const resp = await fetch(STREAM_URL, {{
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json' }},
-        body: JSON.stringify({{
-          user_query: text,
-          session_id: sessionId
-        }})
+        body: JSON.stringify({{ user_query: text, session_id: sessionId }})
       }});
 
-      if (!resp.ok) {{
-        const err = await resp.text().catch(() => '');
-        throw new Error(err || 'HTTP ' + resp.status);
-      }}
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
 
-      // Hide thinking indicator
-      hideThinkingIndicator();
-      
-      // Create streaming message bubble
-      const msg = document.createElement('div');
-      msg.className = 'msg assistant';
-      const bubble = document.createElement('div');
-      bubble.className = 'bubble';
-      const markdownEl = document.createElement('markdown');
-      bubble.appendChild(markdownEl);
-      msg.appendChild(bubble);
-      messagesEl.appendChild(msg);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
-      
+      let thinkingHidden = false;
+      let msg = null, bubble = null, markdownEl = null;
       let accumulatedContent = '';
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
@@ -1799,35 +2365,41 @@ def embed_chatbot_html(request, project_id):
             try {{
               const data = JSON.parse(line.slice(6));
               
-              if (data.type === 'connected') {{
-                // Connection established
-              }} else if (data.type === 'thinking') {{
-                // Keep thinking indicator
-              }} else if (data.type === 'content') {{
+              if (data.type === 'content') {{
+                if (!thinkingHidden) {{
+                  hideThinkingIndicator();
+                  thinkingHidden = true;
+                  msg = document.createElement('div');
+                  msg.className = 'msg assistant';
+                  bubble = document.createElement('div');
+                  bubble.className = 'bubble';
+                  markdownEl = document.createElement('markdown');
+                  bubble.appendChild(markdownEl);
+                  msg.appendChild(bubble);
+                  messagesEl.appendChild(msg);
+                }}
                 accumulatedContent += data.content;
                 markdownEl.innerHTML = renderMarkdown(accumulatedContent);
                 messagesEl.scrollTop = messagesEl.scrollHeight;
               }} else if (data.type === 'awaiting_human_input') {{
                 hideThinkingIndicator();
-        showHumanInputModal(data.title, data.last_conversation_message);
-        currentExecutionId = data.execution_id;
-        statusEl.textContent = 'Waiting for your input...';
-                msg.remove(); // Remove streaming message
+                showHumanInputModal(data.title, data.last_conversation_message);
+                currentExecutionId = data.execution_id;
+                statusEl.textContent = 'Waiting for input...';
+                if (msg) msg.remove();
                 return;
               }} else if (data.type === 'error') {{
                 hideThinkingIndicator();
-                msg.remove();
-        appendMessage('assistant', 'Error: ' + (data.error || 'Unexpected error'));
-        statusEl.textContent = 'Error from workflow endpoint';
+                if (msg) msg.remove();
+                appendMessage('assistant', 'Error: ' + (data.error || 'Unexpected error'));
                 return;
               }} else if (data.type === 'done') {{
-                // Streaming complete
                 messages.push({{ role: 'assistant', content: accumulatedContent }});
                 statusEl.textContent = '';
                 return;
               }}
             }} catch (e) {{
-              console.error('Error parsing SSE data:', e);
+              console.error('Parse error:', e);
             }}
           }}
         }}
@@ -1835,12 +2407,10 @@ def embed_chatbot_html(request, project_id):
     }} catch (e) {{
       console.error('Chat error:', e);
       hideThinkingIndicator();
-      appendMessage('assistant', 'Sorry, there was a problem talking to the workflow.');
-      statusEl.textContent = e.message || 'Network error';
+      appendMessage('assistant', 'Sorry, there was a connection problem.');
+      statusEl.textContent = '';
     }} finally {{
-      if (!awaitingHumanInput) {{
-        sendBtn.disabled = false;
-      }}
+      if (!awaitingHumanInput) sendBtn.disabled = false;
     }}
   }}
 
@@ -1855,7 +2425,7 @@ def embed_chatbot_html(request, project_id):
   humanInputSubmit.addEventListener('click', submitHumanInput);
   humanInputCancel.addEventListener('click', () => {{
     hideHumanInputModal();
-    statusEl.textContent = 'Input cancelled';
+    statusEl.textContent = '';
   }});
   humanInputTextarea.addEventListener('keydown', (e) => {{
     if (e.key === 'Enter' && e.ctrlKey) {{
@@ -1876,7 +2446,7 @@ def embed_chatbot_html(request, project_id):
     except Exception as e:
         logger.error(f"❌ DEPLOYMENT: Error serving embed HTML: {e}", exc_info=True)
         return HttpResponse(
-            '<html><body><p>Error loading chatbot. Please try again later.</p></body></html>',
+            '<html><body style="font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#f5f5f7;"><p style="color:#ef4444;">Error loading chatbot. Please try again later.</p></body></html>',
             status=500,
             content_type='text/html'
         )

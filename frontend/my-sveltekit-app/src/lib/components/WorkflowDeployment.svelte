@@ -28,8 +28,23 @@
   let endpointUrl = '';
   let initialGreeting = 'Hi! I am your AI assistant.';
   
-  // Function to generate embed code (called on demand to avoid PostCSS issues)
-  // Using String.fromCharCode to avoid PostCSS parsing CSS in the string
+  // Chatbot branding customization
+  let chatbotTitle = 'AI Assistant';
+  let chatbotSubtitle = 'Powered by AICC IntelliDoc';
+  let primaryColor = '#78b2e8';
+  let secondaryColor = '#3a6d98';
+  let logoUrl = '';
+  
+  // Helper function to convert hex color to RGB values
+  function hexToRgb(hex: string): string {
+    const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    if (result) {
+      return `${parseInt(result[1], 16)}, ${parseInt(result[2], 16)}, ${parseInt(result[3], 16)}`;
+    }
+    return '11, 59, 102'; // Default fallback
+  }
+
+  // Function to generate embed code with modern glassmorphism design
   function generateEmbedCode(): string {
     if (!endpointUrl || !initialGreeting) {
       console.warn('⚠️ DEPLOYMENT: Cannot generate embed code - missing endpointUrl or initialGreeting');
@@ -37,6 +52,15 @@
     }
     const escapedEndpoint = endpointUrl.replace(/'/g, "\\'").replace(/\\/g, '\\\\');
     const escapedGreeting = JSON.stringify(initialGreeting);
+    const title = chatbotTitle || 'AI Assistant';
+    const subtitle = chatbotSubtitle || 'Powered by AICC IntelliDoc';
+    const pColor = primaryColor || '#0b3b66';
+    const sColor = secondaryColor || '#1e5a8a';
+    const logo = logoUrl || '';
+    const primaryRgb = hexToRgb(pColor);
+    const logoHtml = logo 
+      ? `<img src="${logo}" alt="Logo" style="width:100%;height:100%;object-fit:cover;border-radius:12px;" />`
+      : `<span style="font-size:20px;font-weight:700;color:#fff;text-transform:uppercase;">${title[0] || 'A'}</span>`;
     
     // Build HTML using array join to avoid PostCSS parsing issues
     const htmlParts: string[] = [];
@@ -44,93 +68,119 @@
     htmlParts.push('<html lang="en">');
     htmlParts.push('<head>');
     htmlParts.push('  <meta charset="UTF-8" />');
-    htmlParts.push('  <title>AICC Workflow Chatbot</title>');
-    // Split style tag to avoid PostCSS parsing
+    htmlParts.push('  <meta name="viewport" content="width=device-width, initial-scale=1.0" />');
+    htmlParts.push(`  <title>${title}</title>`);
     htmlParts.push('  <' + 'style>');
-    htmlParts.push('    body { font-family: system-ui, -apple-system, sans-serif; background:#f5f5f7; margin:0; padding:0; display:flex; justify-content:center; align-items:center; height:100vh; }');
-    htmlParts.push('    .chat-container { width: 420px; max-width: 100%; height: 620px; background:#ffffff; border-radius:16px; box-shadow:0 18px 45px rgba(15,23,42,0.18); display:flex; flex-direction:column; overflow:hidden; }');
-    htmlParts.push('    .chat-header { padding:14px 18px; background:#0b3b66; color:#fff; display:flex; align-items:center; justify-content:space-between; }');
-    htmlParts.push('    .chat-header-title { font-weight:600; font-size:15px; }');
-    htmlParts.push('    .chat-header-sub { font-size:11px; opacity:0.8; }');
-    htmlParts.push('    .chat-messages { flex:1; padding:14px 16px; overflow-y:auto; background:#f9fafb; font-size:14px; }');
-    htmlParts.push('    .msg { margin-bottom:10px; display:flex; }');
-    htmlParts.push('    .msg.user { justify-content:flex-end; }');
-    htmlParts.push('    .msg.assistant { justify-content:flex-start; }');
-    htmlParts.push('    .bubble { max-width:80%; padding:8px 11px; border-radius:12px; line-height:1.4; }');
-    htmlParts.push('    .msg.user .bubble { background:#0b3b66; color:#fff; border-bottom-right-radius:4px; }');
-    htmlParts.push('    .msg.assistant .bubble { background:#ffffff; border:1px solid #e5e7eb; color:#111827; border-bottom-left-radius:4px; }');
-    htmlParts.push('    .chat-input { padding:10px 12px; border-top:1px solid #e5e7eb; background:#ffffff; display:flex; gap:8px; }');
-    htmlParts.push('    .chat-input textarea { flex:1; resize:none; border:1px solid #d1d5db; border-radius:10px; padding:8px 10px; font-size:13px; max-height:80px; }');
-    htmlParts.push('    .chat-input button { background:#0b3b66; color:#fff; border:none; border-radius:10px; padding:0 14px; font-size:13px; cursor:pointer; display:flex; align-items:center; gap:6px; }');
-    htmlParts.push('    .chat-input button:disabled { opacity:0.6; cursor:not-allowed; }');
-    htmlParts.push('    .status { font-size:11px; color:#6b7280; padding:4px 12px 8px; }');
-    htmlParts.push('    .human-input-modal { display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index:1000; justify-content:center; align-items:center; }');
-    htmlParts.push('    .human-input-modal.active { display:flex; }');
-    htmlParts.push('    .human-input-box { background:#fff; border-radius:12px; padding:24px; max-width:500px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.3); }');
-    htmlParts.push('    .human-input-title { font-size:18px; font-weight:600; color:#0b3b66; margin-bottom:12px; }');
-    htmlParts.push('    .human-input-message { background:#f9fafb; border:1px solid #e5e7eb; border-radius:8px; padding:12px; margin-bottom:16px; font-size:14px; color:#374151; line-height:1.5; }');
-    htmlParts.push('    .human-input-textarea { width:100%; min-height:80px; border:1px solid #d1d5db; border-radius:8px; padding:10px; font-size:14px; resize:vertical; font-family:inherit; }');
-    htmlParts.push('    .human-input-buttons { display:flex; gap:8px; justify-content:flex-end; margin-top:16px; }');
-    htmlParts.push('    .human-input-buttons button { padding:8px 16px; border-radius:8px; font-size:14px; cursor:pointer; border:none; }');
-    htmlParts.push('    .human-input-buttons .submit-btn { background:#0b3b66; color:#fff; }');
-    htmlParts.push('    .human-input-buttons .submit-btn:disabled { opacity:0.6; cursor:not-allowed; }');
-    htmlParts.push('    .human-input-buttons .cancel-btn { background:#f3f4f6; color:#374151; }');
-    htmlParts.push('    #thinking-indicator { background:transparent; border:none; padding:0; }');
-    htmlParts.push('    #thinking-indicator .bubble { display:none; }');
-    htmlParts.push('    .thinking-indicator { display:flex; align-items:center; gap:8px; padding:8px 0; }');
-    htmlParts.push('    .thinking-spinner { width:16px; height:16px; border:2px solid #e5e7eb; border-top:2px solid #0b3b66; border-radius:50%; animation:spin 0.8s linear infinite; flex-shrink:0; }');
-    htmlParts.push('    .thinking-text { color:#6b7280; font-size:13px; }');
-    htmlParts.push('    @keyframes spin {');
-    htmlParts.push('      0% { transform:rotate(0deg); }');
-    htmlParts.push('      100% { transform:rotate(360deg); }');
-    htmlParts.push('    }');
-    htmlParts.push('    .bubble markdown { display:block; }');
-    htmlParts.push('    .bubble markdown p { margin:6px 0; line-height:1.5; }');
-    htmlParts.push('    .bubble markdown p:first-child { margin-top:0; }');
-    htmlParts.push('    .bubble markdown p:last-child { margin-bottom:0; }');
-    htmlParts.push('    .bubble markdown strong { font-weight:600; }');
-    htmlParts.push('    .bubble markdown em { font-style:italic; }');
-    htmlParts.push('    .bubble markdown code { background:#f3f4f6; padding:2px 4px; border-radius:3px; font-family:monospace; font-size:0.9em; }');
-    htmlParts.push('    .bubble markdown pre { background:#f3f4f6; padding:12px; border-radius:6px; overflow-x:auto; margin:8px 0; }');
-    htmlParts.push('    .bubble markdown pre code { background:none; padding:0; font-size:0.85em; }');
-    htmlParts.push('    .bubble markdown ul, .bubble markdown ol { margin:8px 0; padding-left:24px; }');
-    htmlParts.push('    .bubble markdown li { margin:4px 0; line-height:1.4; }');
-    htmlParts.push('    .bubble markdown blockquote { border-left:3px solid #d1d5db; padding-left:12px; margin:8px 0; color:#6b7280; font-style:italic; }');
-    htmlParts.push('    .bubble markdown hr { border:none; border-top:1px solid #e5e7eb; margin:12px 0; }');
-    htmlParts.push('    .bubble markdown a { color:#0b3b66; text-decoration:underline; }');
-    htmlParts.push('    .bubble markdown a:hover { color:#0a2d4d; }');
-    htmlParts.push('    .bubble markdown h1 { font-size:1.5em; font-weight:600; margin:12px 0 8px; color:#111827; }');
-    htmlParts.push('    .bubble markdown h2 { font-size:1.3em; font-weight:600; margin:10px 0 6px; color:#111827; }');
-    htmlParts.push('    .bubble markdown h3 { font-size:1.15em; font-weight:600; margin:8px 0 4px; color:#111827; }');
-    htmlParts.push('    .bubble markdown h4, .bubble markdown h5, .bubble markdown h6 { font-size:1em; font-weight:600; margin:6px 0 4px; color:#111827; }');
-    htmlParts.push('    .bubble markdown h1 { font-size:1.5em; font-weight:600; margin:12px 0 8px; color:#111827; }');
-    htmlParts.push('    .bubble markdown h2 { font-size:1.3em; font-weight:600; margin:10px 0 6px; color:#111827; }');
-    htmlParts.push('    .bubble markdown h3 { font-size:1.15em; font-weight:600; margin:8px 0 4px; color:#111827; }');
-    htmlParts.push('    .bubble markdown h4, .bubble markdown h5, .bubble markdown h6 { font-size:1em; font-weight:600; margin:6px 0 4px; color:#111827; }');
+    htmlParts.push(`    :root { --primary-color: ${pColor}; --secondary-color: ${sColor}; --primary-rgb: ${primaryRgb}; }`);
+    htmlParts.push('    * { box-sizing: border-box; margin: 0; padding: 0; }');
+    htmlParts.push("    html, body { font-family: 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif; background: transparent; margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }");
+    htmlParts.push('    .chat-container { width: 100%; height: 100%; background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-radius: 24px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(255, 255, 255, 0.1); display: flex; flex-direction: column; overflow: hidden; transition: transform 0.3s ease, box-shadow 0.3s ease; }');
+    htmlParts.push('    .chat-container:hover { transform: translateY(-2px); box-shadow: 0 30px 60px -12px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.15); }');
+    htmlParts.push('    .chat-header { padding: 20px 24px; background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%); color: #fff; display: flex; align-items: center; gap: 14px; position: relative; overflow: hidden; }');
+    htmlParts.push("    .chat-header::before { content: ''; position: absolute; top: -50%; right: -50%; width: 100%; height: 200%; background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%); pointer-events: none; }");
+    htmlParts.push('    .header-logo { width: 44px; height: 44px; border-radius: 12px; background: rgba(255, 255, 255, 0.2); display: flex; align-items: center; justify-content: center; flex-shrink: 0; backdrop-filter: blur(10px); overflow: hidden; }');
+    htmlParts.push('    .header-text { flex: 1; min-width: 0; }');
+    htmlParts.push('    .chat-header-title { font-weight: 700; font-size: 17px; letter-spacing: -0.3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }');
+    htmlParts.push('    .chat-header-sub { font-size: 12px; opacity: 0.85; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }');
+    htmlParts.push('    .online-indicator { width: 10px; height: 10px; background: #22c55e; border-radius: 50%; box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.3); animation: pulse 2s infinite; }');
+    htmlParts.push('    @keyframes pulse { 0%, 100% { box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.3); } 50% { box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.1); } }');
+    htmlParts.push('    .chat-messages { flex: 1; padding: 20px; overflow-y: auto; background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%); font-size: 14px; scroll-behavior: smooth; }');
+    htmlParts.push('    .chat-messages::-webkit-scrollbar { width: 6px; }');
+    htmlParts.push('    .chat-messages::-webkit-scrollbar-track { background: transparent; }');
+    htmlParts.push('    .chat-messages::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.1); border-radius: 3px; }');
+    htmlParts.push('    .msg { margin-bottom: 16px; display: flex; animation: slideIn 0.3s ease-out; }');
+    htmlParts.push('    @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }');
+    htmlParts.push('    .msg.user { justify-content: flex-end; }');
+    htmlParts.push('    .msg.assistant { justify-content: flex-start; }');
+    htmlParts.push('    .bubble { max-width: 85%; padding: 12px 16px; border-radius: 18px; line-height: 1.5; position: relative; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06); }');
+    htmlParts.push('    .msg.user .bubble { background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%); color: #fff; border-bottom-right-radius: 6px; }');
+    htmlParts.push('    .msg.assistant .bubble { background: #ffffff; color: #1e293b; border: 1px solid rgba(0, 0, 0, 0.06); border-bottom-left-radius: 6px; }');
+    htmlParts.push('    .chat-input-container { padding: 16px 20px 20px; background: #ffffff; border-top: 1px solid rgba(0, 0, 0, 0.06); }');
+    htmlParts.push('    .chat-input { display: flex; align-items: flex-end; gap: 12px; background: #f1f5f9; border-radius: 16px; padding: 8px 8px 8px 16px; transition: box-shadow 0.2s ease, background 0.2s ease; }');
+    htmlParts.push('    .chat-input:focus-within { background: #fff; box-shadow: 0 0 0 2px var(--primary-color), 0 4px 12px rgba(var(--primary-rgb), 0.15); }');
+    htmlParts.push('    .chat-input textarea { flex: 1; resize: none; border: none; background: transparent; padding: 8px 0; font-size: 14px; line-height: 1.5; color: #1e293b; font-family: inherit; min-height: 24px; max-height: 120px; overflow-y: auto; }');
+    htmlParts.push('    .chat-input textarea::placeholder { color: #94a3b8; }');
+    htmlParts.push('    .chat-input textarea:focus { outline: none; }');
+    htmlParts.push('    .chat-input button { width: 40px; height: 40px; background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%); color: #fff; border: none; border-radius: 12px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: transform 0.2s ease, box-shadow 0.2s ease; flex-shrink: 0; }');
+    htmlParts.push('    .chat-input button:hover:not(:disabled) { transform: scale(1.05); box-shadow: 0 4px 12px rgba(var(--primary-rgb), 0.4); }');
+    htmlParts.push('    .chat-input button:active:not(:disabled) { transform: scale(0.95); }');
+    htmlParts.push('    .chat-input button:disabled { opacity: 0.5; cursor: not-allowed; }');
+    htmlParts.push('    .chat-input button svg { width: 20px; height: 20px; transition: transform 0.2s ease; }');
+    htmlParts.push('    .chat-input button:hover:not(:disabled) svg { transform: translateX(2px); }');
+    htmlParts.push('    .status { font-size: 11px; color: #64748b; padding: 8px 20px 0; text-align: center; }');
+    htmlParts.push('    .human-input-modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(4px); z-index: 1000; justify-content: center; align-items: center; padding: 16px; }');
+    htmlParts.push('    .human-input-modal.active { display: flex; }');
+    htmlParts.push('    .human-input-box { background: #fff; border-radius: 20px; padding: 28px; max-width: 480px; width: 100%; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.4); animation: modalSlideIn 0.3s ease-out; }');
+    htmlParts.push('    @keyframes modalSlideIn { from { opacity: 0; transform: scale(0.95) translateY(10px); } to { opacity: 1; transform: scale(1) translateY(0); } }');
+    htmlParts.push("    .human-input-title { font-size: 18px; font-weight: 700; color: var(--primary-color); margin-bottom: 16px; display: flex; align-items: center; gap: 10px; }");
+    htmlParts.push("    .human-input-title::before { content: ''; width: 4px; height: 20px; background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%); border-radius: 2px; }");
+    htmlParts.push('    .human-input-message { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; margin-bottom: 20px; font-size: 14px; color: #475569; line-height: 1.6; }');
+    htmlParts.push('    .human-input-textarea { width: 100%; min-height: 100px; border: 2px solid #e2e8f0; border-radius: 12px; padding: 14px; font-size: 14px; resize: vertical; font-family: inherit; transition: border-color 0.2s ease, box-shadow 0.2s ease; }');
+    htmlParts.push('    .human-input-textarea:focus { outline: none; border-color: var(--primary-color); box-shadow: 0 0 0 3px rgba(var(--primary-rgb), 0.1); }');
+    htmlParts.push('    .human-input-buttons { display: flex; gap: 12px; justify-content: flex-end; margin-top: 20px; }');
+    htmlParts.push('    .human-input-buttons button { padding: 12px 24px; border-radius: 12px; font-size: 14px; font-weight: 600; cursor: pointer; border: none; transition: all 0.2s ease; }');
+    htmlParts.push('    .human-input-buttons .submit-btn { background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%); color: #fff; }');
+    htmlParts.push('    .human-input-buttons .submit-btn:hover:not(:disabled) { box-shadow: 0 4px 12px rgba(var(--primary-rgb), 0.4); transform: translateY(-1px); }');
+    htmlParts.push('    .human-input-buttons .submit-btn:disabled { opacity: 0.6; cursor: not-allowed; }');
+    htmlParts.push('    .human-input-buttons .cancel-btn { background: #f1f5f9; color: #475569; }');
+    htmlParts.push('    .human-input-buttons .cancel-btn:hover { background: #e2e8f0; }');
+    htmlParts.push('    .thinking-indicator { display: flex; align-items: center; gap: 8px; padding: 12px 16px; }');
+    htmlParts.push('    .thinking-dots { display: flex; gap: 5px; }');
+    htmlParts.push('    .thinking-dot { width: 8px; height: 8px; background: var(--primary-color); border-radius: 50%; animation: bounce 1.4s infinite ease-in-out both; }');
+    htmlParts.push('    .thinking-dot:nth-child(1) { animation-delay: -0.32s; }');
+    htmlParts.push('    .thinking-dot:nth-child(2) { animation-delay: -0.16s; }');
+    htmlParts.push('    .thinking-dot:nth-child(3) { animation-delay: 0s; }');
+    htmlParts.push('    @keyframes bounce { 0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; } 40% { transform: scale(1); opacity: 1; } }');
+    htmlParts.push('    .bubble markdown { display: block; }');
+    htmlParts.push('    .bubble markdown p { margin: 8px 0; }');
+    htmlParts.push('    .bubble markdown p:first-child { margin-top: 0; }');
+    htmlParts.push('    .bubble markdown p:last-child { margin-bottom: 0; }');
+    htmlParts.push('    .bubble markdown strong { font-weight: 600; }');
+    htmlParts.push('    .bubble markdown em { font-style: italic; }');
+    htmlParts.push("    .bubble markdown code { background: rgba(0, 0, 0, 0.06); padding: 2px 6px; border-radius: 4px; font-family: 'SF Mono', 'Consolas', monospace; font-size: 0.875em; }");
+    htmlParts.push('    .msg.user .bubble markdown code { background: rgba(255, 255, 255, 0.2); }');
+    htmlParts.push('    .bubble markdown pre { background: #1e293b; color: #e2e8f0; padding: 14px; border-radius: 10px; overflow-x: auto; margin: 10px 0; }');
+    htmlParts.push('    .bubble markdown pre code { background: none; padding: 0; color: inherit; }');
+    htmlParts.push('    .bubble markdown ul, .bubble markdown ol { margin: 8px 0; padding-left: 24px; }');
+    htmlParts.push('    .bubble markdown li { margin: 4px 0; }');
+    htmlParts.push('    .bubble markdown blockquote { border-left: 3px solid var(--primary-color); padding-left: 12px; margin: 10px 0; color: #64748b; font-style: italic; }');
+    htmlParts.push('    .bubble markdown a { color: var(--primary-color); text-decoration: underline; }');
+    htmlParts.push('    .msg.user .bubble markdown a { color: #fff; }');
+    htmlParts.push('    .bubble markdown h1 { font-size: 1.4em; font-weight: 700; margin: 14px 0 8px; }');
+    htmlParts.push('    .bubble markdown h2 { font-size: 1.25em; font-weight: 700; margin: 12px 0 6px; }');
+    htmlParts.push('    .bubble markdown h3 { font-size: 1.1em; font-weight: 600; margin: 10px 0 4px; }');
+    htmlParts.push('    .bubble markdown hr { border: none; border-top: 1px solid #e2e8f0; margin: 12px 0; }');
     htmlParts.push('  </' + 'style>');
     htmlParts.push('</head>');
     htmlParts.push('<body>');
     htmlParts.push('<div class="chat-container">');
     htmlParts.push('  <div class="chat-header">');
-    htmlParts.push('    <div>');
-    htmlParts.push('      <div class="chat-header-title">AICC Workflow Chatbot</div>');
-    htmlParts.push('      <div class="chat-header-sub">Powered by your deployed agent workflow</div>');
+    htmlParts.push(`    <div class="header-logo">${logoHtml}</div>`);
+    htmlParts.push('    <div class="header-text">');
+    htmlParts.push(`      <div class="chat-header-title">${title}</div>`);
+    htmlParts.push(`      <div class="chat-header-sub">${subtitle}</div>`);
     htmlParts.push('    </div>');
+    htmlParts.push('    <div class="online-indicator"></div>');
     htmlParts.push('  </div>');
     htmlParts.push('  <div id="messages" class="chat-messages"></div>');
     htmlParts.push('  <div id="status" class="status"></div>');
-    htmlParts.push('  <div class="chat-input">');
-    htmlParts.push('    <textarea id="input" rows="1" placeholder="Ask a question about your documents..."></textarea>');
-    htmlParts.push('    <button id="sendBtn">');
-    htmlParts.push('      <span>Send</span>');
-    htmlParts.push('    </button>');
+    htmlParts.push('  <div class="chat-input-container">');
+    htmlParts.push('    <div class="chat-input">');
+    htmlParts.push('      <textarea id="input" rows="1" placeholder="Type your message..."></textarea>');
+    htmlParts.push('      <button id="sendBtn" title="Send message">');
+    htmlParts.push('        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">');
+    htmlParts.push('          <line x1="22" y1="2" x2="11" y2="13"></line>');
+    htmlParts.push('          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>');
+    htmlParts.push('        </svg>');
+    htmlParts.push('      </button>');
+    htmlParts.push('    </div>');
     htmlParts.push('  </div>');
     htmlParts.push('</div>');
     htmlParts.push('');
     htmlParts.push('<!-- Human Input Modal -->');
     htmlParts.push('<div id="humanInputModal" class="human-input-modal">');
     htmlParts.push('  <div class="human-input-box">');
-    htmlParts.push('    <div class="human-input-title" id="humanInputTitle">USER INPUT REQUIRED</div>');
+    htmlParts.push('    <div class="human-input-title" id="humanInputTitle">Input Required</div>');
     htmlParts.push('    <div class="human-input-message" id="humanInputMessage"></div>');
     htmlParts.push('    <textarea id="humanInputTextarea" class="human-input-textarea" placeholder="Enter your response..."></textarea>');
     htmlParts.push('    <div class="human-input-buttons">');
@@ -140,133 +190,108 @@
     htmlParts.push('  </div>');
     htmlParts.push('</div>');
     htmlParts.push('');
-    // Split script tag to avoid parsing issues
     htmlParts.push('<' + 'script>');
     htmlParts.push('  const ENDPOINT_URL = \'' + escapedEndpoint + '\';');
-    htmlParts.push('  const STREAM_URL = ENDPOINT_URL.replace(/\\/$/, \'\') + \'/stream/\';');
-    htmlParts.push('  const SUBMIT_INPUT_URL = ENDPOINT_URL.replace(/\\/$/, \'\') + \'/submit-input/\';');
+    htmlParts.push("  const STREAM_URL = ENDPOINT_URL.replace(/\\/$/, '') + '/stream/';");
+    htmlParts.push("  const SUBMIT_INPUT_URL = ENDPOINT_URL.replace(/\\/$/, '') + '/submit-input/';");
     htmlParts.push('  const INITIAL_GREETING = ' + escapedGreeting + ';');
     htmlParts.push('');
     htmlParts.push('  // Enhanced markdown renderer');
     htmlParts.push('  function renderMarkdown(text) {');
-    htmlParts.push('    if (!text) return \'\';');
+    htmlParts.push("    if (!text) return '';");
     htmlParts.push('    let html = text');
-    htmlParts.push('      .replace(/&/g, \'&amp;\')');
-    htmlParts.push('      .replace(/</g, \'&lt;\')');
-    htmlParts.push('      .replace(/>/g, \'&gt;\');');
-    htmlParts.push('    ');
-    htmlParts.push('    // Headers (# Header, ## Header, etc.) - must come before other formatting');
-    htmlParts.push('    html = html.replace(/^######\\s+(.+)$/gm, \'<h6>$1</h6>\');');
-    htmlParts.push('    html = html.replace(/^#####\\s+(.+)$/gm, \'<h5>$1</h5>\');');
-    htmlParts.push('    html = html.replace(/^####\\s+(.+)$/gm, \'<h4>$1</h4>\');');
-    htmlParts.push('    html = html.replace(/^###\\s+(.+)$/gm, \'<h3>$1</h3>\');');
-    htmlParts.push('    html = html.replace(/^##\\s+(.+)$/gm, \'<h2>$1</h2>\');');
-    htmlParts.push('    html = html.replace(/^#\\s+(.+)$/gm, \'<h1>$1</h1>\');');
-    htmlParts.push('    ');
-    htmlParts.push('    // Horizontal rules (--- or ***)');
-    htmlParts.push('    html = html.replace(/^\\s*[-*]{3,}\\s*$/gm, \'<hr>\');');
-    htmlParts.push('    ');
-    htmlParts.push('    // Code blocks (```language code ```) - must come before inline code');
-    htmlParts.push('    html = html.replace(/```(\\w+)?[\\n\\r]+([\\s\\S]*?)```/g, function(match, lang, code) {');
-    htmlParts.push('      const langClass = lang ? \' class="language-\' + lang + \'"\' : \'\';');
-    htmlParts.push('      return \'<pre><code\' + langClass + \'>\' + code.trim() + \'</code></pre>\';');
+    htmlParts.push("      .replace(/&/g, '&amp;')");
+    htmlParts.push("      .replace(/</g, '&lt;')");
+    htmlParts.push("      .replace(/>/g, '&gt;');");
+    htmlParts.push("    html = html.replace(/^######\\s+(.+)$/gm, '<h6>$1</h6>');");
+    htmlParts.push("    html = html.replace(/^#####\\s+(.+)$/gm, '<h5>$1</h5>');");
+    htmlParts.push("    html = html.replace(/^####\\s+(.+)$/gm, '<h4>$1</h4>');");
+    htmlParts.push("    html = html.replace(/^###\\s+(.+)$/gm, '<h3>$1</h3>');");
+    htmlParts.push("    html = html.replace(/^##\\s+(.+)$/gm, '<h2>$1</h2>');");
+    htmlParts.push("    html = html.replace(/^#\\s+(.+)$/gm, '<h1>$1</h1>');");
+    htmlParts.push("    html = html.replace(/^\\s*[-*]{3,}\\s*$/gm, '<hr>');");
+    htmlParts.push("    html = html.replace(/```(\\w+)?[\\n\\r]+([\\s\\S]*?)```/g, function(match, lang, code) {");
+    htmlParts.push("      return '<pre><code>' + code.trim() + '</code></pre>';");
     htmlParts.push('    });');
-    htmlParts.push('    ');
-    htmlParts.push('    // Blockquotes (> text)');
-    htmlParts.push('    html = html.replace(/^>\\s+(.+)$/gm, \'<blockquote>$1</blockquote>\');');
-    htmlParts.push('    ');
-    // Lists need to be processed before paragraphs to avoid breaking
-    // We'll process them line by line and group consecutive list items
-    htmlParts.push('    // Process lists line by line');
-    htmlParts.push('    const lines = html.split(\'\\n\');');
+    htmlParts.push("    html = html.replace(/^>\\s+(.+)$/gm, '<blockquote>$1</blockquote>');");
+    htmlParts.push("    const lines = html.split('\\n');");
     htmlParts.push('    const processedLines = [];');
     htmlParts.push('    let inOrderedList = false;');
     htmlParts.push('    let inUnorderedList = false;');
-    htmlParts.push('    ');
     htmlParts.push('    for (let i = 0; i < lines.length; i++) {');
     htmlParts.push('      const line = lines[i];');
     htmlParts.push('      const orderedMatch = line.match(/^(\\d+)\\.\\s+(.+)$/);');
     htmlParts.push('      const unorderedMatch = line.match(/^[-*]\\s+(.+)$/);');
-    htmlParts.push('      ');
     htmlParts.push('      if (orderedMatch) {');
     htmlParts.push('        if (!inOrderedList) {');
-    htmlParts.push('          if (inUnorderedList) { processedLines.push(\'</ul>\'); inUnorderedList = false; }');
-    htmlParts.push('          processedLines.push(\'<ol>\');');
+    htmlParts.push("          if (inUnorderedList) { processedLines.push('</ul>'); inUnorderedList = false; }");
+    htmlParts.push("          processedLines.push('<ol>');");
     htmlParts.push('          inOrderedList = true;');
     htmlParts.push('        }');
-    htmlParts.push('        processedLines.push(\'<li>\' + orderedMatch[2] + \'</li>\');');
+    htmlParts.push("        processedLines.push('<li>' + orderedMatch[2] + '</li>');");
     htmlParts.push('      } else if (unorderedMatch) {');
     htmlParts.push('        if (!inUnorderedList) {');
-    htmlParts.push('          if (inOrderedList) { processedLines.push(\'</ol>\'); inOrderedList = false; }');
-    htmlParts.push('          processedLines.push(\'<ul>\');');
+    htmlParts.push("          if (inOrderedList) { processedLines.push('</ol>'); inOrderedList = false; }");
+    htmlParts.push("          processedLines.push('<ul>');");
     htmlParts.push('          inUnorderedList = true;');
     htmlParts.push('        }');
-    htmlParts.push('        processedLines.push(\'<li>\' + unorderedMatch[1] + \'</li>\');');
+    htmlParts.push("        processedLines.push('<li>' + unorderedMatch[1] + '</li>');");
     htmlParts.push('      } else {');
-    htmlParts.push('        if (inOrderedList) { processedLines.push(\'</ol>\'); inOrderedList = false; }');
-    htmlParts.push('        if (inUnorderedList) { processedLines.push(\'</ul>\'); inUnorderedList = false; }');
+    htmlParts.push("        if (inOrderedList) { processedLines.push('</ol>'); inOrderedList = false; }");
+    htmlParts.push("        if (inUnorderedList) { processedLines.push('</ul>'); inUnorderedList = false; }");
     htmlParts.push('        processedLines.push(line);');
     htmlParts.push('      }');
     htmlParts.push('    }');
-    htmlParts.push('    if (inOrderedList) processedLines.push(\'</ol>\');');
-    htmlParts.push('    if (inUnorderedList) processedLines.push(\'</ul>\');');
-    htmlParts.push('    html = processedLines.join(\'\\n\');');
-    htmlParts.push('    ');
-    htmlParts.push('    // Links [text](url)');
-    htmlParts.push('    html = html.replace(/\\[([^\\]]+)\\]\\(([^\\)]+)\\)/g, \'<a href="$2" target="_blank" rel="noopener">$1</a>\');');
-    htmlParts.push('    ');
-    htmlParts.push('    // Bold (**text** or __text__) - must come after code blocks');
-    htmlParts.push('    html = html.replace(/\\*\\*([^*]+)\\*\\*/g, \'<strong>$1</strong>\');');
-    htmlParts.push('    html = html.replace(/__(?!_)([^_]+)__/g, \'<strong>$1</strong>\');');
-    htmlParts.push('    ');
-    htmlParts.push('    // Italic (*text* or _text_) - must come after bold');
-    htmlParts.push('    html = html.replace(/\\*(?!\\*)([^*]+)\\*(?!\\*)/g, \'<em>$1</em>\');');
-    htmlParts.push('    html = html.replace(/_(?!_)([^_]+)_(?!_)/g, \'<em>$1</em>\');');
-    htmlParts.push('    ');
-    htmlParts.push('    // Inline code (`code`) - must come after code blocks');
-    htmlParts.push('    html = html.replace(/`([^`]+)`/g, \'<code>$1</code>\');');
-    htmlParts.push('    ');
-    htmlParts.push('    // Paragraphs: Double newlines create paragraphs, single newlines create line breaks');
-    htmlParts.push('    // First, split by double newlines to create paragraphs');
-    htmlParts.push('    const paragraphs = html.split(/\\n\\n+/);');
+    htmlParts.push("    if (inOrderedList) processedLines.push('</ol>');");
+    htmlParts.push("    if (inUnorderedList) processedLines.push('</ul>');");
+    htmlParts.push("    html = processedLines.join('\\n');");
+    htmlParts.push("    html = html.replace(/\\[([^\\]]+)\\]\\(([^\\)]+)\\)/g, '<a href=\"$2\" target=\"_blank\" rel=\"noopener\">$1</a>');");
+    htmlParts.push("    html = html.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');");
+    htmlParts.push("    html = html.replace(/__(?!_)([^_]+)__/g, '<strong>$1</strong>');");
+    htmlParts.push("    html = html.replace(/\\*(?!\\*)([^*]+)\\*(?!\\*)/g, '<em>$1</em>');");
+    htmlParts.push("    html = html.replace(/_(?!_)([^_]+)_(?!_)/g, '<em>$1</em>');");
+    htmlParts.push("    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');");
+    htmlParts.push("    const paragraphs = html.split(/\\n\\n+/);");
     htmlParts.push('    html = paragraphs.map(function(p) {');
     htmlParts.push('      p = p.trim();');
-    htmlParts.push('      if (!p) return \'\';');
-    htmlParts.push('      // Skip if already wrapped in block elements');
-    htmlParts.push('      if (/^<(pre|blockquote|ul|ol|hr|h[1-6])/i.test(p)) {');
-    htmlParts.push('        return p;');
-    htmlParts.push('      }');
-    htmlParts.push('      // Replace single newlines with <br> within paragraphs');
-    htmlParts.push('      p = p.replace(/\\n/g, \'<br>\');');
-    htmlParts.push('      return \'<p>\' + p + \'</p>\';');
-    htmlParts.push('    }).filter(function(p) { return p; }).join(\'\');');
-    htmlParts.push('    ');
+    htmlParts.push("      if (!p) return '';");
+    htmlParts.push("      if (/^<(pre|blockquote|ul|ol|hr|h[1-6])/i.test(p)) return p;");
+    htmlParts.push("      p = p.replace(/\\n/g, '<br>');");
+    htmlParts.push("      return '<p>' + p + '</p>';");
+    htmlParts.push("    }).filter(function(p) { return p; }).join('');");
     htmlParts.push('    return html;');
     htmlParts.push('  }');
     htmlParts.push('');
     htmlParts.push('  const messages = [];');
-    htmlParts.push('  const sessionId = \'sess_\' + Math.random().toString(36).slice(2);');
+    htmlParts.push("  const sessionId = 'sess_' + Math.random().toString(36).slice(2);");
     htmlParts.push('  let currentExecutionId = null;');
     htmlParts.push('  let awaitingHumanInput = false;');
     htmlParts.push('');
-    htmlParts.push('  const messagesEl = document.getElementById(\'messages\');');
-    htmlParts.push('  const inputEl = document.getElementById(\'input\');');
-    htmlParts.push('  const sendBtn = document.getElementById(\'sendBtn\');');
-    htmlParts.push('  const statusEl = document.getElementById(\'status\');');
-    htmlParts.push('  const humanInputModal = document.getElementById(\'humanInputModal\');');
-    htmlParts.push('  const humanInputTitle = document.getElementById(\'humanInputTitle\');');
-    htmlParts.push('  const humanInputMessage = document.getElementById(\'humanInputMessage\');');
-    htmlParts.push('  const humanInputTextarea = document.getElementById(\'humanInputTextarea\');');
-    htmlParts.push('  const humanInputSubmit = document.getElementById(\'humanInputSubmit\');');
-    htmlParts.push('  const humanInputCancel = document.getElementById(\'humanInputCancel\');');
+    htmlParts.push("  const messagesEl = document.getElementById('messages');");
+    htmlParts.push("  const inputEl = document.getElementById('input');");
+    htmlParts.push("  const sendBtn = document.getElementById('sendBtn');");
+    htmlParts.push("  const statusEl = document.getElementById('status');");
+    htmlParts.push("  const humanInputModal = document.getElementById('humanInputModal');");
+    htmlParts.push("  const humanInputTitle = document.getElementById('humanInputTitle');");
+    htmlParts.push("  const humanInputMessage = document.getElementById('humanInputMessage');");
+    htmlParts.push("  const humanInputTextarea = document.getElementById('humanInputTextarea');");
+    htmlParts.push("  const humanInputSubmit = document.getElementById('humanInputSubmit');");
+    htmlParts.push("  const humanInputCancel = document.getElementById('humanInputCancel');");
+    htmlParts.push('');
+    htmlParts.push('  // Auto-resize textarea');
+    htmlParts.push('  function autoResize() {');
+    htmlParts.push("    inputEl.style.height = 'auto';");
+    htmlParts.push("    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';");
+    htmlParts.push('  }');
+    htmlParts.push("  inputEl.addEventListener('input', autoResize);");
     htmlParts.push('');
     htmlParts.push('  function appendMessage(role, text, isStreaming = false) {');
-    htmlParts.push('    const msg = document.createElement(\'div\');');
-    htmlParts.push('    msg.className = \'msg \' + (role === \'user\' ? \'user\' : \'assistant\');');
-    htmlParts.push('    const bubble = document.createElement(\'div\');');
-    htmlParts.push('    bubble.className = \'bubble\';');
-    htmlParts.push('    if (role === \'assistant\' && !isStreaming) {');
-    htmlParts.push('      const markdownEl = document.createElement(\'markdown\');');
+    htmlParts.push("    const msg = document.createElement('div');");
+    htmlParts.push("    msg.className = 'msg ' + (role === 'user' ? 'user' : 'assistant');");
+    htmlParts.push("    const bubble = document.createElement('div');");
+    htmlParts.push("    bubble.className = 'bubble';");
+    htmlParts.push("    if (role === 'assistant' && !isStreaming) {");
+    htmlParts.push("      const markdownEl = document.createElement('markdown');");
     htmlParts.push('      markdownEl.innerHTML = renderMarkdown(text);');
     htmlParts.push('      bubble.appendChild(markdownEl);');
     htmlParts.push('    } else {');
@@ -279,29 +304,27 @@
     htmlParts.push('  }');
     htmlParts.push('');
     htmlParts.push('  function showThinkingIndicator() {');
-    htmlParts.push('    const msg = document.createElement(\'div\');');
-    htmlParts.push('    msg.className = \'msg assistant\';');
-    htmlParts.push('    msg.id = \'thinking-indicator\';');
-    htmlParts.push('    const indicator = document.createElement(\'div\');');
-    htmlParts.push('    indicator.className = \'thinking-indicator\';');
-    htmlParts.push('    indicator.innerHTML = \'<div class="thinking-spinner"></div><span class="thinking-text">Thinking</span>\';');
+    htmlParts.push("    const msg = document.createElement('div');");
+    htmlParts.push("    msg.className = 'msg assistant';");
+    htmlParts.push("    msg.id = 'thinking-indicator';");
+    htmlParts.push("    const indicator = document.createElement('div');");
+    htmlParts.push("    indicator.className = 'thinking-indicator';");
+    htmlParts.push("    indicator.innerHTML = '<div class=\"thinking-dots\"><div class=\"thinking-dot\"></div><div class=\"thinking-dot\"></div><div class=\"thinking-dot\"></div></div>';");
     htmlParts.push('    msg.appendChild(indicator);');
     htmlParts.push('    messagesEl.appendChild(msg);');
     htmlParts.push('    messagesEl.scrollTop = messagesEl.scrollHeight;');
     htmlParts.push('  }');
     htmlParts.push('');
     htmlParts.push('  function hideThinkingIndicator() {');
-    htmlParts.push('    const indicator = document.getElementById(\'thinking-indicator\');');
-    htmlParts.push('    if (indicator) {');
-    htmlParts.push('      indicator.remove();');
-    htmlParts.push('    }');
+    htmlParts.push("    const indicator = document.getElementById('thinking-indicator');");
+    htmlParts.push('    if (indicator) indicator.remove();');
     htmlParts.push('  }');
     htmlParts.push('');
     htmlParts.push('  function showHumanInputModal(title, message) {');
-    htmlParts.push('    humanInputTitle.textContent = title || \'USER INPUT REQUIRED\';');
-    htmlParts.push('    humanInputMessage.textContent = message || \'Please provide your input to continue.\';');
-    htmlParts.push('    humanInputTextarea.value = \'\';');
-    htmlParts.push('    humanInputModal.classList.add(\'active\');');
+    htmlParts.push("    humanInputTitle.textContent = title || 'Input Required';");
+    htmlParts.push("    humanInputMessage.textContent = message || 'Please provide your input to continue.';");
+    htmlParts.push("    humanInputTextarea.value = '';");
+    htmlParts.push("    humanInputModal.classList.add('active');");
     htmlParts.push('    humanInputTextarea.focus();');
     htmlParts.push('    awaitingHumanInput = true;');
     htmlParts.push('    inputEl.disabled = true;');
@@ -309,7 +332,7 @@
     htmlParts.push('  }');
     htmlParts.push('');
     htmlParts.push('  function hideHumanInputModal() {');
-    htmlParts.push('    humanInputModal.classList.remove(\'active\');');
+    htmlParts.push("    humanInputModal.classList.remove('active');");
     htmlParts.push('    awaitingHumanInput = false;');
     htmlParts.push('    inputEl.disabled = false;');
     htmlParts.push('    sendBtn.disabled = false;');
@@ -317,63 +340,40 @@
     htmlParts.push('');
     htmlParts.push('  async function submitHumanInput() {');
     htmlParts.push('    const userInput = humanInputTextarea.value.trim();');
-    htmlParts.push('    if (!userInput) {');
-    htmlParts.push('      alert(\'Please enter your response\');');
-    htmlParts.push('      return;');
-    htmlParts.push('    }');
-    htmlParts.push('');
+    htmlParts.push('    if (!userInput) { alert("Please enter your response"); return; }');
     htmlParts.push('    humanInputSubmit.disabled = true;');
-    htmlParts.push('    statusEl.textContent = \'Submitting your response...\';');
-    htmlParts.push('');
+    htmlParts.push("    statusEl.textContent = 'Submitting...';");
     htmlParts.push('    try {');
     htmlParts.push('      const resp = await fetch(SUBMIT_INPUT_URL, {');
-    htmlParts.push('        method: \'POST\',');
-    htmlParts.push('        headers: { \'Content-Type\': \'application/json\' },');
-    htmlParts.push('        body: JSON.stringify({');
-    htmlParts.push('          session_id: sessionId,');
-    htmlParts.push('          user_input: userInput');
-    htmlParts.push('        })');
+    htmlParts.push("        method: 'POST',");
+    htmlParts.push("        headers: { 'Content-Type': 'application/json' },");
+    htmlParts.push('        body: JSON.stringify({ session_id: sessionId, user_input: userInput })');
     htmlParts.push('      });');
-    htmlParts.push('');
-    htmlParts.push('      if (!resp.ok) {');
-    htmlParts.push('        const err = await resp.json().catch(() => ({}));');
-    htmlParts.push('        throw new Error(err.error || \'HTTP \' + resp.status);');
-    htmlParts.push('      }');
-    htmlParts.push('');
+    htmlParts.push('      if (!resp.ok) { const err = await resp.json().catch(() => ({})); throw new Error(err.error || "HTTP " + resp.status); }');
     htmlParts.push('      const data = await resp.json();');
-    htmlParts.push('      ');
-    htmlParts.push('      appendMessage(\'user\', userInput);');
-    htmlParts.push('      messages.push({ role: \'user\', content: userInput });');
-    htmlParts.push('      ');
+    htmlParts.push("      appendMessage('user', userInput);");
+    htmlParts.push("      messages.push({ role: 'user', content: userInput });");
     htmlParts.push('      hideHumanInputModal();');
-    htmlParts.push('');
-    htmlParts.push('      if (data.status === \'awaiting_human_input\') {');
-    htmlParts.push('        // Add the last conversation message to the chat UI before showing the modal');
-    htmlParts.push('        if (data.last_conversation_message) {');
-    htmlParts.push('          appendMessage(\'assistant\', data.last_conversation_message);');
-    htmlParts.push('          messages.push({ role: \'assistant\', content: data.last_conversation_message });');
-    htmlParts.push('        }');
+    htmlParts.push("      if (data.status === 'awaiting_human_input') {");
     htmlParts.push('        showHumanInputModal(data.title, data.last_conversation_message);');
     htmlParts.push('        currentExecutionId = data.execution_id;');
-    htmlParts.push('      } else if (data.status === \'success\') {');
-    htmlParts.push('        const reply = data.response || \'(No response)\';');
-    htmlParts.push('        appendMessage(\'assistant\', reply);');
-    htmlParts.push('        messages.push({ role: \'assistant\', content: reply });');
-    htmlParts.push('        statusEl.textContent = \'\';');
+    htmlParts.push("      } else if (data.status === 'success') {");
+    htmlParts.push("        const reply = data.response || '(No response)';");
+    htmlParts.push("        appendMessage('assistant', reply);");
+    htmlParts.push("        messages.push({ role: 'assistant', content: reply });");
+    htmlParts.push("        statusEl.textContent = '';");
     htmlParts.push('        currentExecutionId = null;');
-    htmlParts.push('      } else if (data.status === \'processing\') {');
-    htmlParts.push('        statusEl.textContent = \'Workflow is processing. Please wait...\';');
-    htmlParts.push('        setTimeout(() => {');
-    htmlParts.push('          statusEl.textContent = \'Processing complete. Check the conversation.\';');
-    htmlParts.push('        }, 2000);');
+    htmlParts.push("      } else if (data.status === 'processing') {");
+    htmlParts.push("        statusEl.textContent = 'Processing...';");
+    htmlParts.push("        setTimeout(() => { statusEl.textContent = ''; }, 2000);");
     htmlParts.push('      } else {');
-    htmlParts.push('        appendMessage(\'assistant\', \'Error: \' + (data.error || \'Unexpected error\'));');
-    htmlParts.push('        statusEl.textContent = \'Error from workflow endpoint\';');
+    htmlParts.push("        appendMessage('assistant', 'Error: ' + (data.error || 'Unexpected error'));");
+    htmlParts.push("        statusEl.textContent = '';");
     htmlParts.push('      }');
     htmlParts.push('    } catch (e) {');
-    htmlParts.push('      console.error(\'Submit input error:\', e);');
-    htmlParts.push('      appendMessage(\'assistant\', \'Sorry, there was a problem submitting your input.\');');
-    htmlParts.push('      statusEl.textContent = e.message || \'Network error\';');
+    htmlParts.push("      console.error('Submit error:', e);");
+    htmlParts.push("      appendMessage('assistant', 'Sorry, there was a problem.');");
+    htmlParts.push("      statusEl.textContent = e.message || 'Error';");
     htmlParts.push('    } finally {');
     htmlParts.push('      humanInputSubmit.disabled = false;');
     htmlParts.push('    }');
@@ -381,64 +381,44 @@
     htmlParts.push('');
     htmlParts.push('  async function sendMessage() {');
     htmlParts.push('    const text = inputEl.value.trim();');
-    htmlParts.push('    if (!text) return;');
-    htmlParts.push('');
-    htmlParts.push('    if (awaitingHumanInput) {');
-    htmlParts.push('      alert(\'Please respond to the human input request first\');');
-    htmlParts.push('      return;');
-    htmlParts.push('    }');
-    htmlParts.push('');
-    htmlParts.push('    appendMessage(\'user\', text);');
-    htmlParts.push('    messages.push({ role: \'user\', content: text });');
-    htmlParts.push('');
-    htmlParts.push('    inputEl.value = \'\';');
+    htmlParts.push('    if (!text || awaitingHumanInput) return;');
+    htmlParts.push("    appendMessage('user', text);");
+    htmlParts.push("    messages.push({ role: 'user', content: text });");
+    htmlParts.push("    inputEl.value = '';");
+    htmlParts.push("    inputEl.style.height = 'auto';");
     htmlParts.push('    sendBtn.disabled = true;');
-    htmlParts.push('    statusEl.textContent = \'\';');
+    htmlParts.push("    statusEl.textContent = '';");
     htmlParts.push('    showThinkingIndicator();');
-    htmlParts.push('');
     htmlParts.push('    try {');
     htmlParts.push('      const resp = await fetch(STREAM_URL, {');
-    htmlParts.push('        method: \'POST\',');
-    htmlParts.push('        headers: { \'Content-Type\': \'application/json\' },');
-    htmlParts.push('        body: JSON.stringify({');
-    htmlParts.push('          user_query: text,');
-    htmlParts.push('          session_id: sessionId');
-    htmlParts.push('        })');
+    htmlParts.push("        method: 'POST',");
+    htmlParts.push("        headers: { 'Content-Type': 'application/json' },");
+    htmlParts.push('        body: JSON.stringify({ user_query: text, session_id: sessionId })');
     htmlParts.push('      });');
-    htmlParts.push('');
-    htmlParts.push('      if (!resp.ok) {');
-    htmlParts.push('        const err = await resp.text().catch(() => \'\');');
-    htmlParts.push('        throw new Error(err || \'HTTP \' + resp.status);');
-    htmlParts.push('      }');
-    htmlParts.push('');
-    htmlParts.push('      // Don\'t create message bubble yet - wait for first content chunk');
-    htmlParts.push('      let msg = null;');
-    htmlParts.push('      let bubble = null;');
-    htmlParts.push('      let markdownEl = null;');
-    htmlParts.push('      let accumulatedContent = \'\';');
-    htmlParts.push('      let thinkingIndicatorHidden = false;');
+    htmlParts.push("      if (!resp.ok) throw new Error('HTTP ' + resp.status);");
+    htmlParts.push('      let thinkingHidden = false;');
+    htmlParts.push('      let msg = null, bubble = null, markdownEl = null;');
+    htmlParts.push("      let accumulatedContent = '';");
     htmlParts.push('      const reader = resp.body.getReader();');
     htmlParts.push('      const decoder = new TextDecoder();');
     htmlParts.push('      while (true) {');
     htmlParts.push('        const { done, value } = await reader.read();');
     htmlParts.push('        if (done) break;');
     htmlParts.push('        const chunk = decoder.decode(value, { stream: true });');
-    htmlParts.push('        const lines = chunk.split(\'\\n\');');
+    htmlParts.push("        const lines = chunk.split('\\n');");
     htmlParts.push('        for (const line of lines) {');
-    htmlParts.push('          if (line.startsWith(\'data: \')) {');
+    htmlParts.push("          if (line.startsWith('data: ')) {");
     htmlParts.push('            try {');
     htmlParts.push('              const data = JSON.parse(line.slice(6));');
-    htmlParts.push('              if (data.type === \'content\') {');
-    htmlParts.push('                // Hide thinking indicator and create message bubble on FIRST content chunk');
-    htmlParts.push('                if (!thinkingIndicatorHidden) {');
+    htmlParts.push("              if (data.type === 'content') {");
+    htmlParts.push('                if (!thinkingHidden) {');
     htmlParts.push('                  hideThinkingIndicator();');
-    htmlParts.push('                  thinkingIndicatorHidden = true;');
-    htmlParts.push('                  // Now create the message bubble');
-    htmlParts.push('                  msg = document.createElement(\'div\');');
-    htmlParts.push('                  msg.className = \'msg assistant\';');
-    htmlParts.push('                  bubble = document.createElement(\'div\');');
-    htmlParts.push('                  bubble.className = \'bubble\';');
-    htmlParts.push('                  markdownEl = document.createElement(\'markdown\');');
+    htmlParts.push('                  thinkingHidden = true;');
+    htmlParts.push("                  msg = document.createElement('div');");
+    htmlParts.push("                  msg.className = 'msg assistant';");
+    htmlParts.push("                  bubble = document.createElement('div');");
+    htmlParts.push("                  bubble.className = 'bubble';");
+    htmlParts.push("                  markdownEl = document.createElement('markdown');");
     htmlParts.push('                  bubble.appendChild(markdownEl);');
     htmlParts.push('                  msg.appendChild(bubble);');
     htmlParts.push('                  messagesEl.appendChild(msg);');
@@ -446,63 +426,53 @@
     htmlParts.push('                accumulatedContent += data.content;');
     htmlParts.push('                markdownEl.innerHTML = renderMarkdown(accumulatedContent);');
     htmlParts.push('                messagesEl.scrollTop = messagesEl.scrollHeight;');
-    htmlParts.push('              } else if (data.type === \'awaiting_human_input\') {');
+    htmlParts.push("              } else if (data.type === 'awaiting_human_input') {");
     htmlParts.push('                hideThinkingIndicator();');
     htmlParts.push('                showHumanInputModal(data.title, data.last_conversation_message);');
     htmlParts.push('                currentExecutionId = data.execution_id;');
-    htmlParts.push('                statusEl.textContent = \'Waiting for your input...\';');
+    htmlParts.push("                statusEl.textContent = 'Waiting for input...';");
     htmlParts.push('                if (msg) msg.remove();');
     htmlParts.push('                return;');
-    htmlParts.push('              } else if (data.type === \'error\') {');
+    htmlParts.push("              } else if (data.type === 'error') {");
     htmlParts.push('                hideThinkingIndicator();');
     htmlParts.push('                if (msg) msg.remove();');
-    htmlParts.push('                appendMessage(\'assistant\', \'Error: \' + (data.error || \'Unexpected error\'));');
-    htmlParts.push('                statusEl.textContent = \'Error from workflow endpoint\';');
+    htmlParts.push("                appendMessage('assistant', 'Error: ' + (data.error || 'Unexpected error'));");
     htmlParts.push('                return;');
-    htmlParts.push('              } else if (data.type === \'done\') {');
-    htmlParts.push('                messages.push({ role: \'assistant\', content: accumulatedContent });');
-    htmlParts.push('                statusEl.textContent = \'\';');
+    htmlParts.push("              } else if (data.type === 'done') {");
+    htmlParts.push("                messages.push({ role: 'assistant', content: accumulatedContent });");
+    htmlParts.push("                statusEl.textContent = '';");
     htmlParts.push('                return;');
     htmlParts.push('              }');
-    htmlParts.push('            } catch (e) {');
-    htmlParts.push('              console.error(\'Error parsing SSE data:\', e);');
-    htmlParts.push('            }');
+    htmlParts.push("            } catch (e) { console.error('Parse error:', e); }");
     htmlParts.push('          }');
     htmlParts.push('        }');
     htmlParts.push('      }');
     htmlParts.push('    } catch (e) {');
-    htmlParts.push('      console.error(\'Chat error:\', e);');
-    htmlParts.push('      appendMessage(\'assistant\', \'Sorry, there was a problem talking to the workflow.\');');
-    htmlParts.push('      statusEl.textContent = e.message || \'Network error\';');
+    htmlParts.push("      console.error('Chat error:', e);");
+    htmlParts.push('      hideThinkingIndicator();');
+    htmlParts.push("      appendMessage('assistant', 'Sorry, there was a connection problem.');");
+    htmlParts.push("      statusEl.textContent = '';");
     htmlParts.push('    } finally {');
-    htmlParts.push('      if (!awaitingHumanInput) {');
-    htmlParts.push('        sendBtn.disabled = false;');
-    htmlParts.push('      }');
+    htmlParts.push('      if (!awaitingHumanInput) sendBtn.disabled = false;');
     htmlParts.push('    }');
     htmlParts.push('  }');
     htmlParts.push('');
-    htmlParts.push('  sendBtn.addEventListener(\'click\', sendMessage);');
-    htmlParts.push('  inputEl.addEventListener(\'keydown\', (e) => {');
-    htmlParts.push('    if (e.key === \'Enter\' && !e.shiftKey && !awaitingHumanInput) {');
+    htmlParts.push("  sendBtn.addEventListener('click', sendMessage);");
+    htmlParts.push("  inputEl.addEventListener('keydown', (e) => {");
+    htmlParts.push("    if (e.key === 'Enter' && !e.shiftKey && !awaitingHumanInput) {");
     htmlParts.push('      e.preventDefault();');
     htmlParts.push('      sendMessage();');
     htmlParts.push('    }');
     htmlParts.push('  });');
     htmlParts.push('');
-    htmlParts.push('  humanInputSubmit.addEventListener(\'click\', submitHumanInput);');
-    htmlParts.push('  humanInputCancel.addEventListener(\'click\', () => {');
-    htmlParts.push('    hideHumanInputModal();');
-    htmlParts.push('    statusEl.textContent = \'Input cancelled\';');
-    htmlParts.push('  });');
-    htmlParts.push('  humanInputTextarea.addEventListener(\'keydown\', (e) => {');
-    htmlParts.push('    if (e.key === \'Enter\' && e.ctrlKey) {');
-    htmlParts.push('      e.preventDefault();');
-    htmlParts.push('      submitHumanInput();');
-    htmlParts.push('    }');
+    htmlParts.push("  humanInputSubmit.addEventListener('click', submitHumanInput);");
+    htmlParts.push("  humanInputCancel.addEventListener('click', () => { hideHumanInputModal(); statusEl.textContent = ''; });");
+    htmlParts.push("  humanInputTextarea.addEventListener('keydown', (e) => {");
+    htmlParts.push("    if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); submitHumanInput(); }");
     htmlParts.push('  });');
     htmlParts.push('');
-    htmlParts.push('  appendMessage(\'assistant\', INITIAL_GREETING);');
-    htmlParts.push('  messages.push({ role: \'assistant\', content: INITIAL_GREETING });');
+    htmlParts.push("  appendMessage('assistant', INITIAL_GREETING);");
+    htmlParts.push("  messages.push({ role: 'assistant', content: INITIAL_GREETING });");
     htmlParts.push('</' + 'script>');
     htmlParts.push('</body>');
     htmlParts.push('</html>');
@@ -510,8 +480,14 @@
     return htmlParts.join('\n');
   }
   
-  // Reactive variable that calls the function - explicitly track dependencies
+  // Reactive variable that calls the function - track all branding dependencies
   $: embedCode = endpointUrl && initialGreeting ? generateEmbedCode() : '';
+  // Trigger regeneration when branding settings change
+  $: if (chatbotTitle || chatbotSubtitle || primaryColor || secondaryColor || logoUrl) {
+    if (endpointUrl && initialGreeting) {
+      embedCode = generateEmbedCode();
+    }
+  }
   
   onMount(() => {
     loadDeployment();
@@ -535,6 +511,13 @@
         rateLimitPerMinute = deployment.rate_limit_per_minute || 10;
         initialGreeting = deployment.initial_greeting || initialGreeting;
         
+        // Load branding customization
+        chatbotTitle = deployment.chatbot_title || 'AI Assistant';
+        chatbotSubtitle = deployment.chatbot_subtitle || 'Powered by AICC IntelliDoc';
+        primaryColor = deployment.primary_color || '#0b3b66';
+        secondaryColor = deployment.secondary_color || '#1e5a8a';
+        logoUrl = deployment.logo_url || '';
+        
         // Construct endpoint URL
         const baseUrl = typeof window !== 'undefined' ? window.location.origin : '';
         endpointUrl = `${baseUrl}${deployment.endpoint_path}`;
@@ -542,6 +525,7 @@
         // Debug logging
         console.log('🔗 DEPLOYMENT: endpointUrl =', endpointUrl);
         console.log('🔗 DEPLOYMENT: initialGreeting =', initialGreeting);
+        console.log('🎨 DEPLOYMENT: Branding loaded - title:', chatbotTitle, 'colors:', primaryColor, secondaryColor);
       }
       
       console.log(`✅ DEPLOYMENT: Loaded deployment data`);
@@ -595,7 +579,13 @@
       await cleanUniversalApi.updateDeployment(projectId, {
         workflow_id: selectedWorkflowId,
         rate_limit_per_minute: rateLimitPerMinute,
-        initial_greeting: initialGreeting
+        initial_greeting: initialGreeting,
+        // Branding customization
+        chatbot_title: chatbotTitle,
+        chatbot_subtitle: chatbotSubtitle,
+        primary_color: primaryColor,
+        secondary_color: secondaryColor,
+        logo_url: logoUrl || null
       });
       
       toasts.success('Deployment configuration saved successfully');
@@ -1010,7 +1000,156 @@
           </div>
 
           <!-- Embed Snippet -->
-          <div>
+          <!-- Chatbot Branding Customization -->
+          <div class="mt-8 pt-6 border-t border-gray-200">
+            <h4 class="text-lg font-semibold text-gray-900 mb-4">
+              <i class="fas fa-palette mr-2 text-oxford-blue"></i>
+              Chatbot Branding
+            </h4>
+            <p class="text-sm text-gray-600 mb-6">
+              Customize the appearance of your embedded chatbot to match your brand.
+            </p>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+              <!-- Chatbot Title -->
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-2">
+                  Chatbot Title
+                </label>
+                <input
+                  type="text"
+                  bind:value={chatbotTitle}
+                  class="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-oxford-blue focus:border-oxford-blue"
+                  placeholder="AI Assistant"
+                />
+              </div>
+              
+              <!-- Chatbot Subtitle -->
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-2">
+                  Chatbot Subtitle
+                </label>
+                <input
+                  type="text"
+                  bind:value={chatbotSubtitle}
+                  class="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-oxford-blue focus:border-oxford-blue"
+                  placeholder="Powered by AICC IntelliDoc"
+                />
+              </div>
+              
+              <!-- Primary Color -->
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-2">
+                  Primary Color
+                </label>
+                <div class="flex items-center gap-3">
+                  <input
+                    type="color"
+                    bind:value={primaryColor}
+                    class="w-12 h-10 border border-gray-300 rounded-md cursor-pointer p-1"
+                  />
+                  <input
+                    type="text"
+                    bind:value={primaryColor}
+                    class="flex-1 px-4 py-2 border border-gray-300 rounded-md focus:ring-oxford-blue focus:border-oxford-blue font-mono text-sm"
+                    placeholder="#0b3b66"
+                    maxlength="7"
+                  />
+                </div>
+                <p class="text-xs text-gray-500 mt-1">Header background and user message bubbles</p>
+              </div>
+              
+              <!-- Secondary Color -->
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-2">
+                  Secondary Color (Gradient)
+                </label>
+                <div class="flex items-center gap-3">
+                  <input
+                    type="color"
+                    bind:value={secondaryColor}
+                    class="w-12 h-10 border border-gray-300 rounded-md cursor-pointer p-1"
+                  />
+                  <input
+                    type="text"
+                    bind:value={secondaryColor}
+                    class="flex-1 px-4 py-2 border border-gray-300 rounded-md focus:ring-oxford-blue focus:border-oxford-blue font-mono text-sm"
+                    placeholder="#1e5a8a"
+                    maxlength="7"
+                  />
+                </div>
+                <p class="text-xs text-gray-500 mt-1">Used for gradient effects</p>
+              </div>
+            </div>
+            
+            <!-- Logo URL -->
+            <div class="mb-6">
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                Logo URL (Optional)
+              </label>
+              <input
+                type="url"
+                bind:value={logoUrl}
+                class="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-oxford-blue focus:border-oxford-blue"
+                placeholder="https://example.com/logo.png"
+              />
+              <p class="text-xs text-gray-500 mt-1">
+                URL to your logo image. Leave empty to display the first letter of the title. Recommended size: 44x44px or larger.
+              </p>
+            </div>
+            
+            <!-- Live Preview -->
+            <div class="mb-6">
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                Header Preview
+              </label>
+              <div 
+                class="rounded-xl overflow-hidden shadow-lg"
+                style="max-width: 420px;"
+              >
+                <div 
+                  class="flex items-center gap-3 p-4 text-white"
+                  style="background: linear-gradient(135deg, {primaryColor} 0%, {secondaryColor} 100%);"
+                >
+                  <div 
+                    class="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0"
+                    style="background: rgba(255, 255, 255, 0.2);"
+                  >
+                    {#if logoUrl}
+                      <img src={logoUrl} alt="Logo" class="w-full h-full object-cover rounded-xl" />
+                    {:else}
+                      <span class="text-lg font-bold text-white uppercase">
+                        {chatbotTitle ? chatbotTitle[0] : 'A'}
+                      </span>
+                    {/if}
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="font-bold text-base truncate">{chatbotTitle || 'AI Assistant'}</div>
+                    <div class="text-xs opacity-85 truncate">{chatbotSubtitle || 'Powered by AICC IntelliDoc'}</div>
+                  </div>
+                  <div class="w-2.5 h-2.5 bg-green-400 rounded-full shadow-[0_0_0_3px_rgba(34,197,94,0.3)]"></div>
+                </div>
+              </div>
+            </div>
+            
+            <!-- Save Branding Button -->
+            <button
+              on:click={saveDeployment}
+              disabled={saving || !selectedWorkflowId}
+              class="px-6 py-2 bg-oxford-blue text-white rounded-md hover:bg-oxford-blue-dark transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {#if saving}
+                <i class="fas fa-spinner fa-spin mr-2"></i>
+                Saving...
+              {:else}
+                <i class="fas fa-save mr-2"></i>
+                Save Branding
+              {/if}
+            </button>
+          </div>
+
+          <!-- Embed Snippet -->
+          <div class="mt-8 pt-6 border-t border-gray-200">
             <div class="flex items-center justify-between mb-2">
               <label class="block text-sm font-medium text-gray-700">
                 HTML Embed Code (copy and paste into your website)

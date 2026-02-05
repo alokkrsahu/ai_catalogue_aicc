@@ -74,7 +74,7 @@ docker compose -f docker-compose.yml -f docker-compose.override.yml down --remov
 
 # Pull latest images for databases
 echo "📦 Pulling latest database images..."
-docker compose pull postgres etcd minio milvus
+docker compose pull postgres etcd minio milvus redis
 
 # Enable BuildKit for better network handling and caching
 export DOCKER_BUILDKIT=1
@@ -201,7 +201,29 @@ while [ $CHROMADB_COUNTER -lt $CHROMADB_TIMEOUT ]; do
 done
 
 echo ""
-echo "🐍 Step 5: Starting Django backend (development mode)..."
+echo "🔴 Step 5: Starting Redis cache..."
+echo "   📋 Redis is required for caching and WebSearch functionality"
+docker compose up -d redis
+
+echo "⏳ Waiting for Redis to be ready..."
+REDIS_TIMEOUT=30
+REDIS_COUNTER=0
+while [ $REDIS_COUNTER -lt $REDIS_TIMEOUT ]; do
+    if docker compose exec redis redis-cli ping 2>/dev/null | grep -q "PONG"; then
+        echo "✅ Redis is healthy and ready!"
+        break
+    fi
+    
+    if [ $((REDIS_COUNTER % 10)) -eq 0 ]; then
+        echo "   📋 Waiting for Redis... ($REDIS_COUNTER/${REDIS_TIMEOUT}s)"
+    fi
+    
+    sleep 2
+    REDIS_COUNTER=$((REDIS_COUNTER + 2))
+done
+
+echo ""
+echo "🐍 Step 6: Starting Django backend (development mode)..."
 docker compose -f docker-compose.yml -f docker-compose.override.yml up -d backend --no-deps
 
 echo "⏳ Waiting for Django backend to be ready..."
@@ -221,13 +243,13 @@ while [ $BACKEND_COUNTER -lt $BACKEND_TIMEOUT ]; do
     BACKEND_COUNTER=$((BACKEND_COUNTER + 2))
 done
 
-echo "⚛️  Step 6: Starting SvelteKit frontend (development with HMR)..."
+echo "⚛️  Step 7: Starting SvelteKit frontend (development with HMR)..."
 docker compose -f docker-compose.yml -f docker-compose.override.yml up -d frontend-dev --no-deps
 
-echo "🌐 Step 7: Starting Nginx reverse proxy..."
+echo "🌐 Step 8: Starting Nginx reverse proxy..."
 docker compose -f docker-compose.yml -f docker-compose.override.yml up -d nginx --no-deps
 
-echo "🎛️  Step 8: Starting management tools..."
+echo "🎛️  Step 9: Starting management tools..."
 docker compose up -d pgadmin attu
 
 # Show comprehensive status
