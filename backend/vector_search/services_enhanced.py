@@ -104,8 +104,8 @@ class EnhancedProjectVectorSearchService:
                 PROCESSING_CONTROL[self.project_id]['current_document_id'] = document_id
                 
                 try:
-                    # Get the document
-                    document = ProjectDocument.objects.get(document_id=document_id)
+                    # SECURITY FIX: Get the document with project filter to ensure project isolation
+                    document = ProjectDocument.objects.get(document_id=document_id, project=self.project)
                     
                     # Get or create document vector status
                     doc_vector_status, created = DocumentVectorStatus.objects.get_or_create(
@@ -190,7 +190,8 @@ class EnhancedProjectVectorSearchService:
                     
                     # Update document status to failed if we can
                     try:
-                        document = ProjectDocument.objects.get(document_id=document_id)
+                        # SECURITY FIX: Get the document with project filter to ensure project isolation
+                        document = ProjectDocument.objects.get(document_id=document_id, project=self.project)
                         doc_vector_status, created = DocumentVectorStatus.objects.get_or_create(
                             document=document,
                             collection=collection,

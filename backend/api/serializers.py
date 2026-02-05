@@ -164,6 +164,8 @@ class IntelliDocProjectSerializer(serializers.ModelSerializer):
             'suggested_questions', 'required_fields', 'analysis_focus', 'icon_class', 'color_theme',
             # NEW: Complete configuration fields
             'total_pages', 'navigation_pages', 'processing_capabilities', 'validation_rules', 'ui_configuration',
+            # Document organization settings
+            'preserve_original_folder_structure',
             # Project metadata
             'created_by', 'created_at', 'updated_at'
         ]
@@ -361,6 +363,8 @@ class IntelliDocProjectSerializer(serializers.ModelSerializer):
             'suggested_questions', 'required_fields', 'analysis_focus', 'icon_class', 'color_theme',
             # Complete configuration fields
             'total_pages', 'navigation_pages', 'processing_capabilities', 'validation_rules', 'ui_configuration',
+            # Document organization settings
+            'preserve_original_folder_structure',
             # Project metadata
             'created_by', 'created_at', 'updated_at'
         ]

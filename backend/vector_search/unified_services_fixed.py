@@ -201,7 +201,7 @@ class UnifiedVectorSearchManager:
                 logger.info(f"📦 Collecting {len(doc_info.chunks)} enhanced chunks for batch insertion: {doc_info.document_metadata.get('file_name')}")
                 
                 # Mark document as processing
-                self._update_document_status(str(original_doc.document_id), 'processing', f'Enhanced batch inserting {len(doc_info.chunks)} chunks')
+                self._update_document_status(str(project.project_id), str(original_doc.document_id), 'processing', f'Enhanced batch inserting {len(doc_info.chunks)} chunks')
                 
                 # 🚀 ATOMIC BATCH INSERTION FOR ENTIRE DOCUMENT using Enhanced Database
                 logger.info(f"🚀 Starting enhanced atomic batch insertion for {doc_info.document_metadata.get('file_name')} - {len(doc_info.chunks)} chunks")
@@ -213,6 +213,7 @@ class UnifiedVectorSearchManager:
                     if success:
                         # 🎯 ENHANCED ATOMICITY SUCCESS
                         self._update_document_status(
+                            str(project.project_id),
                             str(original_doc.document_id), 
                             'completed', 
                             f'Enhanced processing: {len(doc_info.chunks)} chunks with AI summaries and topics'
@@ -236,6 +237,7 @@ class UnifiedVectorSearchManager:
                     else:
                         # 💥 ENHANCED ATOMICITY FAILURE
                         self._update_document_status(
+                            str(project.project_id),
                             str(original_doc.document_id), 
                             'failed', 
                             f'Enhanced batch insertion failed for {len(doc_info.chunks)} chunks'
@@ -246,6 +248,7 @@ class UnifiedVectorSearchManager:
                 except Exception as batch_error:
                     # 🚨 ENHANCED EXCEPTION DURING BATCH
                     self._update_document_status(
+                        str(project.project_id),
                         str(original_doc.document_id), 
                         'failed', 
                         f'Enhanced batch insertion exception: {str(batch_error)[:200]}'
@@ -258,7 +261,7 @@ class UnifiedVectorSearchManager:
                 failed_count += 1
                 # Mark document as failed due to processing error
                 if 'original_doc' in locals() and original_doc:
-                    self._update_document_status(str(original_doc.document_id), 'failed', f'Enhanced processing error: {str(e)[:200]}')
+                    self._update_document_status(str(project.project_id), str(original_doc.document_id), 'failed', f'Enhanced processing error: {str(e)[:200]}')
 
         # Update collection status
         collection = self._update_collection_status(project, processed_count, failed_count, 'enhanced')
@@ -285,13 +288,17 @@ class UnifiedVectorSearchManager:
             'collection_name': collection.collection_name if collection else 'default'
         }
     
-    def _update_document_status(self, document_id: str, status: str, message: str):
-        """Update individual document processing status for frontend tracking using DocumentVectorStatus"""
+    def _update_document_status(self, project_id: str, document_id: str, status: str, message: str):
+        """Update individual document processing status for frontend tracking using DocumentVectorStatus
+        
+        SECURITY: Requires project_id to ensure document belongs to the correct project.
+        This prevents potential cross-project document access.
+        """
         try:
             from users.models import ProjectDocument, DocumentVectorStatus, ProjectVectorCollection, VectorProcessingStatus
             
-            # Find document by UUID
-            document = ProjectDocument.objects.get(document_id=document_id)
+            # SECURITY FIX: Find document by UUID AND project_id to ensure project isolation
+            document = ProjectDocument.objects.get(document_id=document_id, project__project_id=project_id)
             
             # Get or create vector collection for the project
             collection, created = ProjectVectorCollection.objects.get_or_create(

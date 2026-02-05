@@ -3,7 +3,7 @@ DuckDuckGo Search Service
 =========================
 
 Provides web search functionality using DuckDuckGo.
-No API key required - uses the duckduckgo-search library.
+No API key required - uses the ddgs library (formerly duckduckgo-search).
 """
 
 import logging
@@ -27,6 +27,28 @@ class DuckDuckGoService:
         self.default_max_results = websearch_config.get('MAX_RESULTS', self.DEFAULT_MAX_RESULTS)
         logger.info(f"🔍 DUCKDUCKGO SERVICE: Initialized (default max results: {self.default_max_results})")
     
+    def _get_ddgs_class(self):
+        """
+        Get the DDGS class from either the new 'ddgs' package or legacy 'duckduckgo_search'.
+        Returns the class or None if neither is available.
+        """
+        # Try new package name first
+        try:
+            from ddgs import DDGS
+            return DDGS
+        except ImportError:
+            pass
+        
+        # Fall back to old package name
+        try:
+            from duckduckgo_search import DDGS
+            return DDGS
+        except ImportError:
+            pass
+        
+        logger.error("❌ DUCKDUCKGO: Neither 'ddgs' nor 'duckduckgo-search' package is installed. Run: pip install ddgs")
+        return None
+    
     def search(
         self, 
         query: str, 
@@ -44,10 +66,8 @@ class DuckDuckGoService:
         Returns:
             List of search result dicts with title, url, body (snippet)
         """
-        try:
-            from duckduckgo_search import DDGS
-        except ImportError:
-            logger.error("❌ DUCKDUCKGO: duckduckgo-search package not installed. Run: pip install duckduckgo-search")
+        DDGS = self._get_ddgs_class()
+        if DDGS is None:
             return []
         
         effective_max_results = max_results or self.default_max_results
@@ -70,6 +90,10 @@ class DuckDuckGoService:
                     max_results=effective_max_results
                 ))
             
+            logger.info(f"🔍 DUCKDUCKGO: Raw results count: {len(raw_results)}")
+            if raw_results:
+                logger.debug(f"🔍 DUCKDUCKGO: First raw result: {raw_results[0]}")
+            
             # Format results
             formatted_results = self._format_results(raw_results)
             
@@ -77,7 +101,7 @@ class DuckDuckGoService:
             return formatted_results
             
         except Exception as e:
-            logger.error(f"❌ DUCKDUCKGO: Search failed: {e}")
+            logger.error(f"❌ DUCKDUCKGO: Search failed: {e}", exc_info=True)
             return []
     
     def search_news(
@@ -97,10 +121,8 @@ class DuckDuckGoService:
         Returns:
             List of news result dicts
         """
-        try:
-            from duckduckgo_search import DDGS
-        except ImportError:
-            logger.error("❌ DUCKDUCKGO: duckduckgo-search package not installed")
+        DDGS = self._get_ddgs_class()
+        if DDGS is None:
             return []
         
         effective_max_results = max_results or self.default_max_results
@@ -122,7 +144,7 @@ class DuckDuckGoService:
             return formatted_results
             
         except Exception as e:
-            logger.error(f"❌ DUCKDUCKGO NEWS: Search failed: {e}")
+            logger.error(f"❌ DUCKDUCKGO NEWS: Search failed: {e}", exc_info=True)
             return []
     
     def _format_results(self, raw_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

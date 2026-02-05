@@ -405,6 +405,12 @@ class IntelliDocProject(models.Model):
     validation_rules = models.JSONField(default=dict, help_text="Validation rules configuration")
     ui_configuration = models.JSONField(default=dict, help_text="UI configuration settings")
     
+    # Document organization settings
+    preserve_original_folder_structure = models.BooleanField(
+        default=False,
+        help_text="When enabled, preserves the original folder structure from uploaded files instead of auto-classifying into categories"
+    )
+    
     created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='intellidoc_projects')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

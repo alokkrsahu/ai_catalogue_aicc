@@ -988,6 +988,45 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
         logger.info(f"🎯 UNIVERSAL: Delegating capabilities check for project {project_id}")
         return get_project_capabilities_consolidated(request._request, project_id)
     
+    @action(detail=True, methods=['patch'], url_path='folder-structure-setting')
+    def folder_structure_setting(self, request, project_id=None):
+        """
+        Update the preserve_original_folder_structure setting for a project.
+        
+        When enabled, uploaded folder structures are preserved instead of 
+        auto-classifying documents into categories.
+        
+        PATCH /api/projects/{project_id}/folder-structure-setting/
+        Body: {"preserve_original_folder_structure": true/false}
+        """
+        project = self.get_object()
+        
+        # Get the new value from request data
+        preserve_original = request.data.get('preserve_original_folder_structure')
+        
+        if preserve_original is None:
+            return Response({
+                "error": "preserve_original_folder_structure field is required",
+                "api_version": "universal_v1"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Convert string to boolean if needed
+        if isinstance(preserve_original, str):
+            preserve_original = preserve_original.lower() in ('true', '1', 'yes')
+        
+        # Update the project setting
+        project.preserve_original_folder_structure = preserve_original
+        project.save(update_fields=['preserve_original_folder_structure', 'updated_at'])
+        
+        logger.info(f"📁 UNIVERSAL: Updated folder structure setting to {preserve_original} for project {project.name} ({project_id})")
+        
+        return Response({
+            "project_id": str(project.project_id),
+            "preserve_original_folder_structure": project.preserve_original_folder_structure,
+            "message": f"Folder structure setting updated. {'Original structure will be preserved' if preserve_original else 'Auto-classification will be used'}.",
+            "api_version": "universal_v1"
+        })
+    
     @action(detail=True, methods=['delete'])
     def delete_document(self, request, project_id=None):
         """Delete a specific document from the project"""

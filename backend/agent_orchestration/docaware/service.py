@@ -645,23 +645,47 @@ class EnhancedDocAwareAgentService:
             return []
     
     def _multi_collection_search(self, query: str, params: Dict[str, Any], content_filter_expr: str = None) -> List[Dict[str, Any]]:
-        """Search across multiple collections"""
+        """Search across multiple collections
+        
+        SECURITY: This method validates that only the project's own collection can be searched.
+        Cross-project collection access is explicitly blocked to prevent data leakage.
+        """
         try:
             collections = params["collections"]
             collection_weights = json.loads(params.get("collection_weights", "{}"))
             search_limit = params["search_limit_per_collection"]
             merge_strategy = params["merge_strategy"]
             
+            # SECURITY: Validate and filter collections to only allow project's own collection
+            # This prevents unauthorized cross-project document access
+            validated_collections = []
+            for collection in collections:
+                if collection == "project_documents":
+                    # Map to project's actual collection
+                    validated_collections.append(("project_documents", self.collection_name))
+                elif collection == self.collection_name:
+                    # Allow explicit use of own collection name
+                    validated_collections.append((collection, self.collection_name))
+                else:
+                    # SECURITY: Reject any other collection - potential cross-project access attempt
+                    logger.warning(f"🚫 SECURITY: Rejected unauthorized collection access attempt: '{collection}' (allowed: 'project_documents' or '{self.collection_name}')")
+                    continue
+            
+            if not validated_collections:
+                logger.error("🚫 SECURITY: No valid collections to search after validation")
+                return []
+            
+            logger.info(f"🔒 SECURITY: Validated {len(validated_collections)} collections for search (rejected {len(collections) - len(validated_collections)})")
+            
             # Generate query embedding
             query_vector = self.embedding_service.encode_query(query)
             
             all_results = []
             
-            # Search each collection
-            for collection in collections:
+            # Search each validated collection
+            for original_name, actual_collection in validated_collections:
                 try:
-                    # Use project-specific collection name if it's the main collection
-                    actual_collection = self.collection_name if collection == "project_documents" else collection
+                    # actual_collection is already validated to be project's own collection
                     
                     # Auto-detect metric for this collection
                     detected_metric = self.get_collection_metric_type(actual_collection)
@@ -673,12 +697,12 @@ class EnhancedDocAwareAgentService:
                         index_type=IndexType.AUTOINDEX,
                         metric_type=MetricType(detected_metric),  # Use detected metric
                         limit=search_limit,
-                        filter_expression=content_filter_expr if content_filter_expr and collection == "project_documents" else "",
+                        filter_expression=content_filter_expr if content_filter_expr and original_name == "project_documents" else "",
                         output_fields=["*"]  # Return all fields
                     )
                     
                     search_result = self.milvus_service.search(search_request)
-                    weight = collection_weights.get(collection, 1.0)
+                    weight = collection_weights.get(original_name, 1.0)
                     
                     # Add weighted results
                     for hit in search_result.hits:
@@ -693,13 +717,13 @@ class EnhancedDocAwareAgentService:
                                 "weight": weight,
                                 "chunk_type": hit.get("chunk_type", "text"),
                                 "document_id": hit.get("document_id", ""),
-                                "collection": collection,
+                                "collection": original_name,
                                 "search_method": "multi_collection"
                             }
                         })
                         
                 except Exception as e:
-                    logger.warning(f"❌ MULTI: Failed to search collection {collection}: {e}")
+                    logger.warning(f"❌ MULTI: Failed to search collection {actual_collection}: {e}")
                     continue
             
             # Apply merge strategy
@@ -710,8 +734,8 @@ class EnhancedDocAwareAgentService:
                 all_results.sort(key=lambda x: x["metadata"]["original_score"], reverse=True)
             # round_robin would need more complex logic
             
-            logger.info(f"📚 MULTI: Found {len(all_results)} results across {len(collections)} collections")
-            return all_results[:search_limit * len(collections)]
+            logger.info(f"📚 MULTI: Found {len(all_results)} results across {len(validated_collections)} validated collections")
+            return all_results[:search_limit * len(validated_collections)]
             
         except Exception as e:
             logger.error(f"❌ MULTI: Search failed: {e}")

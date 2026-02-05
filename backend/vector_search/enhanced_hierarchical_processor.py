@@ -112,12 +112,15 @@ class EnhancedHierarchicalProcessor:
         self.max_chunk_size = max_chunk_size
         self.supported_extensions = {'.txt', '.text', '.pdf', '.docx', '.doc', '.md', '.rtf', '.odt'}
         self.enable_summary = enable_summary
+        
+        # Get preserve_original_folder_structure setting from project
+        self.preserve_original_folder_structure = getattr(project, 'preserve_original_folder_structure', False)
 
         # Determine LLM provider and model (default to OpenAI if not specified)
         self.llm_provider = llm_provider or 'openai'
         self.llm_model = llm_model or 'gpt-3.5-turbo'
 
-        logger.info(f"📋 PROCESSOR: Initializing with LLM Provider: {self.llm_provider}, Model: {self.llm_model}, Enable Summary: {self.enable_summary}")
+        logger.info(f"📋 PROCESSOR: Initializing with LLM Provider: {self.llm_provider}, Model: {self.llm_model}, Enable Summary: {self.enable_summary}, Preserve Original Folders: {self.preserve_original_folder_structure}")
 
         # Use MultiProviderSummarizer if summary is enabled, otherwise None
         if self.enable_summary:
@@ -225,7 +228,100 @@ class EnhancedHierarchicalProcessor:
         return hierarchy
     
     def _analyze_filename_structure(self, filename: str) -> Dict[str, Any]:
-        """Enhanced filename analysis with detailed hierarchy mapping"""
+        """Enhanced filename analysis with detailed hierarchy mapping
+        
+        Supports two modes:
+        1. preserve_original_folder_structure=True: Uses the exact folder structure from uploaded files
+        2. preserve_original_folder_structure=False: Auto-classifies based on filename patterns
+        """
+        
+        # Check if we should preserve original folder structure
+        if self.preserve_original_folder_structure:
+            return self._build_original_structure_path(filename)
+        
+        # Otherwise, use existing auto-classification logic
+        return self._build_auto_classified_path(filename)
+    
+    def _build_original_structure_path(self, filename: str) -> Dict[str, Any]:
+        """Build virtual path preserving the original folder structure from uploads
+        
+        Handles edge cases:
+        - Backslashes (Windows paths) converted to forward slashes
+        - Multiple consecutive slashes collapsed to single slash
+        - Leading/trailing slashes stripped
+        - Empty folder names filtered out
+        - Empty file names handled gracefully
+        """
+        # Extract folder path and file name from the original filename
+        # filename could be "Documents/MyFiles/Doc1.pdf" or just "Doc1.pdf"
+        
+        # Normalize path separators: convert backslashes and collapse multiple slashes
+        normalized_filename = filename.replace('\\', '/')
+        # Collapse multiple consecutive slashes to single slash
+        normalized_filename = re.sub(r'/+', '/', normalized_filename)
+        # Strip leading and trailing slashes
+        normalized_filename = normalized_filename.strip('/')
+        
+        # Split into folder path and file name
+        if '/' in normalized_filename:
+            folder_parts = normalized_filename.rsplit('/', 1)
+            folder_path = folder_parts[0]
+            file_only = folder_parts[1]
+        else:
+            folder_path = ''
+            file_only = normalized_filename
+        
+        # Validate file_only is not empty - fallback to original filename if needed
+        if not file_only:
+            logger.warning(f"Empty file name detected in path: '{filename}', using original filename")
+            # Try to extract just the filename from the original
+            file_only = Path(filename).name or filename or 'unknown_file'
+        
+        # Get file name without extension for base_name
+        name_without_ext = Path(file_only).stem.lower()
+        
+        # Build virtual path preserving original structure
+        if folder_path:
+            virtual_path = f'documents/{folder_path}/{file_only}'
+            # Filter out empty strings from folder levels (handles edge cases like "a//b")
+            folder_levels = [f for f in folder_path.split('/') if f]
+            subcategory = folder_levels[-1] if folder_levels else None
+            # Get top-level folder as category
+            category = folder_levels[0] if folder_levels else 'user_uploads'
+            hierarchy_level = len(folder_levels)
+        else:
+            virtual_path = f'documents/{file_only}'
+            subcategory = None
+            category = 'user_uploads'
+            hierarchy_level = 0
+        
+        # Determine organization level based on folder depth
+        if hierarchy_level == 0:
+            organization_level = 'flat'
+        elif hierarchy_level <= 2:
+            organization_level = 'structured'
+        else:
+            organization_level = 'highly_organized'
+        
+        structure = {
+            'original_filename': filename,
+            'base_name': name_without_ext,
+            'category': category,
+            'subcategory': subcategory,
+            'document_type': 'document',
+            'hierarchy_level': hierarchy_level,
+            'virtual_path': virtual_path,
+            'folder_indicators': ['user_defined'] if folder_path else [],
+            'content_type_hints': [],
+            'organization_level': organization_level,
+            'original_folder_path': folder_path  # Store original folder path for reference
+        }
+        
+        logger.debug(f"📁 PRESERVE ORIGINAL: {filename} -> {virtual_path}")
+        return structure
+    
+    def _build_auto_classified_path(self, filename: str) -> Dict[str, Any]:
+        """Build virtual path using auto-classification based on filename patterns"""
         name_without_ext = Path(filename).stem.lower()
         
         # Initialize structure

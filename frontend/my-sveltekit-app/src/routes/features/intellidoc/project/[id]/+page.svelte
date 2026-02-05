@@ -2,16 +2,73 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { goto } from '$app/navigation';
   import { toasts } from '$lib/stores/toast';
   import { cleanUniversalApi } from '$lib/services/cleanUniversalApi';
   import ApiManagement from '$lib/components/project/ApiManagement.svelte';
   import AdminDeleteButton from '$lib/components/AdminDeleteButton.svelte';
-  import { isAdmin } from '$lib/stores/auth';
+  import authStore, { isAdmin } from '$lib/stores/auth';
   import { llmModelsService, type LLMModel, type BulkModelData } from '$lib/stores/llmModelsStore';
   
   // Get project ID from URL
   $: projectId = $page.params.id;
+  
+  // Track previous project ID to detect project switches (security: prevent cross-project data leakage)
+  let previousProjectId: string | null = null;
+  
+  // SECURITY FIX: Clear ALL stale data and reload when projectId changes
+  // This prevents data from one project appearing when viewing another project
+  $: if (projectId && projectId !== previousProjectId) {
+    console.log(`🔄 PROJECT SWITCH: Clearing ALL stale data (${previousProjectId} -> ${projectId})`);
+    
+    // 1. Stop any active polling first to prevent cross-project polling
+    if (statusPollingInterval) {
+      console.log('⏹️ PROJECT SWITCH: Stopping status polling');
+      clearInterval(statusPollingInterval);
+      statusPollingInterval = null;
+    }
+    
+    // 2. Clear core project data
+    uploadedDocuments = [];
+    project = null;
+    processingStatus = null;
+    deployment = null;
+    apiKeyStatus = { hasValidKeys: false, missingProviders: [], checking: true };
+    preserveOriginalFolderStructure = false;
+    
+    // 3. Clear search state (prevents search results from previous project)
+    searchQuery = '';
+    searchResults = [];
+    
+    // 4. Clear LLM configuration (reset to defaults)
+    llmConfig = { provider: 'openai', model: 'gpt-3.5-turbo', enableSummary: true };
+    bulkModelData = null;
+    availableProviders = [];
+    providerModels = [];
+    
+    // 5. Clear navigation state
+    currentPage = 1;
+    hasNavigation = false;
+    navigationPages = [];
+    projectCapabilities = {};
+    
+    // 6. Reset processing state
+    processing = false;
+    pollingAttempts = 0;
+    
+    // 7. Reset loading states
+    loading = true;
+    loadingDeployment = false;
+    modelsLoading = false;
+    
+    // Update tracking variable
+    previousProjectId = projectId;
+    
+    // Reload project data for the new project
+    loadProject();
+    loadLLMModels(false);
+  }
   
   // State variables
   let project: any = null;
@@ -66,6 +123,10 @@
   let availableProviders: string[] = [];
   let providerModels: LLMModel[] = [];
   
+  // Folder structure preservation setting
+  let preserveOriginalFolderStructure = false;
+  let updatingFolderStructureSetting = false;
+  
   console.log(`🎯 UNIVERSAL: Initializing universal project interface for project ${projectId}`);
   
   // Helper function to format processing status
@@ -81,9 +142,9 @@
   }
   
   onMount(() => {
-    loadProject();
-    // Don't force refresh on initial load - use cache if available
-    loadLLMModels(false);
+    // NOTE: loadProject() and loadLLMModels() are now called reactively when projectId changes
+    // This ensures they run on both initial load AND when navigating between projects
+    // See the reactive statement above: $: if (projectId && projectId !== previousProjectId)
     
     // Return cleanup function for onDestroy behavior
     return () => {
@@ -185,6 +246,9 @@
       hasNavigation = project.has_navigation || false;
       navigationPages = project.navigation_pages || [];
       
+      // Load folder structure preservation setting
+      preserveOriginalFolderStructure = project.preserve_original_folder_structure || false;
+      
       // Set up navigation based on cloned project data
       if (hasNavigation && project.total_pages > 1) {
         currentPage = 1;
@@ -195,6 +259,7 @@
         template_type: project.template_type,
         has_navigation: hasNavigation,
         total_pages: project.total_pages,
+        preserve_original_folder_structure: preserveOriginalFolderStructure,
         capabilities: Object.keys(projectCapabilities)
       });
       
@@ -255,6 +320,53 @@
       // Assume keys might be missing if we can't check
       apiKeyStatus.hasValidKeys = false;
       apiKeyStatus.missingProviders = ['openai', 'anthropic', 'google'];
+    }
+  }
+  
+  /**
+   * Update the folder structure preservation setting
+   */
+  async function updateFolderStructureSetting(newValue: boolean) {
+    try {
+      updatingFolderStructureSetting = true;
+      console.log(`📁 UNIVERSAL: Updating folder structure setting to ${newValue} for project ${projectId}`);
+      
+      // Get auth token from the authStore (not from localStorage directly)
+      const auth = get(authStore);
+      const token = auth?.token || '';
+      
+      if (!token) {
+        throw new Error('Not authenticated. Please log in again.');
+      }
+      
+      const response = await fetch(`/api/projects/${projectId}/folder-structure-setting/`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          preserve_original_folder_structure: newValue
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Failed to update setting: ${response.statusText}`);
+      }
+      
+      const result = await response.json();
+      preserveOriginalFolderStructure = result.preserve_original_folder_structure;
+      
+      toasts.success(result.message || 'Folder structure setting updated successfully');
+      console.log('✅ UNIVERSAL: Folder structure setting updated:', result);
+      
+    } catch (error: any) {
+      console.error('❌ UNIVERSAL: Failed to update folder structure setting:', error);
+      toasts.error(`Failed to update setting: ${error.message}`);
+      // Revert the toggle on error
+      preserveOriginalFolderStructure = !newValue;
+    } finally {
+      updatingFolderStructureSetting = false;
     }
   }
   
@@ -1090,6 +1202,43 @@
                         <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-oxford-blue/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-oxford-blue"></div>
                       </label>
                     </div>
+                    
+                    <!-- Preserve Original Folder Structure Toggle -->
+                    <div class="flex items-center justify-between p-3 bg-white rounded-lg border border-gray-200 mt-3">
+                      <div class="flex-1">
+                        <label class="text-sm font-medium text-gray-900 cursor-pointer" for="preserve-folder-structure-toggle">
+                          Preserve Original Folder Structure
+                        </label>
+                        <p class="text-xs text-gray-500 mt-1">
+                          Keep your uploaded folder hierarchy instead of auto-classifying documents
+                        </p>
+                        {#if preserveOriginalFolderStructure}
+                          <p class="text-xs text-green-600 mt-1">
+                            <i class="fas fa-folder-tree mr-1"></i>
+                            Your folder structure will be preserved as uploaded
+                          </p>
+                        {:else}
+                          <p class="text-xs text-blue-600 mt-1">
+                            <i class="fas fa-magic mr-1"></i>
+                            Documents will be auto-classified into categories
+                          </p>
+                        {/if}
+                      </div>
+                      <label class="relative inline-flex items-center cursor-pointer">
+                        <input 
+                          type="checkbox" 
+                          id="preserve-folder-structure-toggle"
+                          checked={preserveOriginalFolderStructure}
+                          on:change={(e) => updateFolderStructureSetting((e.target as HTMLInputElement).checked)}
+                          disabled={updatingFolderStructureSetting}
+                          class="sr-only peer"
+                        />
+                        <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-green-500/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-600 peer-disabled:opacity-50"></div>
+                        {#if updatingFolderStructureSetting}
+                          <div class="ml-2 animate-spin rounded-full h-4 w-4 border-b-2 border-green-600"></div>
+                        {/if}
+                      </label>
+                    </div>
                   </div>
                 {/if}
                 
@@ -1157,16 +1306,18 @@
       <!-- Page 2: Agent Orchestration (Capability-Based Rendering) -->
       {#if project.processing_capabilities?.supports_agent_orchestration}
         <div class="agent-orchestration-page h-full flex-1 w-full">
-          {#await import('$lib/components/AgentOrchestrationInterface.svelte')}
-            <div class="flex items-center justify-center min-h-96">
-              <div class="text-center">
-                <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
-                <p class="text-oxford-blue">Loading Agent Orchestration...</p>
+          <!-- SECURITY: key={projectId} forces full component remount on project switch -->
+          {#key projectId}
+            {#await import('$lib/components/AgentOrchestrationInterface.svelte')}
+              <div class="flex items-center justify-center min-h-96">
+                <div class="text-center">
+                  <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
+                  <p class="text-oxford-blue">Loading Agent Orchestration...</p>
+                </div>
               </div>
-            </div>
-          {:then AgentOrchestrationModule}
-            <svelte:component this={AgentOrchestrationModule.default} {project} {projectId} />
-          {:catch error}
+            {:then AgentOrchestrationModule}
+              <svelte:component this={AgentOrchestrationModule.default} {project} {projectId} />
+            {:catch error}
             <div class="flex items-center justify-center min-h-96">
               <div class="text-center">
                 <div class="w-16 h-16 bg-red-100 text-red-600 rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
@@ -1183,7 +1334,8 @@
                 </button>
               </div>
             </div>
-          {/await}
+            {/await}
+          {/key}
         </div>
       {:else}
         <div class="flex items-center justify-center min-h-96">
@@ -1210,16 +1362,18 @@
     {#if hasNavigation && currentPage === 3}
       <!-- Page 3: Evaluation -->
       <div class="evaluation-page h-full flex-1 w-full">
-        {#await import('$lib/components/WorkflowEvaluation.svelte')}
-          <div class="flex items-center justify-center min-h-96">
-            <div class="text-center">
-              <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
-              <p class="text-oxford-blue">Loading Evaluation...</p>
+        <!-- SECURITY: key={projectId} forces full component remount on project switch -->
+        {#key projectId}
+          {#await import('$lib/components/WorkflowEvaluation.svelte')}
+            <div class="flex items-center justify-center min-h-96">
+              <div class="text-center">
+                <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
+                <p class="text-oxford-blue">Loading Evaluation...</p>
+              </div>
             </div>
-          </div>
-        {:then WorkflowEvaluationModule}
-          <svelte:component this={WorkflowEvaluationModule.default} {project} {projectId} />
-        {:catch error}
+          {:then WorkflowEvaluationModule}
+            <svelte:component this={WorkflowEvaluationModule.default} {project} {projectId} />
+          {:catch error}
           <div class="flex items-center justify-center min-h-96">
             <div class="text-center">
               <div class="w-16 h-16 bg-red-100 text-red-600 rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
@@ -1236,40 +1390,44 @@
               </button>
             </div>
           </div>
-        {/await}
+          {/await}
+        {/key}
       </div>
     {/if}
     
     {#if hasNavigation && currentPage === 4}
       <!-- Page 4: Deploy -->
       <div class="deploy-page h-full flex-1 w-full">
-        {#await import('$lib/components/WorkflowDeployment.svelte')}
-          <div class="flex items-center justify-center min-h-96">
-            <div class="text-center">
-              <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
-              <p class="text-oxford-blue">Loading Deploy...</p>
-            </div>
-          </div>
-        {:then WorkflowDeploymentModule}
-          <svelte:component this={WorkflowDeploymentModule.default} {project} {projectId} />
-        {:catch error}
-          <div class="flex items-center justify-center min-h-96">
-            <div class="text-center">
-              <div class="w-16 h-16 bg-red-100 text-red-600 rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
-                <i class="fas fa-exclamation-triangle text-2xl"></i>
+        <!-- SECURITY: key={projectId} forces full component remount on project switch -->
+        {#key projectId}
+          {#await import('$lib/components/WorkflowDeployment.svelte')}
+            <div class="flex items-center justify-center min-h-96">
+              <div class="text-center">
+                <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
+                <p class="text-oxford-blue">Loading Deploy...</p>
               </div>
-              <h2 class="text-xl font-bold text-gray-900 mb-2">Loading Error</h2>
-              <p class="text-gray-600">Failed to load deployment interface.</p>
-              <button 
-                class="mt-4 px-4 py-2 bg-oxford-blue text-white rounded-md hover:bg-oxford-blue-dark transition-colors"
-                on:click={() => window.location.reload()}
-              >
-                <i class="fas fa-refresh mr-2"></i>
-                Retry
-              </button>
             </div>
-          </div>
-        {/await}
+          {:then WorkflowDeploymentModule}
+            <svelte:component this={WorkflowDeploymentModule.default} {project} {projectId} />
+          {:catch error}
+            <div class="flex items-center justify-center min-h-96">
+              <div class="text-center">
+                <div class="w-16 h-16 bg-red-100 text-red-600 rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
+                  <i class="fas fa-exclamation-triangle text-2xl"></i>
+                </div>
+                <h2 class="text-xl font-bold text-gray-900 mb-2">Loading Error</h2>
+                <p class="text-gray-600">Failed to load deployment interface.</p>
+                <button 
+                  class="mt-4 px-4 py-2 bg-oxford-blue text-white rounded-md hover:bg-oxford-blue-dark transition-colors"
+                  on:click={() => window.location.reload()}
+                >
+                  <i class="fas fa-refresh mr-2"></i>
+                  Retry
+                </button>
+              </div>
+            </div>
+          {/await}
+        {/key}
       </div>
     {/if}
     
@@ -1311,17 +1469,56 @@
             </div>
           </div>
         {:else}
-          {#await import('$lib/components/DeploymentActivityTracker.svelte')}
-            <div class="flex items-center justify-center min-h-96">
-              <div class="text-center">
-                <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
-                <p class="text-oxford-blue">Loading Activity Tracker...</p>
+          <!-- SECURITY: key={projectId} forces full component remount on project switch -->
+          {#key projectId}
+            {#await import('$lib/components/DeploymentActivityTracker.svelte')}
+              <div class="flex items-center justify-center min-h-96">
+                <div class="text-center">
+                  <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
+                  <p class="text-oxford-blue">Loading Activity Tracker...</p>
+                </div>
               </div>
+            {:then ActivityTrackerModule}
+              <div class="bg-white rounded-lg shadow-md p-6">
+                <svelte:component this={ActivityTrackerModule.default} {projectId} {deployment} />
+              </div>
+            {:catch error}
+              <div class="flex items-center justify-center min-h-96">
+                <div class="text-center">
+                  <div class="w-16 h-16 bg-red-100 text-red-600 rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
+                    <i class="fas fa-exclamation-triangle text-2xl"></i>
+                  </div>
+                  <h3 class="text-xl font-bold text-gray-900 mb-2">Loading Error</h3>
+                  <p class="text-gray-600">Failed to load Activity Tracker component.</p>
+                  <button
+                    class="mt-4 px-4 py-2 bg-oxford-blue text-white rounded-lg hover:bg-blue-700 transition-colors"
+                    on:click={() => window.location.reload()}
+                  >
+                    <i class="fas fa-refresh mr-2"></i>
+                    Reload Page
+                  </button>
+                </div>
+              </div>
+            {/await}
+          {/key}
+        {/if}
+      </div>
+    {/if}
+    
+    {#if hasNavigation && currentPage === 6}
+      <!-- Page 6: System Performance Analysis -->
+      <div class="system-performance-analysis-page h-full flex-1 w-full px-6 py-8">
+        <!-- SECURITY: key={projectId} forces full component remount on project switch -->
+        {#key projectId}
+          {#await import('$lib/components/SystemPerformanceAnalysis.svelte')}
+          <div class="flex items-center justify-center min-h-96">
+            <div class="text-center">
+              <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
+              <p class="text-oxford-blue">Loading System Performance Analysis...</p>
             </div>
-          {:then ActivityTrackerModule}
-            <div class="bg-white rounded-lg shadow-md p-6">
-              <svelte:component this={ActivityTrackerModule.default} {projectId} {deployment} />
-            </div>
+          </div>
+          {:then PerformanceModule}
+            <svelte:component this={PerformanceModule.default} {projectId} />
           {:catch error}
             <div class="flex items-center justify-center min-h-96">
               <div class="text-center">
@@ -1329,7 +1526,7 @@
                   <i class="fas fa-exclamation-triangle text-2xl"></i>
                 </div>
                 <h3 class="text-xl font-bold text-gray-900 mb-2">Loading Error</h3>
-                <p class="text-gray-600">Failed to load Activity Tracker component.</p>
+                <p class="text-gray-600">Failed to load System Performance Analysis component.</p>
                 <button
                   class="mt-4 px-4 py-2 bg-oxford-blue text-white rounded-lg hover:bg-blue-700 transition-colors"
                   on:click={() => window.location.reload()}
@@ -1340,40 +1537,7 @@
               </div>
             </div>
           {/await}
-        {/if}
-      </div>
-    {/if}
-    
-    {#if hasNavigation && currentPage === 6}
-      <!-- Page 6: System Performance Analysis -->
-      <div class="system-performance-analysis-page h-full flex-1 w-full px-6 py-8">
-        {#await import('$lib/components/SystemPerformanceAnalysis.svelte')}
-          <div class="flex items-center justify-center min-h-96">
-            <div class="text-center">
-              <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
-              <p class="text-oxford-blue">Loading System Performance Analysis...</p>
-            </div>
-          </div>
-        {:then PerformanceModule}
-          <svelte:component this={PerformanceModule.default} {projectId} />
-        {:catch error}
-          <div class="flex items-center justify-center min-h-96">
-            <div class="text-center">
-              <div class="w-16 h-16 bg-red-100 text-red-600 rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
-                <i class="fas fa-exclamation-triangle text-2xl"></i>
-              </div>
-              <h3 class="text-xl font-bold text-gray-900 mb-2">Loading Error</h3>
-              <p class="text-gray-600">Failed to load System Performance Analysis component.</p>
-              <button
-                class="mt-4 px-4 py-2 bg-oxford-blue text-white rounded-lg hover:bg-blue-700 transition-colors"
-                on:click={() => window.location.reload()}
-              >
-                <i class="fas fa-refresh mr-2"></i>
-                Reload Page
-              </button>
-            </div>
-          </div>
-        {/await}
+        {/key}
       </div>
     {/if}
       </div>
