@@ -4,6 +4,9 @@
 services:
   # Production Backend Configuration
   backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
     environment:
       ENVIRONMENT: production
       DEBUG: "False"
