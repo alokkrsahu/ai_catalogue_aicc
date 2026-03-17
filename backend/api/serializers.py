@@ -246,14 +246,34 @@ class ProjectDocumentSerializer(serializers.ModelSerializer):
     document_id = serializers.UUIDField(read_only=True)
     uploaded_by = UserSerializer(read_only=True)
     file_size_formatted = serializers.ReadOnlyField()
+    download_url = serializers.SerializerMethodField()
+    llm_upload_status = serializers.SerializerMethodField()
     
     class Meta:
         model = ProjectDocument
         fields = [
             'id', 'document_id', 'original_filename', 'file_size', 'file_size_formatted',
-            'file_type', 'file_extension', 'upload_status', 'uploaded_by', 'uploaded_at'
+            'file_type', 'file_extension', 'upload_status', 'uploaded_by', 'uploaded_at',
+            'download_url', 'llm_upload_status'
         ]
         read_only_fields = ['id', 'document_id', 'uploaded_by', 'uploaded_at']
+    
+    def get_download_url(self, obj):
+        """Generate the download URL for the document"""
+        if obj.project and obj.document_id:
+            return f'/api/projects/{obj.project.project_id}/documents/{obj.document_id}/download/'
+        return None
+    
+    def get_llm_upload_status(self, obj):
+        """
+        Return per-provider upload status so the frontend can show
+        which documents are ready for which LLM provider.
+        """
+        return {
+            'openai': bool(getattr(obj, 'llm_file_id_openai', None)),
+            'anthropic': bool(getattr(obj, 'llm_file_id_anthropic', None)),
+            'google': bool(getattr(obj, 'llm_file_id_google', None)),
+        }
 
 
 class DocumentVectorStatusSerializer(serializers.ModelSerializer):

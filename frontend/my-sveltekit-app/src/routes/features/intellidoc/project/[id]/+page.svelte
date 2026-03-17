@@ -10,6 +10,7 @@
   import AdminDeleteButton from '$lib/components/AdminDeleteButton.svelte';
   import authStore, { isAdmin } from '$lib/stores/auth';
   import { llmModelsService, type LLMModel, type BulkModelData } from '$lib/stores/llmModelsStore';
+  import { frontendWorkflowStore } from '$lib/stores/workflowStore';
   
   // Get project ID from URL
   $: projectId = $page.params.id;
@@ -57,7 +58,10 @@
     processing = false;
     pollingAttempts = 0;
     
-    // 7. Reset loading states
+    // 7. Clear workflow store so stale workflow list from previous project is not retained
+    frontendWorkflowStore.initialize();
+    
+    // 8. Reset loading states
     loading = true;
     loadingDeployment = false;
     modelsLoading = false;
@@ -606,6 +610,40 @@
     }
   }
   
+  function viewDocument(doc: any) {
+    // Construct download URL - opens in new tab for preview
+    const downloadUrl = doc.download_url || `/api/projects/${projectId}/documents/${doc.document_id || doc.id}/download/`;
+    
+    // For PDFs and images, open in new tab for preview
+    const previewableExtensions = ['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.txt'];
+    const extension = (doc.file_extension || '').toLowerCase();
+    
+    if (previewableExtensions.includes(extension)) {
+      window.open(downloadUrl, '_blank');
+      console.log(`👁️ UNIVERSAL: Opening document preview: ${doc.original_filename || doc.filename}`);
+    } else {
+      // For other files, trigger download
+      downloadDocument(doc);
+    }
+  }
+  
+  function downloadDocument(doc: any) {
+    const downloadUrl = doc.download_url || `/api/projects/${projectId}/documents/${doc.document_id || doc.id}/download/`;
+    const filename = doc.original_filename || doc.filename || 'document';
+    
+    // Create a temporary link and trigger download
+    const link = document.createElement('a');
+    link.href = downloadUrl;
+    link.download = filename;
+    link.target = '_blank';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    console.log(`📥 UNIVERSAL: Downloading document: ${filename}`);
+    toasts.success(`Downloading "${filename}"`);
+  }
+  
   async function processDocuments() {
     if (processing) return;
     
@@ -1039,7 +1077,25 @@
                             </span>
                           </div>
                         </div>
-                        <div class="opacity-0 group-hover:opacity-100 transition-all duration-200 ml-2">
+                        <div class="opacity-0 group-hover:opacity-100 transition-all duration-200 ml-2 flex items-center space-x-2">
+                          <!-- View/Preview Button -->
+                          {#if doc.download_url || doc.document_id}
+                            <button
+                              class="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                              title="View document"
+                              on:click={() => viewDocument(doc)}
+                            >
+                              <i class="fas fa-eye text-sm"></i>
+                            </button>
+                            <!-- Download Button -->
+                            <button
+                              class="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
+                              title="Download document"
+                              on:click={() => downloadDocument(doc)}
+                            >
+                              <i class="fas fa-download text-sm"></i>
+                            </button>
+                          {/if}
                           <AdminDeleteButton
                             size="small"
                             itemName={doc.original_filename || doc.filename}

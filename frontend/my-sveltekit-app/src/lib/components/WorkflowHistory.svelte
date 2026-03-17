@@ -63,8 +63,8 @@
       
       console.log('✅ WORKFLOW HISTORY: Using polling mode instead of WebSocket');
       
-      // TODO: Uncomment when Django Channels WebSocket is set up:
-      // await workflowWebSocket.connect(projectId);
+      // Workflow history is loaded on demand via API (getSimulationRuns). Real-time
+      // WebSocket updates are not implemented; history is fetched when the panel loads.
       
     } catch (error) {
       console.error('❌ WORKFLOW HISTORY: Workflow connection failed:', error);

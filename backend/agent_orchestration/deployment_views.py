@@ -1,6 +1,11 @@
 """
 Workflow Deployment API Views
-Management endpoints for deployments and public-facing chat endpoint
+Management endpoints for deployments and public-facing chat endpoint.
+
+Deployment / chat limitations (see DEPLOYMENT_CHAT_LIMITATIONS.md in project root):
+- No user file upload in embed chat; attachments come from workflow config only.
+- Streaming is simulated (full response then word-by-word); not true LLM token streaming.
+- Concurrent requests with the same session_id can overwrite turns; no per-session locking.
 """
 import logging
 import json
@@ -52,6 +57,23 @@ def _add_cors_headers(response, request):
     return response
 
 
+def _save_session_conversation_sync(deployment_session, conversation_history):
+    """
+    Persist current conversation_history to the deployment session (sync).
+    Used when returning an error (e.g. rate limit) so the user message is not lost.
+    """
+    if conversation_history is None:
+        return
+    try:
+        deployment_session.conversation_history = conversation_history
+        deployment_session.message_count = len(conversation_history)
+        deployment_session.last_activity = timezone.now()
+        deployment_session.save()
+        logger.info(f"💾 DEPLOYMENT: Saved session {deployment_session.session_id[:8]} on rate limit ({deployment_session.message_count} messages)")
+    except Exception as e:
+        logger.error(f"❌ DEPLOYMENT: Failed to save session on rate limit: {e}", exc_info=True)
+
+
 def _save_deployment_data_async(
     deployment_session,
     conversation_history,
@@ -73,8 +95,9 @@ def _save_deployment_data_async(
     close_old_connections()
     
     try:
-        # Update session with assistant response
-        if assistant_response:
+        # Update session whenever conversation_history is provided (success or failure)
+        # So user message is never lost when a turn fails
+        if conversation_history is not None:
             deployment_session.conversation_history = conversation_history
             deployment_session.message_count = len(conversation_history)
             deployment_session.last_activity = timezone.now()
@@ -752,7 +775,9 @@ def public_chat_endpoint(request, project_id):
                 'request_id': request_id
             }, status=400)
         
-        # Get or create deployment session
+        # Get or create deployment session.
+        # Note: No per-session locking; concurrent requests with same session_id can overwrite (last save wins).
+        # Embed UI should disable send while a request is in flight (see DEPLOYMENT_CHAT_LIMITATIONS.md).
         try:
             deployment_session, created = DeploymentSession.objects.get_or_create(
                 deployment=deployment,
@@ -807,6 +832,8 @@ def public_chat_endpoint(request, project_id):
         is_allowed, retry_after = rate_limiter.check_rate_limit(deployment, origin)
         
         if not is_allowed:
+            # Persist user message so it is not lost (session persistence on failure)
+            _save_session_conversation_sync(deployment_session, conversation_history)
             # Create tracking record
             try:
                 deployment_request = WorkflowDeploymentRequest.objects.create(
@@ -861,6 +888,24 @@ def public_chat_endpoint(request, project_id):
             )
         except Exception as e:
             logger.error(f"❌ DEPLOYMENT: Error executing workflow: {e}", exc_info=True)
+            _exec_time_ms = int((timezone.now() - start_time).total_seconds() * 1000)
+            _fail_result = {'status': 'error', 'error': 'Workflow execution failed'}
+            threading.Thread(
+                target=_save_deployment_data_async,
+                args=(
+                    deployment_session,
+                    conversation_history,
+                    '',
+                    execution_id,
+                    deployment_request,
+                    _fail_result,
+                    _exec_time_ms,
+                    None,
+                    user_query
+                ),
+                daemon=True,
+                name=f"deploy-save-fail-{execution_id[:8]}"
+            ).start()
             return JsonResponse({
                 'status': 'error',
                 'error': 'Workflow execution failed',
@@ -884,7 +929,7 @@ def public_chat_endpoint(request, project_id):
         workflow_execution_id = execution_result.get('execution_id')
         
         # Start background task to save all deployment data (non-blocking)
-        # This allows us to return the response immediately
+        # Session is persisted even on failure (awaiting_human_input / error) so user message is not lost
         background_thread = threading.Thread(
             target=_save_deployment_data_async,
             args=(
@@ -976,6 +1021,8 @@ def public_chat_endpoint_stream(request, project_id):
     
     def generate_stream():
         """Generator function for SSE streaming"""
+        deployment_session = None
+        conversation_history = None
         try:
             # Generate unique request ID
             origin = request.META.get('HTTP_ORIGIN', '')
@@ -1071,6 +1118,8 @@ def public_chat_endpoint_stream(request, project_id):
             is_allowed, retry_after = rate_limiter.check_rate_limit(deployment, origin)
             
             if not is_allowed:
+                # Persist user message so it is not lost (session persistence on failure)
+                _save_session_conversation_sync(deployment_session, conversation_history)
                 yield f"data: {json.dumps({'type': 'error', 'error': 'Rate limit exceeded', 'retry_after': retry_after, 'request_id': request_id})}\n\n"
                 return
             
@@ -1093,17 +1142,67 @@ def public_chat_endpoint_stream(request, project_id):
                 )
             except Exception as e:
                 logger.error(f"❌ DEPLOYMENT STREAM: Error executing workflow: {e}", exc_info=True)
+                _exec_time_ms = int((timezone.now() - start_time).total_seconds() * 1000)
+                _fail_result = {'status': 'error', 'error': 'Workflow execution failed'}
+                threading.Thread(
+                    target=_save_deployment_data_async,
+                    args=(
+                        deployment_session,
+                        conversation_history,
+                        '',
+                        execution_id,
+                        None,
+                        _fail_result,
+                        _exec_time_ms,
+                        None,
+                        user_query
+                    ),
+                    daemon=True,
+                    name=f"deploy-stream-save-fail-{execution_id[:8]}"
+                ).start()
                 yield f"data: {json.dumps({'type': 'error', 'error': 'Workflow execution failed', 'request_id': request_id})}\n\n"
                 return
             
             execution_time_ms = int((timezone.now() - start_time).total_seconds() * 1000)
             
-            # Handle different execution results
+            # Handle different execution results (persist session on each path so user message is not lost)
             if execution_result.get('status') == 'awaiting_human_input':
+                threading.Thread(
+                    target=_save_deployment_data_async,
+                    args=(
+                        deployment_session,
+                        conversation_history,
+                        '',
+                        execution_id,
+                        None,
+                        execution_result,
+                        execution_time_ms,
+                        execution_result.get('execution_id'),
+                        user_query
+                    ),
+                    daemon=True,
+                    name=f"deploy-stream-save-await-{execution_id[:8]}"
+                ).start()
                 yield f"data: {json.dumps({'type': 'awaiting_human_input', 'title': execution_result.get('title', 'USER INPUT REQUIRED'), 'last_conversation_message': execution_result.get('last_conversation_message', ''), 'agent_name': execution_result.get('agent_name', ''), 'execution_id': execution_result.get('execution_id', ''), 'session_id': session_id, 'request_id': request_id})}\n\n"
                 return
             
             if execution_result.get('status') != 'success':
+                threading.Thread(
+                    target=_save_deployment_data_async,
+                    args=(
+                        deployment_session,
+                        conversation_history,
+                        '',
+                        execution_id,
+                        None,
+                        execution_result,
+                        execution_time_ms,
+                        execution_result.get('execution_id'),
+                        user_query
+                    ),
+                    daemon=True,
+                    name=f"deploy-stream-save-fail-{execution_id[:8]}"
+                ).start()
                 yield f"data: {json.dumps({'type': 'error', 'error': execution_result.get('error', 'Workflow execution failed'), 'request_id': request_id})}\n\n"
                 return
             
@@ -1111,6 +1210,23 @@ def public_chat_endpoint_stream(request, project_id):
             assistant_response = execution_result.get('response', '')
             
             if not assistant_response:
+                _no_resp_result = {'status': 'error', 'error': 'No response generated'}
+                threading.Thread(
+                    target=_save_deployment_data_async,
+                    args=(
+                        deployment_session,
+                        conversation_history,
+                        '',
+                        execution_id,
+                        None,
+                        _no_resp_result,
+                        execution_time_ms,
+                        execution_result.get('execution_id'),
+                        user_query
+                    ),
+                    daemon=True,
+                    name=f"deploy-stream-save-fail-{execution_id[:8]}"
+                ).start()
                 yield f"data: {json.dumps({'type': 'error', 'error': 'No response generated', 'request_id': request_id})}\n\n"
                 return
             
@@ -1161,6 +1277,13 @@ def public_chat_endpoint_stream(request, project_id):
             
         except Exception as e:
             logger.error(f"❌ DEPLOYMENT STREAM: Error in stream generation: {e}", exc_info=True)
+            # Persist user message if we already had a session (so it is not lost)
+            if deployment_session is not None and conversation_history is not None:
+                try:
+                    _save_session_conversation_sync(deployment_session, conversation_history)
+                    logger.info(f"💾 DEPLOYMENT STREAM: Saved session on outer exception so user message is not lost")
+                except Exception as save_err:
+                    logger.warning(f"⚠️ DEPLOYMENT STREAM: Failed to save session on outer exception: {save_err}")
             yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
     
     response = StreamingHttpResponse(generate_stream(), content_type='text/event-stream')
@@ -1272,8 +1395,8 @@ def submit_deployment_human_input(request, project_id):
         import threading
         from .conversation_orchestrator import ConversationOrchestrator
         
-        # Create a thread-safe result container
-        result_container = {'result': None, 'error': None, 'completed': False}
+        # Create a thread-safe result container (appended_input: True if thread already saved human message)
+        result_container = {'result': None, 'error': None, 'completed': False, 'appended_input': False}
         
         def resume_workflow_async():
             """Resume workflow in background thread"""
@@ -1344,6 +1467,7 @@ def submit_deployment_human_input(request, project_id):
                 session.message_count = len(session.conversation_history)
                 session.last_activity = timezone.now()
                 session.save()
+                result_container['appended_input'] = True
                 logger.info(f"📝 DEPLOYMENT: Added user input to session conversation history: {user_input[:100]}...")
                 
                 # Resume workflow with user input
@@ -1400,6 +1524,21 @@ def submit_deployment_human_input(request, project_id):
             })
         
         if result_container['error']:
+            # Persist human input to session when resume failed and thread did not append it
+            if not result_container.get('appended_input'):
+                try:
+                    deployment_session.conversation_history = deployment_session.conversation_history or []
+                    deployment_session.conversation_history.append({
+                        'role': 'user',
+                        'content': user_input,
+                        'timestamp': timezone.now().isoformat()
+                    })
+                    deployment_session.message_count = len(deployment_session.conversation_history)
+                    deployment_session.last_activity = timezone.now()
+                    deployment_session.save()
+                    logger.info(f"📝 DEPLOYMENT: Persisted human input to session after resume failure: {user_input[:100]}...")
+                except Exception as save_err:
+                    logger.warning(f"⚠️ DEPLOYMENT: Failed to persist human input on resume failure: {save_err}")
             return JsonResponse({
                 'status': 'error',
                 'error': result_container['error'],

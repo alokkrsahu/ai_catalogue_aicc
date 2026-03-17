@@ -10,6 +10,9 @@ from django.utils import timezone
 from django.db import transaction, connection
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
+from django.http import FileResponse, Http404
+from asgiref.sync import async_to_sync
+import mimetypes
 from users.models import IntelliDocProject, ProjectDocument, AgentWorkflow, SimulationRun, AgentMessage
 from templates.discovery import TemplateDiscoverySystem
 from .serializers import IntelliDocProjectSerializer, ProjectDocumentSerializer
@@ -936,57 +939,251 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
         }
         return mime_types.get(ext.lower(), 'application/octet-stream')
     
+    @action(detail=True, methods=['get'], url_path='documents/(?P<document_id>[^/.]+)/download')
+    def download_document(self, request, project_id=None, document_id=None):
+        """Download a document from the project"""
+        project = self.get_object()
+        
+        try:
+            # Get document with security check - must belong to this project
+            document = ProjectDocument.objects.get(
+                document_id=document_id,
+                project=project
+            )
+            
+            # Check if file exists in storage
+            if not document.file_path or not default_storage.exists(document.file_path):
+                return Response({
+                    'error': 'File not found',
+                    'message': 'The document file could not be found in storage'
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            # Open file from storage
+            file_handle = default_storage.open(document.file_path, 'rb')
+            
+            # Determine content type
+            content_type = document.file_type or mimetypes.guess_type(document.original_filename)[0] or 'application/octet-stream'
+            
+            # Create response with file
+            response = FileResponse(
+                file_handle,
+                content_type=content_type,
+                as_attachment=False  # Allow browser to display PDFs inline
+            )
+            
+            # Set Content-Disposition header
+            filename = document.original_filename
+            # Handle filenames with special characters
+            response['Content-Disposition'] = f'inline; filename="{filename}"'
+            response['Content-Length'] = document.file_size
+            
+            # Add cache control headers
+            response['Cache-Control'] = 'private, max-age=3600'
+            
+            logger.info(f"📥 DOWNLOAD: Serving document {document_id} ({filename}) for project {project_id}")
+            
+            return response
+            
+        except ProjectDocument.DoesNotExist:
+            return Response({
+                'error': 'Document not found',
+                'message': f'No document found with ID {document_id} in this project'
+            }, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"❌ DOWNLOAD: Error downloading document {document_id}: {e}")
+            return Response({
+                'error': 'Download failed',
+                'detail': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=True, methods=['post'], url_path='documents/upload-to-llm')
+    def upload_documents_to_llm(self, request, project_id=None):
+        """
+        Upload project documents to LLM provider File APIs.
+        
+        This stores the provider-specific file_id on each document so it can be
+        referenced later via the File Attachments feature without re-uploading.
+        
+        Request body:
+        {
+            "document_ids": ["uuid1", "uuid2"],  // optional, defaults to all ready docs
+            "providers": ["openai", "anthropic"]  // optional, defaults to all with API keys
+        }
+        """
+        project = self.get_object()
+        
+        document_ids = request.data.get('document_ids', [])
+        providers = request.data.get('providers', [])
+        
+        try:
+            # Get documents to upload
+            if document_ids:
+                documents = ProjectDocument.objects.filter(
+                    project=project,
+                    document_id__in=document_ids
+                )
+            else:
+                documents = ProjectDocument.objects.filter(
+                    project=project,
+                    upload_status='ready'
+                )
+            
+            if not documents.exists():
+                return Response({
+                    'error': 'No documents found',
+                    'message': 'No matching documents found for upload'
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            # Default providers to all that have API keys
+            if not providers:
+                providers = ['openai', 'anthropic', 'google']
+            
+            # Upload using LLMFileUploadService
+            from agent_orchestration.llm_file_service import LLMFileUploadService
+            
+            service = LLMFileUploadService(project)
+            
+            results = {}
+            for doc in documents:
+                doc_key = str(doc.document_id)
+                doc_results = {}
+                
+                for provider in providers:
+                    # Skip if already uploaded (deduplication)
+                    existing_id = LLMFileUploadService.get_file_id_for_provider(doc, provider)
+                    if existing_id:
+                        doc_results[provider] = {
+                            'file_id': existing_id,
+                            'status': 'already_uploaded'
+                        }
+                        continue
+                    
+                    # Check provider support before uploading
+                    supported, reason = LLMFileUploadService.check_provider_support(doc, provider)
+                    if not supported:
+                        doc_results[provider] = {
+                            'error': reason,
+                            'status': 'unsupported'
+                        }
+                        continue
+                    
+                    # Perform the upload (sync wrapper around async method)
+                    try:
+                        result = async_to_sync(service._upload_to_provider)(doc, provider)
+                        if result.get('file_id'):
+                            doc_results[provider] = {
+                                'file_id': result['file_id'],
+                                'status': result.get('status', 'uploaded')
+                            }
+                        else:
+                            doc_results[provider] = {
+                                'error': result.get('error', 'Unknown error'),
+                                'status': result.get('status', 'failed'),
+                                'reason': result.get('reason')
+                            }
+                    except Exception as e:
+                        doc_results[provider] = {
+                            'error': str(e),
+                            'status': 'failed'
+                        }
+                
+                results[doc_key] = {
+                    'filename': doc.original_filename,
+                    'providers': doc_results
+                }
+            
+            # Count successes
+            total_uploaded = sum(
+                1 for doc_result in results.values()
+                for prov_result in doc_result['providers'].values()
+                if prov_result.get('status') == 'uploaded'
+            )
+            total_already = sum(
+                1 for doc_result in results.values()
+                for prov_result in doc_result['providers'].values()
+                if prov_result.get('status') == 'already_uploaded'
+            )
+            
+            logger.info(
+                f"📎 LLM UPLOAD: Project {project_id} - "
+                f"{total_uploaded} new uploads, {total_already} already uploaded"
+            )
+            
+            return Response({
+                'status': 'completed',
+                'documents': results,
+                'summary': {
+                    'total_documents': len(results),
+                    'new_uploads': total_uploaded,
+                    'already_uploaded': total_already,
+                    'providers_targeted': providers
+                }
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ LLM UPLOAD: Error uploading documents for project {project_id}: {e}")
+            import traceback
+            logger.error(f"❌ LLM UPLOAD: Traceback: {traceback.format_exc()}")
+            return Response({
+                'error': 'Upload failed',
+                'detail': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
     @action(detail=True, methods=['post'])
     def process_documents(self, request, project_id=None):
         """Process project documents using consolidated processing - FIXED"""
         from vector_search.consolidated_api_views import process_unified_consolidated
-        
+
+        # Enforce project access: get_object() uses get_queryset() and returns 404 for inaccessible projects
+        project = self.get_object()
+
         # Extract LLM configuration from request
         llm_provider = request.data.get('llm_provider', 'openai')
         llm_model = request.data.get('llm_model', 'gpt-3.5-turbo')
         enable_summary = request.data.get('enable_summary', True)
-        
-        logger.info(f"🚀 UNIVERSAL: Delegating document processing for project {project_id}")
+
+        logger.info(f"🚀 UNIVERSAL: Delegating document processing for project {project.project_id}")
         logger.info(f"📋 UNIVERSAL: LLM Config - Provider: {llm_provider}, Model: {llm_model}, Enable Summary: {enable_summary}")
-        
+
         # Prepare LLM config dict
         llm_config = {
             'llm_provider': llm_provider,
             'llm_model': llm_model,
             'enable_summary': enable_summary
         }
-        
+
         # Pass the DRF request object and LLM config as parameter
-        # Since we removed @api_view decorator, we can pass the DRF request directly
-        # without it trying to parse the body stream again
-        return process_unified_consolidated(request, project_id, llm_config=llm_config)
+        return process_unified_consolidated(request, str(project.project_id), llm_config=llm_config)
     
     @action(detail=True, methods=['post'])
     def search(self, request, project_id=None):
         """Search project documents using consolidated search"""
         from vector_search.consolidated_api_views import search_unified_consolidated
-        
-        # Delegate to the consolidated search endpoint
-        logger.info(f"🔍 UNIVERSAL: Delegating document search for project {project_id}")
-        return search_unified_consolidated(request._request, project_id)
+
+        # Enforce project access: get_object() uses get_queryset() and returns 404 for inaccessible projects
+        project = self.get_object()
+        logger.info(f"🔍 UNIVERSAL: Delegating document search for project {project.project_id}")
+        return search_unified_consolidated(request._request, str(project.project_id))
     
     @action(detail=True, methods=['get'])
     def vector_status(self, request, project_id=None):
         """Get vector status using consolidated status endpoint"""
         from vector_search.consolidated_api_views import get_vector_status_consolidated
-        
-        # Delegate to the consolidated status endpoint
-        logger.info(f"📊 UNIVERSAL: Delegating vector status for project {project_id}")
-        return get_vector_status_consolidated(request._request, project_id)
+
+        # Enforce project access: get_object() uses get_queryset() and returns 404 for inaccessible projects
+        project = self.get_object()
+        logger.info(f"📊 UNIVERSAL: Delegating vector status for project {project.project_id}")
+        return get_vector_status_consolidated(request._request, str(project.project_id))
     
     @action(detail=True, methods=['get'])
     def capabilities(self, request, project_id=None):
         """Get project capabilities using consolidated capabilities endpoint"""
         from vector_search.consolidated_api_views import get_project_capabilities_consolidated
-        
-        # Delegate to the consolidated capabilities endpoint
-        logger.info(f"🎯 UNIVERSAL: Delegating capabilities check for project {project_id}")
-        return get_project_capabilities_consolidated(request._request, project_id)
+
+        # Enforce project access: get_object() uses get_queryset() and returns 404 for inaccessible projects
+        project = self.get_object()
+        logger.info(f"🎯 UNIVERSAL: Delegating capabilities check for project {project.project_id}")
+        return get_project_capabilities_consolidated(request._request, str(project.project_id))
     
     @action(detail=True, methods=['patch'], url_path='folder-structure-setting')
     def folder_structure_setting(self, request, project_id=None):

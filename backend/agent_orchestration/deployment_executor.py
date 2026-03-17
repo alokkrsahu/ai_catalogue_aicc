@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional
 from asgiref.sync import sync_to_async
 
 from .conversation_orchestrator import ConversationOrchestrator
+from .docaware_handler import FileAttachmentPreparationError
 from .models import WorkflowDeployment
 
 logger = logging.getLogger('workflow_deployment')
@@ -144,6 +145,19 @@ class WorkflowDeploymentExecutor:
                 # Always restore original graph, even if execution fails
                 workflow.graph_json = original_graph
                 
+        except FileAttachmentPreparationError as e:
+            execution_time_ms = int((time.time() - start_time) * 1000)
+            logger.error(f"❌ DEPLOYMENT: File attachment preparation failed: {e}")
+            user_message = f"File attachments could not be prepared: {e.message}"
+            if getattr(e, 'missing_documents', None):
+                user_message += f" Missing or not uploaded for provider: {', '.join(e.missing_documents)}."
+            if getattr(e, 'reason', None):
+                user_message += f" {e.reason}"
+            return {
+                'status': 'error',
+                'error': user_message,
+                'execution_time_ms': execution_time_ms
+            }
         except Exception as e:
             execution_time_ms = int((time.time() - start_time) * 1000)
             logger.error(f"❌ DEPLOYMENT: Workflow execution failed: {e}", exc_info=True)

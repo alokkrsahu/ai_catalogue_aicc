@@ -145,35 +145,39 @@ class AgentOrchestrationConsumer(AsyncWebsocketConsumer):
         }))
     
     async def handle_human_input_response(self, data):
-        """Handle human input response (Phase 4)"""
+        """
+        Handle human input response (Phase 4).
+        Human input for deployed workflows is delivered via the HTTP submit-input API
+        (POST /api/workflow-deploy/<project_id>/submit-input/), not via WebSocket.
+        This handler acknowledges receipt only; workflow resume uses the HTTP API.
+        """
         run_id = data.get('run_id')
         request_id = data.get('request_id')
         user_input = data.get('input', '')
         
         if request_id and user_input:
-            # TODO: Forward human input to the running workflow
-            # This would integrate with the workflow executor's human input handler
             logger.info(f"👤 WEBSOCKET: Human input received for request {request_id}: {user_input[:50]}...")
             
-            # Acknowledge receipt
+            # Acknowledge receipt (deployed chat uses HTTP submit-input for actual resume)
             await self.send(text_data=json.dumps({
                 'type': 'human_input_acknowledged',
                 'request_id': request_id,
-                'message': 'Input received and forwarded to workflow',
+                'message': 'Input received (use HTTP submit-input API for deployment resume)',
                 'timestamp': 'now'
             }))
     
     async def handle_execution_control(self, data):
-        """Handle execution control commands (Phase 4)"""
+        """
+        Handle execution control commands (Phase 4).
+        Pause/resume/stop are not implemented over WebSocket; deployment uses
+        HTTP chat and submit-input only. This handler acknowledges receipt only.
+        """
         command = data.get('command')
         run_id = data.get('run_id')
         
         logger.info(f"🎮 WEBSOCKET: Execution control received: {command} for run {run_id}")
         
-        # TODO: Implement execution control (pause, resume, stop)
-        # This would integrate with the workflow executor
-        
-        # Acknowledge command
+        # Acknowledge command (execution control not implemented over WebSocket)
         await self.send(text_data=json.dumps({
             'type': 'execution_control_acknowledged',
             'command': command,

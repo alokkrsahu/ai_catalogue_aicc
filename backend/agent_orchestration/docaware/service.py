@@ -8,6 +8,7 @@ comprehensive RAG capabilities for document-aware agents.
 
 import logging
 import json
+import re
 from typing import Dict, List, Any, Optional, Union
 from django.conf import settings
 from users.models import IntelliDocProject
@@ -16,6 +17,7 @@ from django_milvus_search.models import SearchRequest, IndexType, MetricType, Se
 
 from .search_methods import DocAwareSearchMethods, SearchMethod, SearchMethodConfig
 from .embedding_service import DocAwareEmbeddingService
+from .filter_expr import build_content_filter_expression_impl
 
 logger = logging.getLogger('agent_orchestration')
 
@@ -95,7 +97,8 @@ class EnhancedDocAwareAgentService:
         # Get method configuration
         method_config = DocAwareSearchMethods.get_method_config(search_method)
         if not method_config:
-            raise ValueError(f"Unknown search method: {search_method}")
+            logger.warning(f"📚 SEARCH: Unknown or unsupported search method: {search_method}, returning no results")
+            return []
         
         # Validate and set parameters
         parameters = method_parameters or {}
@@ -121,7 +124,8 @@ class EnhancedDocAwareAgentService:
         elif search_method == SearchMethod.KEYWORD_SEARCH:
             return self._keyword_search(query, validated_params, content_filter_expr)
         else:
-            raise ValueError(f"Search method {search_method} not implemented")
+            logger.warning(f"📚 SEARCH: Search method not implemented: {search_method}, returning no results")
+            return []
 
     
     def _extract_document_fields(self, hit: Dict[str, Any]) -> Dict[str, Any]:
@@ -260,37 +264,13 @@ class EnhancedDocAwareAgentService:
         Returns:
             Milvus filter expression string
         """
-        if not content_filter:
-            return ""
-
         try:
-            logger.info(f"🔍 CONTENT FILTER: Building expression for filter: {content_filter}")
-
-            # Parse filter ID to determine type and path/document ID
-            if content_filter.startswith('folder_'):
-                folder_path = content_filter[7:]  # Remove 'folder_' prefix
-                # Escape single quotes in folder path for safety
-                escaped_path = folder_path.replace("'", "''")
-                # Filter by hierarchical_path starting with the folder path (case-insensitive)
-                # Using 'like' operator with wildcard for hierarchical matching
-                filter_expr = f"hierarchical_path like '{escaped_path}%'"
-                logger.info(f"🔍 CONTENT FILTER: Folder filter - path starts with: {folder_path}")
-
-            elif content_filter.startswith('file_'):
-                document_id = content_filter[5:]  # Remove 'file_' prefix
-                # Escape single quotes in document ID for safety
-                escaped_doc_id = document_id.replace("'", "''")
-                # Filter by specific document_id (exact match)
-                filter_expr = f"document_id == '{escaped_doc_id}'"
-                logger.info(f"🔍 CONTENT FILTER: File filter - document_id: {document_id}")
-
-            else:
-                logger.warning(f"🔍 CONTENT FILTER: Unknown filter format: {content_filter}")
-                return ""
-
-            logger.info(f"🔍 CONTENT FILTER: Generated expression: {filter_expr}")
+            filter_expr = build_content_filter_expression_impl(content_filter)
+            if filter_expr:
+                logger.info(f"🔍 CONTENT FILTER: Building expression for filter: {content_filter} -> {filter_expr}")
+            elif content_filter:
+                logger.warning(f"🔍 CONTENT FILTER: Unknown or empty filter format: {content_filter}")
             return filter_expr
-
         except Exception as e:
             logger.error(f"❌ CONTENT FILTER: Failed to build filter expression: {e}")
             return ""
@@ -953,19 +933,12 @@ class EnhancedDocAwareAgentService:
         logger.debug(f"📚 CONTEXT: Updated with {len(self.conversation_context)} turns")
     
     def get_available_collections(self) -> List[str]:
-        """Get list of available collections for multi-collection search"""
-        try:
-            collections = self.milvus_service.list_collections()
-            # Filter for project-related collections
-            project_collections = [col for col in collections if self.project_id in col]
-            
-            # Add standard collection types
-            standard_collections = ["project_documents", "knowledge_base", "chat_history", "external_docs"]
-            return standard_collections + project_collections
-            
-        except Exception as e:
-            logger.error(f"📚 COLLECTIONS: Failed to get collections: {e}")
-            return ["project_documents"]
+        """
+        Get list of available collections for multi-collection search.
+        Only project_documents is allowed (backend enforces this in _multi_collection_search
+        for project isolation); other collection names are rejected.
+        """
+        return ["project_documents"]
     
     def get_hierarchical_paths(self, include_files: bool = False) -> List[Dict[str, Any]]:
         """

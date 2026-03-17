@@ -414,6 +414,73 @@ class DocAwareConfigViewSet(viewsets.ViewSet):
             except Exception as status_error:
                 logger.debug(f"Could not get processing status: {status_error}")
 
+            # Build per-document LLM upload status map (keyed by original_filename)
+            # This is advisory metadata to help the UI show which documents are ready
+            # for each provider and which are likely to fail.
+            document_llm_status = {}
+            try:
+                from agent_orchestration.llm_file_service import LLMFileUploadService
+                from project_api_keys.services import get_project_api_key_service
+
+                llm_service = LLMFileUploadService(project)
+                api_key_service = get_project_api_key_service()
+
+                # Cache API key availability per provider (avoid repeated decrypts)
+                provider_key_available = {}
+                for provider_type in ['openai', 'anthropic', 'google']:
+                    try:
+                        key = api_key_service.get_project_api_key(project, provider_type)
+                        provider_key_available[provider_type] = bool(key)
+                    except Exception as key_err:
+                        logger.debug(f"Could not check API key for {provider_type}: {key_err}")
+                        provider_key_available[provider_type] = False
+
+                for doc in project.documents.filter(upload_status='ready'):
+                    status_entry = {}
+
+                    for provider, field_name in [
+                        ('openai', 'llm_file_id_openai'),
+                        ('anthropic', 'llm_file_id_anthropic'),
+                        ('google', 'llm_file_id_google'),
+                    ]:
+                        file_id = getattr(doc, field_name, None)
+                        if file_id:
+                            status_entry[provider] = {'status': 'ready'}
+                            continue
+
+                        # No file_id yet – infer potential issues without actually uploading
+                        supported, support_reason = llm_service.check_provider_support(doc, provider)
+                        if not supported:
+                            reason_code = 'unsupported'
+                            reason_text = support_reason or 'Not supported'
+                            lower_reason = reason_text.lower()
+                            if 'exceeds' in lower_reason and 'limit' in lower_reason:
+                                reason_code = 'file_too_large'
+                            elif 'not supported' in lower_reason:
+                                reason_code = 'unsupported_type'
+
+                            status_entry[provider] = {
+                                'status': reason_code,
+                                'reason': reason_text,
+                            }
+                            continue
+
+                        # Supported by size/type – check API key presence for this provider
+                        provider_key = 'google' if provider == 'google' else provider
+                        if not provider_key_available.get(provider_key, False):
+                            status_entry[provider] = {
+                                'status': 'missing_api_key',
+                                'reason': f'No API key configured for {provider}',
+                            }
+                        else:
+                            # No obvious issues detected; will be uploaded lazily when used
+                            status_entry[provider] = {'status': 'not_uploaded'}
+
+                    document_llm_status[doc.original_filename] = status_entry
+
+            except Exception as llm_status_error:
+                logger.debug(f"Could not build LLM upload status: {llm_status_error}")
+
             response_data = {
                 'project_id': project_id,
                 'hierarchical_paths': hierarchical_data,
@@ -425,7 +492,8 @@ class DocAwareConfigViewSet(viewsets.ViewSet):
                     'ready_documents': ready_documents_count,
                     'collection_status': collection_status,
                     'processing_status': processing_status
-                }
+                },
+                'document_llm_status': document_llm_status
             }
 
             print(f"✅ DEBUG HIERARCHICAL PATHS: Returning response with {len(hierarchical_data)} items")

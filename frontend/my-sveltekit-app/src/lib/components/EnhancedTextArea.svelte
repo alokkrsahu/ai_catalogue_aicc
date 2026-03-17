@@ -20,6 +20,7 @@
   let textareaElement: HTMLTextAreaElement;
   let expandedTextareaElement: HTMLTextAreaElement;
   let lineNumbersElement: HTMLDivElement;
+  const textareaId = 'enhanced-textarea-' + Math.random().toString(36).slice(2, 11);
   
   // Calculate line count for line numbers
   $: lineCount = value ? value.split('\n').length : 1;
@@ -173,14 +174,15 @@
   <!-- Label and controls -->
   {#if label}
     <div class="flex items-center justify-between mb-2">
-      <label class="block text-sm font-medium text-gray-700">{label}</label>
+      <label for={textareaId} class="block text-sm font-medium text-gray-700">{label}</label>
       <button
         type="button"
+        aria-label="Expand editor"
         on:click={openExpandedEditor}
         class="p-1.5 text-gray-500 hover:text-oxford-blue hover:bg-gray-100 rounded transition-colors"
         title="Expand editor"
       >
-        <i class="fas fa-expand-alt text-sm"></i>
+        <i class="fas fa-expand-alt text-sm" aria-hidden="true"></i>
       </button>
     </div>
   {/if}
@@ -202,6 +204,7 @@
     
     <!-- Textarea -->
     <textarea
+      id={textareaId}
       bind:this={textareaElement}
       bind:value
       on:input={handleInput}
@@ -236,10 +239,12 @@
 {#if showExpandedEditor}
   <div 
     class="fixed inset-0 bg-black bg-opacity-50 z-[100] flex items-center justify-center p-4"
-    on:click|self={closeExpandedEditor}
     role="dialog"
     aria-modal="true"
     aria-labelledby="expanded-editor-title"
+    tabindex="-1"
+    on:click|self={closeExpandedEditor}
+    on:keydown={(e) => e.key === 'Escape' && closeExpandedEditor()}
   >
     <div class="bg-white rounded-xl shadow-2xl w-full max-w-4xl h-[85vh] flex flex-col overflow-hidden">
       <!-- Modal Header -->
@@ -258,11 +263,12 @@
           {/if}
           <button
             type="button"
+            aria-label="Close"
             on:click={closeExpandedEditor}
             class="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-200 rounded-lg transition-colors"
             title="Close (Esc)"
           >
-            <i class="fas fa-times"></i>
+            <i class="fas fa-times" aria-hidden="true"></i>
           </button>
         </div>
       </div>

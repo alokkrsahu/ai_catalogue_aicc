@@ -18,9 +18,12 @@
     type PromptGenerationRequest,
     type PromptGenerationResponse 
   } from '$lib/services/promptGenerationService';
+  import api from '$lib/services/api';
   
   export let node: any;
+  /** Passed by parent (e.g. AgentOrchestrationInterface); kept for API compatibility. */
   export let capabilities: any;
+  $: void capabilities; // no-op use to satisfy unused-prop check
   export let projectId: string = ''; // Add projectId prop for DocAware functionality
   export let workflowData: any = null; // Add workflow data to get StartNode input
   export let bulkModelData: BulkModelData | null = null; // Pre-loaded model data
@@ -28,6 +31,9 @@
   export let hierarchicalPaths: any[] = []; // Hierarchical paths for Content Filter
   export let hierarchicalPathsLoaded: boolean = false; // Whether hierarchical paths are loaded
   export let documentsInfo: any = null; // Document and processing status info
+  // Per-document LLM upload status from backend/docaware_views.hierarchical_paths
+  // Shape: documentLlmStatus[filename][provider] = { status: string, reason?: string }
+  export let documentLlmStatus: Record<string, Record<string, { status: string; reason?: string }>> = {};
   export let isMaximized: boolean = false; // Whether the panel is maximized as modal
   
   const dispatch = createEventDispatcher();
@@ -173,6 +179,19 @@
           console.log('📚 CONTENT FILTER: Initialized content_filters as empty array');
         }
       }
+
+      // Initialize file attachment settings if not present
+      if (['AssistantAgent', 'UserProxyAgent', 'DelegateAgent'].includes(node.type)) {
+        if (!nodeConfig.hasOwnProperty('file_attachments_enabled')) {
+          nodeConfig.file_attachments_enabled = false;
+        }
+        if (!nodeConfig.file_attachment_documents || !Array.isArray(nodeConfig.file_attachment_documents)) {
+          nodeConfig.file_attachment_documents = [];
+        }
+        if (!nodeConfig.inline_file_attachments || !Array.isArray(nodeConfig.inline_file_attachments)) {
+          nodeConfig.inline_file_attachments = [];
+        }
+      }
     }
   }
   
@@ -250,12 +269,18 @@
     selectedSearchMethod = availableSearchMethods.find(m => m.id === methodId) || null;
     
     if (selectedSearchMethod) {
-      // Reset parameters to defaults for new method
-      searchParameters = docAwareService.getDefaultParameters(selectedSearchMethod);
+      // Get defaults for the method
+      const defaults = docAwareService.getDefaultParameters(selectedSearchMethod);
+      
+      // Merge: existing values take precedence over defaults
+      const existingParams = nodeConfig.search_parameters || {};
+      searchParameters = { ...defaults, ...existingParams };
       nodeConfig.search_parameters = { ...searchParameters };
       
       console.log('📚 DOCAWARE: Selected method:', selectedSearchMethod.name);
-      console.log('📚 DOCAWARE: Default parameters:', searchParameters);
+      console.log('📚 DOCAWARE: Default parameters:', defaults);
+      console.log('📚 DOCAWARE: Existing parameters:', existingParams);
+      console.log('📚 DOCAWARE: Merged parameters:', searchParameters);
       
       updateNodeData();
     } else if (availableSearchMethods.length > 0) {
@@ -493,6 +518,194 @@
     }
   }
   
+  // Get status object for a document & current provider
+  function getDocStatus(filename: string): { status: string; reason?: string } | null {
+    const entry = documentLlmStatus[filename];
+    if (!entry) return null;
+
+    const provider = (nodeConfig.llm_provider || 'openai').toLowerCase();
+    const key = provider === 'gemini' ? 'google' : provider;
+    const statusObj = entry[key];
+    if (!statusObj) return null;
+    return statusObj;
+  }
+
+  // Convenience: whether the document is fully ready for current provider
+  function isDocReady(filename: string): boolean {
+    const statusObj = getDocStatus(filename);
+    return !!statusObj && statusObj.status === 'ready';
+  }
+
+  // Human-readable label for status
+  function getDocStatusLabel(filename: string): string {
+    const statusObj = getDocStatus(filename);
+    if (!statusObj) return 'Unknown';
+    switch (statusObj.status) {
+      case 'ready':
+        return 'Ready';
+      case 'not_uploaded':
+        return 'Not uploaded yet (will upload when used)';
+      case 'file_too_large':
+        return 'Too large for this provider (will fail)';
+      case 'unsupported_type':
+      case 'unsupported':
+        return 'Unsupported file type for this provider (will fail)';
+      case 'missing_api_key':
+        return 'Missing API key for this provider (will fail)';
+      default:
+        return statusObj.reason || 'Unknown status';
+    }
+  }
+
+  // --- Node-level file attachment helpers ---
+
+  let isUploadingInlineAttachment = false;
+
+  /** Display name for node attachment: strip leading unicode symbols (e.g. checkmark) if present */
+  function inlineAttachmentDisplayName(att: { filename?: string }) {
+    const raw = (att?.filename || '').trim();
+    return raw.replace(/^[\s\u2705\u26A0\uFE0F]+/, '').trim() || raw;
+  }
+
+  /** True if any node attachment was uploaded for a different provider than current (google/gemini treated as same) */
+  function hasInlineAttachmentProviderMismatch(): boolean {
+    const current = (nodeConfig.llm_provider || 'openai').toLowerCase();
+    const currentNorm = current === 'gemini' ? 'google' : current;
+    const list = nodeConfig.inline_file_attachments || [];
+    return list.some((att: { provider?: string }) => {
+      const p = (att?.provider || '').toLowerCase();
+      const pNorm = p === 'gemini' ? 'google' : p;
+      return pNorm && pNorm !== currentNorm;
+    });
+  }
+
+  /** HTML accept attribute for node file upload by provider (matches backend SUPPORTED_FILE_TYPES) */
+  const INLINE_ATTACHMENT_ACCEPT_BY_PROVIDER: Record<string, string> = {
+    openai: '.pdf,.txt,.doc,.docx,.md,.rtf',
+    anthropic: '.pdf,.txt,.png,.jpg,.jpeg,.gif,.webp',
+    google: '.pdf,.txt,.doc,.docx,.md,.rtf,.png,.jpg,.jpeg,.gif,.webp,.mp3,.wav,.mp4',
+    gemini: '.pdf,.txt,.doc,.docx,.md,.rtf,.png,.jpg,.jpeg,.gif,.webp,.mp3,.wav,.mp4',
+  };
+  const INLINE_ATTACHMENT_EXTENSIONS_BY_PROVIDER: Record<string, string[]> = {
+    openai: ['pdf', 'txt', 'doc', 'docx', 'md', 'rtf'],
+    anthropic: ['pdf', 'txt', 'png', 'jpg', 'jpeg', 'gif', 'webp'],
+    google: ['pdf', 'txt', 'doc', 'docx', 'md', 'rtf', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'mp3', 'wav', 'mp4'],
+    gemini: ['pdf', 'txt', 'doc', 'docx', 'md', 'rtf', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'mp3', 'wav', 'mp4'],
+  };
+  function inlineAttachmentAccept(): string {
+    const p = (nodeConfig.llm_provider || 'openai').toLowerCase();
+    return INLINE_ATTACHMENT_ACCEPT_BY_PROVIDER[p] || INLINE_ATTACHMENT_ACCEPT_BY_PROVIDER.openai;
+  }
+  function getAllowedExtensionsForCurrentProvider(): string[] {
+    const p = (nodeConfig.llm_provider || 'openai').toLowerCase();
+    return INLINE_ATTACHMENT_EXTENSIONS_BY_PROVIDER[p] || INLINE_ATTACHMENT_EXTENSIONS_BY_PROVIDER.openai;
+  }
+
+  function removeInlineAttachment(index: number) {
+    if (!Array.isArray(nodeConfig.inline_file_attachments) || index < 0 || index >= nodeConfig.inline_file_attachments.length) return;
+    nodeConfig.inline_file_attachments = [
+      ...nodeConfig.inline_file_attachments.slice(0, index),
+      ...nodeConfig.inline_file_attachments.slice(index + 1),
+    ];
+    nodeConfig = { ...nodeConfig };
+    updateNodeData();
+  }
+
+  async function handleInlineFileAttachmentUpload(event: Event) {
+    const target = event.currentTarget as HTMLInputElement | null;
+    if (!target || !target.files || target.files.length === 0) return;
+
+    const allFiles = Array.from(target.files);
+    target.value = '';
+
+    const allowedExts = getAllowedExtensionsForCurrentProvider();
+    const files = allFiles.filter((file: File) => {
+      const ext = (file.name.split('.').pop() || '').toLowerCase();
+      return allowedExts.includes(ext);
+    });
+    if (files.length < allFiles.length) {
+      const skipped = allFiles.length - files.length;
+      toasts.error?.(`${skipped} file(s) skipped: type not supported for ${nodeConfig.llm_provider || 'openai'}. Allowed: ${allowedExts.join(', ')}`);
+    }
+    if (files.length === 0) return;
+
+    if (!projectId || !workflowData || !workflowData.workflow || !workflowData.workflow.workflow_id) {
+      console.error('❌ INLINE ATTACHMENT: Missing projectId or workflowData.workflow.workflow_id');
+      toasts.error?.('Cannot upload attachment: missing workflow context.');
+      return;
+    }
+
+    const provider = (nodeConfig.llm_provider || 'openai').toLowerCase();
+    const workflowId = workflowData.workflow.workflow_id;
+    const uploaded: string[] = [];
+    let failed = 0;
+
+    try {
+      isUploadingInlineAttachment = true;
+      for (const file of files) {
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('provider', provider);
+
+        try {
+          const response = await api.post(
+            `/projects/${projectId}/workflows/${workflowId}/nodes/${node.id}/upload-file-attachment/`,
+            formData,
+            { headers: { 'Content-Type': 'multipart/form-data' } }
+          );
+
+          const data = (response as any).data || response;
+          if (!data || !data.file_id) {
+            console.error('❌ INLINE ATTACHMENT: Invalid response from upload endpoint', data);
+            failed += 1;
+            continue;
+          }
+
+          if (!Array.isArray(nodeConfig.inline_file_attachments)) {
+            nodeConfig.inline_file_attachments = [];
+          }
+          nodeConfig.inline_file_attachments = [
+            ...nodeConfig.inline_file_attachments,
+            { ...data, filename: (data.filename || file.name || '').replace(/^[\s\u2705\u26A0\uFE0F]+/, '').trim() || file.name }
+          ];
+          uploaded.push(data.filename || file.name);
+          nodeConfig = { ...nodeConfig };
+          updateNodeData();
+        } catch (err: any) {
+          console.error('❌ INLINE ATTACHMENT: Upload failed for', file.name, err);
+          failed += 1;
+        }
+      }
+
+      nodeConfig = { ...nodeConfig };
+      updateNodeData();
+
+      if (uploaded.length > 0) {
+        toasts.success?.(uploaded.length === 1
+          ? `Attached file "${uploaded[0]}" for this node.`
+          : `${uploaded.length} files attached for this node.`);
+      }
+      if (failed > 0) {
+        toasts.error?.(`${failed} file(s) failed to upload.`);
+      }
+    } catch (error: any) {
+      console.error('❌ INLINE ATTACHMENT: Upload failed', error);
+      const message =
+        error?.response?.data?.error ||
+        error?.message ||
+        'Attachment upload failed. Please try again.';
+      toasts.error?.(message);
+    } finally {
+      isUploadingInlineAttachment = false;
+    }
+  }
+
+  // Count how many selected file attachment docs are NOT uploaded to the current provider
+  function countMissingUploads(): number {
+    if (!nodeConfig.file_attachments_enabled || !nodeConfig.file_attachment_documents?.length) return 0;
+    return nodeConfig.file_attachment_documents.filter((name: string) => !isDocReady(name)).length;
+  }
+
   // Handle provider change
   function handleProviderChange() {
     const newProvider = nodeConfig.llm_provider;
@@ -565,9 +778,9 @@
         nodeDataName: node.data?.name,
         nodeDataDesc: (node.data?.description || '').substring(0, 50)
       });
-    } else if (!isUserEditing && (hasNameChanged || hasDescChanged || (hasConfigChanged && !document.activeElement?.closest('.node-properties-panel')))) {
+    } else if (!isUserEditing && !isUploadingInlineAttachment && (hasNameChanged || hasDescChanged || (hasConfigChanged && !document.activeElement?.closest('.node-properties-panel')))) {
       // Update if name/description changed OR if config changed and user is not actively editing
-      // Skip entirely if user is actively typing to prevent overriding their input
+      // Skip entirely if user is actively typing or bulk-uploading attachments to prevent overriding their input
       console.log('🔄 NODE SYNC: Node data changed, updating local state', {
         hasNameChanged,
         hasDescChanged,
@@ -1859,6 +2072,144 @@
         </div>
         <p class="text-xs text-gray-500 mt-1">Enable document-aware RAG capabilities for this agent</p>
       </div>
+
+      <!-- FILE ATTACHMENTS - Standalone section for UserProxyAgent -->
+      <div>
+        <div class="flex items-center justify-between">
+          <label class="text-sm font-medium text-gray-700">File Attachments</label>
+          <label class="relative inline-flex items-center cursor-pointer">
+            <input
+              type="checkbox"
+              checked={nodeConfig.file_attachments_enabled}
+              on:change={(e) => {
+                nodeConfig.file_attachments_enabled = e.target.checked;
+                if (!e.target.checked) {
+                  nodeConfig.file_attachment_documents = [];
+                }
+                nodeConfig = { ...nodeConfig };
+                updateNodeData();
+              }}
+              class="sr-only peer"
+            />
+            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+          </label>
+        </div>
+        <p class="text-xs text-gray-500 mt-1">Send entire documents directly to the LLM via the provider's File API</p>
+      </div>
+
+      {#if nodeConfig.file_attachments_enabled}
+        <div class="border border-gray-200 rounded-lg p-4 bg-gray-50">
+          <div class="flex items-center mb-3">
+            <i class="fas fa-paperclip text-gray-600 mr-2"></i>
+            <h4 class="font-medium text-gray-900">File Attachments</h4>
+          </div>
+
+          <div class="mb-3">
+            <label class="block text-xs font-medium text-gray-700 mb-1">Select Documents to Attach</label>
+            {#if hierarchicalPaths.length > 0}
+              <select
+                multiple
+                bind:value={nodeConfig.file_attachment_documents}
+                on:change={() => updateNodeData()}
+                class="w-full px-2 py-1 border border-gray-200 rounded text-xs focus:border-gray-500 focus:ring-1 focus:ring-gray-500 bg-white h-24"
+              >
+                {#each hierarchicalPaths.filter(p => p.type === 'file') as path}
+                  <option value={path.name}>{isDocReady(path.name) ? '✓' : '⚠'} {path.displayName || path.path}</option>
+                {/each}
+              </select>
+              <p class="text-xs text-gray-500 mt-1">Hold Ctrl/Cmd to select multiple documents</p>
+            {:else}
+              <div class="text-xs text-yellow-600 p-2 bg-yellow-50 rounded">
+                No processed project documents available to select. You can still upload a new file for this node below, or upload/process documents in the Project Documents section.
+              </div>
+            {/if}
+          </div>
+
+          <!-- Node-scoped attachments upload (single or bulk) -->
+          <div class="mb-3 border-t border-gray-200 pt-3 mt-3">
+            <label class="block text-xs font-medium text-gray-700 mb-1">Upload New Attachment For This Node</label>
+            <p class="text-xs text-gray-500 mb-2">
+              This uploads the file(s) directly to the configured LLM provider as node-specific attachments.
+              It will not appear in Project Documents. You can select multiple files at once.
+            </p>
+            <label class="inline-flex items-center px-3 py-1.5 bg-white border border-gray-300 rounded-md shadow-sm text-xs font-medium text-gray-700 hover:bg-gray-50 cursor-pointer">
+              <input
+                type="file"
+                multiple
+                class="hidden"
+                accept={inlineAttachmentAccept()}
+                on:change={handleInlineFileAttachmentUpload}
+                disabled={isUploadingInlineAttachment}
+              />
+              <i class="fas fa-upload mr-2"></i>
+              <span>{isUploadingInlineAttachment ? 'Uploading…' : 'Upload file(s) for this node'}</span>
+            </label>
+
+            {#if hasInlineAttachmentProviderMismatch()}
+              <div class="mt-3 text-xs text-amber-700 p-2 bg-amber-50 border border-amber-200 rounded flex items-start">
+                <i class="fas fa-exclamation-triangle mr-1 mt-0.5 flex-shrink-0"></i>
+                <span>
+                  Some attachments were uploaded for a different LLM provider than the one currently selected.
+                  They will not be sent with this agent. Re-upload files after selecting the desired provider, or switch back to the provider they were uploaded for.
+                </span>
+              </div>
+            {/if}
+            {#if nodeConfig.inline_file_attachments && nodeConfig.inline_file_attachments.length > 0}
+              <div class="mt-3 space-y-1">
+                <label class="block text-xs font-medium text-gray-700">Node-specific attachments</label>
+                {#each nodeConfig.inline_file_attachments as att, idx}
+                  <div class="flex items-center text-xs px-2 py-1 rounded bg-gray-100 text-gray-700">
+                    <i class="fas fa-check text-gray-600 mr-2"></i>
+                    <span class="truncate flex-1">{inlineAttachmentDisplayName(att)}</span>
+                    <span class="ml-2 text-[10px] uppercase tracking-wide bg-gray-200 text-gray-800 px-1.5 py-0.5 rounded">
+                      {att.provider}
+                    </span>
+                    <button
+                      type="button"
+                      class="ml-2 p-0.5 text-gray-500 hover:text-red-600 hover:bg-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-gray-400"
+                      title="Remove attachment"
+                      on:click|stopPropagation={() => removeInlineAttachment(idx)}
+                    >
+                      <i class="fas fa-trash-alt text-[10px]"></i>
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+
+          {#if nodeConfig.file_attachment_documents?.length > 0}
+            <div class="mb-3 space-y-1">
+              <label class="block text-xs font-medium text-gray-700">Upload Status ({nodeConfig.llm_provider || 'openai'})</label>
+              {#each nodeConfig.file_attachment_documents as docName}
+                <div class="flex items-center text-xs px-2 py-1 rounded {isDocReady(docName) ? 'bg-gray-100 text-gray-700' : 'bg-yellow-50 text-yellow-700'}">
+                  <span class="mr-1">{isDocReady(docName) ? '✓' : '⚠'}</span>
+                  <span class="truncate flex-1">{docName}</span>
+                  <span class="ml-2 font-medium">{getDocStatusLabel(docName)}</span>
+                </div>
+              {/each}
+            </div>
+          {/if}
+
+          {#if countMissingUploads() > 0}
+            <div class="text-xs text-amber-700 p-2 bg-amber-50 border border-amber-200 rounded flex items-start mb-3">
+              <i class="fas fa-exclamation-triangle mr-1 mt-0.5"></i>
+              <span>
+                {countMissingUploads()} document(s) not yet uploaded to <strong>{nodeConfig.llm_provider || 'openai'}</strong>.
+                They will be uploaded automatically when the workflow runs.
+              </span>
+            </div>
+          {/if}
+
+          <div class="text-xs text-gray-700 p-2 bg-gray-100 rounded flex items-start">
+            <i class="fas fa-info-circle mr-1 mt-0.5"></i>
+            <span>
+              Files are sent via the LLM provider's File API. Max sizes: OpenAI (512MB), Claude (500MB), Gemini (2GB). 
+              Documents are uploaded lazily at execution time if not already uploaded. This works independently of DocAware.
+            </span>
+          </div>
+        </div>
+      {/if}
       
       <!-- User Proxy Specific Settings -->
       <div class="space-y-3">
@@ -2517,6 +2868,146 @@
       
     {/if}
     
+    <!-- FILE ATTACHMENTS - Standalone section for sending entire files via LLM File API -->
+    {#if ['AssistantAgent', 'DelegateAgent'].includes(node.type)}
+      <div>
+        <div class="flex items-center justify-between">
+          <label class="text-sm font-medium text-gray-700">File Attachments</label>
+          <label class="relative inline-flex items-center cursor-pointer">
+            <input
+              type="checkbox"
+              checked={nodeConfig.file_attachments_enabled}
+              on:change={(e) => {
+                nodeConfig.file_attachments_enabled = e.target.checked;
+                if (!e.target.checked) {
+                  nodeConfig.file_attachment_documents = [];
+                }
+                nodeConfig = { ...nodeConfig };
+                updateNodeData();
+              }}
+              class="sr-only peer"
+            />
+            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+          </label>
+        </div>
+        <p class="text-xs text-gray-500 mt-1">Send entire documents directly to the LLM via the provider's File API</p>
+      </div>
+
+      {#if nodeConfig.file_attachments_enabled}
+        <div class="border border-gray-200 rounded-lg p-4 bg-gray-50">
+          <div class="flex items-center mb-3">
+            <i class="fas fa-paperclip text-gray-600 mr-2"></i>
+            <h4 class="font-medium text-gray-900">File Attachments</h4>
+          </div>
+
+          <div class="mb-3">
+            <label class="block text-xs font-medium text-gray-700 mb-1">Select Documents to Attach</label>
+            {#if hierarchicalPaths.length > 0}
+              <select
+                multiple
+                bind:value={nodeConfig.file_attachment_documents}
+                on:change={() => updateNodeData()}
+                class="w-full px-2 py-1 border border-gray-200 rounded text-xs focus:border-gray-500 focus:ring-1 focus:ring-gray-500 bg-white h-24"
+              >
+                {#each hierarchicalPaths.filter(p => p.type === 'file') as path}
+                  <option value={path.name}>{isDocReady(path.name) ? '✓' : '⚠'} {path.displayName || path.path}</option>
+                {/each}
+              </select>
+              <p class="text-xs text-gray-500 mt-1">Hold Ctrl/Cmd to select multiple documents</p>
+            {:else}
+              <div class="text-xs text-yellow-600 p-2 bg-yellow-50 rounded">
+                No processed project documents available to select. You can still upload a new file for this node below, or upload/process documents in the Project Documents section.
+              </div>
+            {/if}
+          </div>
+
+          <!-- Node-scoped attachments upload (single or bulk) -->
+          <div class="mb-3 border-t border-gray-200 pt-3 mt-3">
+            <label class="block text-xs font-medium text-gray-700 mb-1">Upload New Attachment For This Node</label>
+            <p class="text-xs text-gray-500 mb-2">
+              This uploads the file(s) directly to the configured LLM provider as node-specific attachments.
+              It will not appear in Project Documents. You can select multiple files at once.
+            </p>
+            <label class="inline-flex items-center px-3 py-1.5 bg-white border border-gray-300 rounded-md shadow-sm text-xs font-medium text-gray-700 hover:bg-gray-50 cursor-pointer">
+              <input
+                type="file"
+                multiple
+                class="hidden"
+                accept={inlineAttachmentAccept()}
+                on:change={handleInlineFileAttachmentUpload}
+                disabled={isUploadingInlineAttachment}
+              />
+              <i class="fas fa-upload mr-2"></i>
+              <span>{isUploadingInlineAttachment ? 'Uploading…' : 'Upload file(s) for this node'}</span>
+            </label>
+
+            {#if hasInlineAttachmentProviderMismatch()}
+              <div class="mt-3 text-xs text-amber-700 p-2 bg-amber-50 border border-amber-200 rounded flex items-start">
+                <i class="fas fa-exclamation-triangle mr-1 mt-0.5 flex-shrink-0"></i>
+                <span>
+                  Some attachments were uploaded for a different LLM provider than the one currently selected.
+                  They will not be sent with this agent. Re-upload files after selecting the desired provider, or switch back to the provider they were uploaded for.
+                </span>
+              </div>
+            {/if}
+            {#if nodeConfig.inline_file_attachments && nodeConfig.inline_file_attachments.length > 0}
+              <div class="mt-3 space-y-1">
+                <label class="block text-xs font-medium text-gray-700">Node-specific attachments</label>
+                {#each nodeConfig.inline_file_attachments as att, idx}
+                  <div class="flex items-center text-xs px-2 py-1 rounded bg-gray-100 text-gray-700">
+                    <i class="fas fa-check text-gray-600 mr-2"></i>
+                    <span class="truncate flex-1">{inlineAttachmentDisplayName(att)}</span>
+                    <span class="ml-2 text-[10px] uppercase tracking-wide bg-gray-200 text-gray-800 px-1.5 py-0.5 rounded">
+                      {att.provider}
+                    </span>
+                    <button
+                      type="button"
+                      class="ml-2 p-0.5 text-gray-500 hover:text-red-600 hover:bg-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-gray-400"
+                      title="Remove attachment"
+                      on:click|stopPropagation={() => removeInlineAttachment(idx)}
+                    >
+                      <i class="fas fa-trash-alt text-[10px]"></i>
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+
+          {#if nodeConfig.file_attachment_documents?.length > 0}
+            <div class="mb-3 space-y-1">
+              <label class="block text-xs font-medium text-gray-700">Upload Status ({nodeConfig.llm_provider || 'openai'})</label>
+              {#each nodeConfig.file_attachment_documents as docName}
+                <div class="flex items-center text-xs px-2 py-1 rounded {isDocReady(docName) ? 'bg-gray-100 text-gray-700' : 'bg-yellow-50 text-yellow-700'}">
+                  <span class="mr-1">{isDocReady(docName) ? '✓' : '⚠'}</span>
+                  <span class="truncate flex-1">{docName}</span>
+                  <span class="ml-2 font-medium">{getDocStatusLabel(docName)}</span>
+                </div>
+              {/each}
+            </div>
+          {/if}
+
+          {#if countMissingUploads() > 0}
+            <div class="text-xs text-amber-700 p-2 bg-amber-50 border border-amber-200 rounded flex items-start mb-3">
+              <i class="fas fa-exclamation-triangle mr-1 mt-0.5"></i>
+              <span>
+                {countMissingUploads()} document(s) not yet uploaded to <strong>{nodeConfig.llm_provider || 'openai'}</strong>.
+                They will be uploaded automatically when the workflow runs.
+              </span>
+            </div>
+          {/if}
+
+          <div class="text-xs text-gray-700 p-2 bg-gray-100 rounded flex items-start">
+            <i class="fas fa-info-circle mr-1 mt-0.5"></i>
+            <span>
+              Files are sent via the LLM provider's File API. Max sizes: OpenAI (512MB), Claude (500MB), Gemini (2GB). 
+              Documents are uploaded lazily at execution time if not already uploaded. This works independently of DocAware.
+            </span>
+          </div>
+        </div>
+      {/if}
+    {/if}
+
     <!-- DOCAWARE TOGGLE - For other applicable agents (excluding UserProxyAgent) -->
     {#if ['AssistantAgent', 'DelegateAgent'].includes(node.type)}
       <div>
@@ -2577,6 +3068,7 @@
             <h4 class="font-medium text-blue-900">Document Search Configuration</h4>
           </div>
           
+          <!-- Chunk-based DocAware Configuration -->
           <!-- Query Refinement Toggle -->
           <div class="mb-4">
             <div class="flex items-center justify-between">
@@ -3478,7 +3970,7 @@
         
         <!-- Available Tools -->
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-2">Available Tools</label>
+          <span class="block text-sm font-medium text-gray-700 mb-2" role="heading" aria-level="3">Available Tools</span>
           {#if loadingMCPTools}
             <div class="text-xs text-gray-500 italic">
               <i class="fas fa-spinner fa-spin mr-1"></i>
@@ -3532,20 +4024,21 @@
         <!-- Selected Tools Summary -->
         {#if nodeConfig.selected_tools && nodeConfig.selected_tools.length > 0}
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-2">Selected Tools ({nodeConfig.selected_tools.length})</label>
+            <span class="block text-sm font-medium text-gray-700 mb-2" role="heading" aria-level="3">Selected Tools ({nodeConfig.selected_tools.length})</span>
             <div class="flex flex-wrap gap-2">
               {#each nodeConfig.selected_tools as tool}
                 <span class="inline-flex items-center px-2 py-1 rounded-full text-xs bg-purple-100 text-purple-800">
                   {tool}
                   <button
                     type="button"
+                    aria-label="Remove {tool}"
                     on:click={() => {
                       nodeConfig.selected_tools = nodeConfig.selected_tools.filter(t => t !== tool);
                       updateNodeData();
                     }}
                     class="ml-1 text-purple-600 hover:text-purple-800"
                   >
-                    <i class="fas fa-times"></i>
+                    <i class="fas fa-times" aria-hidden="true"></i>
                   </button>
                 </span>
               {/each}

@@ -523,6 +523,32 @@ class ProjectDocument(models.Model):
     uploaded_at = models.DateTimeField(auto_now_add=True)
     processed_at = models.DateTimeField(null=True, blank=True)
     
+    # LLM Provider File References (for Full Document Mode)
+    # These store file_ids from LLM provider File APIs for sending entire documents
+    llm_file_id_openai = models.CharField(
+        max_length=255, 
+        blank=True, 
+        null=True,
+        help_text="OpenAI Files API file_id for this document"
+    )
+    llm_file_id_anthropic = models.CharField(
+        max_length=255, 
+        blank=True, 
+        null=True,
+        help_text="Anthropic Files API file_id for this document"
+    )
+    llm_file_id_google = models.CharField(
+        max_length=255, 
+        blank=True, 
+        null=True,
+        help_text="Google/Gemini Files API file URI for this document"
+    )
+    llm_file_uploaded_at = models.DateTimeField(
+        blank=True, 
+        null=True,
+        help_text="When the document was uploaded to LLM providers"
+    )
+    
     class Meta:
         ordering = ['-uploaded_at']
         # Ensure document names are unique within each project

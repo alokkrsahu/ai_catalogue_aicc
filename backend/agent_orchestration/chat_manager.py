@@ -29,6 +29,87 @@ class ChatManager:
         self.docaware_handler = docaware_handler
         self.websearch_handler = websearch_handler
     
+    @staticmethod
+    def format_messages_with_file_refs(
+        messages: List[Dict[str, Any]], 
+        file_references: List[Dict[str, Any]], 
+        provider: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Format messages to include file references for different LLM providers.
+        File refs are attached only to the most recent user message to avoid
+        redundant payloads and match provider semantics (files for the current turn).
+        
+        Args:
+            messages: List of message dicts with 'role' and 'content'
+            file_references: List of file reference dicts from full document mode
+            provider: LLM provider name ('openai', 'anthropic', 'google')
+            
+        Returns:
+            Modified messages list with file references on the last user message only
+        """
+        if not file_references:
+            return messages
+        
+        # Index of the last user message: only that turn gets file refs
+        last_user_idx = None
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get('role') == 'user':
+                last_user_idx = i
+                break
+        
+        formatted_messages = []
+        for idx, msg in enumerate(messages):
+            if msg.get('role') != 'user':
+                formatted_messages.append(msg)
+                continue
+            
+            # Only attach file refs to the most recent user message
+            is_last_user = (idx == last_user_idx)
+            if not is_last_user:
+                formatted_messages.append(msg)
+                continue
+            
+            raw_content = msg.get('content', '')
+            # Guard: if content is already a list (e.g. multi-modal from another path), preserve and append file parts
+            if isinstance(raw_content, list):
+                logger.warning(
+                    "FILE REFS: Last user message already has array content; appending file refs to existing parts"
+                )
+                content_parts = list(raw_content)
+            else:
+                content_parts = [{"type": "text", "text": raw_content if isinstance(raw_content, str) else str(raw_content)}]
+            
+            if provider == 'openai':
+                for ref in file_references:
+                    content_parts.append({
+                        "type": "file",
+                        "file": {"file_id": ref['file_id']}
+                    })
+                formatted_messages.append({"role": "user", "content": content_parts})
+            elif provider == 'anthropic':
+                # Anthropic Messages API: document block with file_id (see Anthropic Messages API docs)
+                for ref in file_references:
+                    content_parts.append({
+                        "type": "document",
+                        "source": {"type": "file", "file_id": ref['file_id']}
+                    })
+                formatted_messages.append({"role": "user", "content": content_parts})
+            elif provider in ('google', 'gemini'):
+                for ref in file_references:
+                    content_parts.append({
+                        "type": "file_data",
+                        "file_uri": ref['file_id'],
+                        "mime_type": ref.get('file_type', 'application/pdf')
+                    })
+                formatted_messages.append({"role": "user", "content": content_parts})
+            else:
+                logger.warning(f"FILE REFS: Unknown provider {provider}, keeping original message format")
+                formatted_messages.append(msg)
+        
+        logger.info(f"FILE REFS: Attached {len(file_references)} file references to last user message for {provider}")
+        return formatted_messages
+    
     async def execute_group_chat_manager_with_multiple_inputs(self, chat_manager_node: Dict[str, Any], llm_provider, input_sources: List[Dict[str, Any]], executed_nodes: Dict[str, str], execution_sequence: List[Dict[str, Any]], graph_json: Dict[str, Any], project_id: Optional[str] = None, project: Optional[Any] = None, execution_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Execute GroupChatManager with multiple inputs support
@@ -698,7 +779,7 @@ class ChatManager:
         if agent_instructions:
             system_parts.append(f"Instructions for {agent_name}: {agent_instructions}")
         
-        # 📚 DOCAWARE INTEGRATION: Add document context if enabled
+        # 📚 DOCAWARE INTEGRATION: Add chunk-based document context if enabled
         document_context = ""
         if self.docaware_handler.is_docaware_enabled(agent_node) and project_id:
             try:
@@ -722,7 +803,7 @@ class ChatManager:
                 import traceback
                 logger.error(f"❌ DOCAWARE: Traceback: {traceback.format_exc()}")
         
-        # Add document context to system message if available
+        # Add chunk-based document context to system message if available
         if document_context:
             system_parts.append("\n=== RELEVANT DOCUMENTS ===")
             system_parts.append("IMPORTANT: The following documents contain the ACTUAL CONTENT of the research paper you are reviewing.")
@@ -732,6 +813,64 @@ class ChatManager:
             system_parts.append(document_context)
             system_parts.append("=== END DOCUMENTS ===")
             system_parts.append("\nCRITICAL: Use the document content provided above to conduct your review. The documents above ARE the paper content.")
+        
+        # 📎 FILE ATTACHMENTS: Independent of DocAware - send entire files via LLM File API
+        file_attachment_refs: Optional[List[Dict[str, Any]]] = None
+        if self.docaware_handler.is_file_attachments_enabled(agent_node) and project_id:
+            # NOTE: Any failure to prepare file attachments is treated as a hard error
+            # and will bubble up to the workflow executor, causing the node to fail.
+            logger.info(f"📎 FILE ATTACHMENTS: Getting file references for single agent {agent_name}")
+            attachment_result = await self.docaware_handler.get_file_attachment_references(
+                agent_node, project_id
+            )
+            
+            if attachment_result.get('file_references'):
+                file_attachment_refs = attachment_result['file_references']
+                logger.info(f"📎 FILE ATTACHMENTS: Retrieved {len(file_attachment_refs)} project-level file references for {agent_name}")
+            else:
+                logger.warning(f"⚠️ FILE ATTACHMENTS: No project-level file references available for {agent_name}")
+                if attachment_result.get('warning'):
+                    logger.warning(f"⚠️ FILE ATTACHMENTS: {attachment_result['warning']}")
+        
+        # Merge any node-scoped inline attachments (immediately uploaded to provider)
+        agent_data = agent_node.get('data', {})
+        inline_attachments = agent_data.get('inline_file_attachments') or []
+        if inline_attachments:
+            provider = agent_data.get('llm_provider', 'openai').lower()
+            if not file_attachment_refs:
+                file_attachment_refs = []
+            for att in inline_attachments:
+                att_provider = (att.get('provider') or provider).lower()
+                # Treat gemini as google for file service / message formatting
+                normalized_provider = 'google' if att_provider == 'gemini' else att_provider
+                if normalized_provider != ('google' if provider in ('google', 'gemini') else provider):
+                    # Skip attachments for a different provider
+                    continue
+                file_id = att.get('file_id')
+                if not file_id:
+                    continue
+                file_attachment_refs.append({
+                    'file_id': file_id,
+                    'filename': att.get('filename', 'attachment'),
+                    'document_id': att.get('id'),
+                    'provider': provider,
+                    'file_type': att.get('mime_type', 'application/octet-stream'),
+                    'file_size': att.get('size')
+                })
+            if inline_attachments:
+                logger.info(
+                    f"📎 FILE ATTACHMENTS: Added {len(inline_attachments)} node-level attachments for {agent_name}"
+                )
+        
+        # If we have any attachments (project-level or node-scoped), add indicator to system message
+        if file_attachment_refs:
+            system_parts.append("\n=== FILE ATTACHMENTS ===")
+            system_parts.append("You have been provided with full access to the following documents via file attachments.")
+            system_parts.append("These may include project-level documents (from DocAware search) and/or node-level file attachments configured for this agent.")
+            for ref in file_attachment_refs:
+                system_parts.append(f"- {ref.get('filename', 'unknown')} ({ref.get('file_type', 'document')})")
+            system_parts.append("=== END FILE ATTACHMENTS ===")
+            system_parts.append("\nAnalyze the full document content provided in the attachments to complete your task.")
         
         # 🌐 WEBSEARCH INTEGRATION: Add web search context if enabled
         websearch_context = ""
@@ -775,11 +914,28 @@ class ChatManager:
             include_system=True
         )
         
+        # Return dict with file references if file attachments are enabled, otherwise return messages list
+        if file_attachment_refs:
+            return {
+                'messages': messages,
+                'file_references': file_attachment_refs,
+                'mode': 'file_attachments',
+                'provider': agent_node.get('data', {}).get('llm_provider', 'openai')
+            }
+        
         return messages
     
-    async def craft_conversation_prompt_with_docaware(self, aggregated_context: Dict[str, Any], agent_node: Dict[str, Any], project_id: Optional[str] = None, conversation_history: str = "") -> List[Dict[str, str]]:
+    async def craft_conversation_prompt_with_docaware(
+        self, 
+        aggregated_context: Dict[str, Any], 
+        agent_node: Dict[str, Any], 
+        project_id: Optional[str] = None, 
+        conversation_history: str = ""
+    ) -> Dict[str, Any]:
         """
-        Enhanced conversation messages crafting with DocAware using aggregated input as search query
+        Enhanced conversation messages crafting with DocAware using aggregated input as search query.
+        
+        DocAware handles chunk-based RAG. File attachments are handled independently.
         
         Args:
             aggregated_context: Output from aggregate_multiple_inputs containing all agent inputs
@@ -788,7 +944,11 @@ class ChatManager:
             conversation_history: Traditional conversation history (fallback)
         
         Returns:
-            List of message dicts with 'role' and 'content' keys
+            Dict with:
+            - messages: List of message dicts with 'role' and 'content' keys
+            - file_references: (Optional) List of file references for File Attachments
+            - mode: 'chunks' or 'file_attachments'
+            - provider: LLM provider name
         """
         from .message_converter import parse_conversation_history_to_messages
         
@@ -803,7 +963,7 @@ class ChatManager:
         if agent_instructions:
             system_parts.append(f"Instructions for {agent_name}: {agent_instructions}")
         
-        # 📚 ENHANCED DOCAWARE INTEGRATION: Use aggregated input as search query
+        # 📚 DOCAWARE INTEGRATION: Chunk-based document context
         document_context = ""
         if self.docaware_handler.is_docaware_enabled(agent_node) and project_id:
             try:
@@ -827,7 +987,7 @@ class ChatManager:
                 import traceback
                 logger.error(f"❌ DOCAWARE: Traceback: {traceback.format_exc()}")
         
-        # Add document context to system message if available
+        # Add chunk-based document context to system message if available
         if document_context:
             system_parts.append("\n=== RELEVANT DOCUMENTS ===")
             system_parts.append("IMPORTANT: The following documents contain the ACTUAL CONTENT of the research paper you are reviewing.")
@@ -837,6 +997,59 @@ class ChatManager:
             system_parts.append(document_context)
             system_parts.append("=== END DOCUMENTS ===")
             system_parts.append("\nCRITICAL: Use the document content provided above to conduct your review. The documents above ARE the paper content.")
+        
+        # 📎 FILE ATTACHMENTS: Independent of DocAware - send entire files via LLM File API
+        file_attachment_refs: Optional[List[Dict[str, Any]]] = None
+        if self.docaware_handler.is_file_attachments_enabled(agent_node) and project_id:
+            logger.info(f"📎 FILE ATTACHMENTS: Getting file references for {agent_name}")
+            attachment_result = await self.docaware_handler.get_file_attachment_references(
+                agent_node, project_id
+            )
+            
+            if attachment_result.get('file_references'):
+                file_attachment_refs = attachment_result['file_references']
+                logger.info(f"📎 FILE ATTACHMENTS: Retrieved {len(file_attachment_refs)} project-level file references for {agent_name}")
+            else:
+                logger.warning(f"⚠️ FILE ATTACHMENTS: No project-level file references available for {agent_name}")
+                if attachment_result.get('warning'):
+                    logger.warning(f"⚠️ FILE ATTACHMENTS: {attachment_result['warning']}")
+
+        # Merge any node-scoped inline attachments
+        agent_data = agent_node.get('data', {})
+        inline_attachments = agent_data.get('inline_file_attachments') or []
+        if inline_attachments:
+            provider = agent_data.get('llm_provider', 'openai').lower()
+            if not file_attachment_refs:
+                file_attachment_refs = []
+            for att in inline_attachments:
+                att_provider = (att.get('provider') or provider).lower()
+                normalized_provider = 'google' if att_provider == 'gemini' else att_provider
+                if normalized_provider != ('google' if provider in ('google', 'gemini') else provider):
+                    continue
+                file_id = att.get('file_id')
+                if not file_id:
+                    continue
+                file_attachment_refs.append({
+                    'file_id': file_id,
+                    'filename': att.get('filename', 'attachment'),
+                    'document_id': att.get('id'),
+                    'provider': provider,
+                    'file_type': att.get('mime_type', 'application/octet-stream'),
+                    'file_size': att.get('size')
+                })
+            if inline_attachments:
+                logger.info(
+                    f"📎 FILE ATTACHMENTS: Added {len(inline_attachments)} node-level attachments for {agent_name}"
+                )
+
+        if file_attachment_refs:
+            system_parts.append("\n=== FILE ATTACHMENTS ===")
+            system_parts.append("You have been provided with full access to the following documents via file attachments.")
+            system_parts.append("These may include project-level documents (from DocAware search) and/or node-level file attachments configured for this agent.")
+            for ref in file_attachment_refs:
+                system_parts.append(f"- {ref.get('filename', 'unknown')} ({ref.get('file_type', 'document')})")
+            system_parts.append("=== END FILE ATTACHMENTS ===")
+            system_parts.append("\nAnalyze the full document content provided in the attachments to complete your task.")
         
         # 🌐 WEBSEARCH INTEGRATION: Add web search context if enabled
         websearch_context = ""
@@ -897,7 +1110,18 @@ class ChatManager:
             messages.append({"role": "system", "content": system_message})
         messages.append({"role": "user", "content": user_content})
         
-        return messages
+        # Return dict with messages and optional file references for file attachments
+        result: Dict[str, Any] = {
+            'messages': messages,
+            'mode': 'file_attachments' if file_attachment_refs else 'chunks'
+        }
+        
+        if file_attachment_refs:
+            result['file_references'] = file_attachment_refs
+            result['provider'] = agent_node.get('data', {}).get('llm_provider', 'openai')
+            logger.info(f"📎 FILE ATTACHMENTS: Including {len(result['file_references'])} file references in result")
+        
+        return result
     
     async def execute_group_chat_manager(self, chat_manager_node: Dict[str, Any], llm_provider, conversation_history: str, execution_sequence: List[Dict[str, Any]], graph_json: Dict[str, Any], project_id: Optional[str] = None, project: Optional[Any] = None) -> str:
         """
@@ -1266,7 +1490,7 @@ class ChatManager:
             logger.error(f"❌ DELEGATE: {error_msg}")
             return f"ERROR: {error_msg}"
         
-        # 📚 DOCAWARE INTEGRATION FOR DELEGATE AGENTS (SINGLE-INPUT PATH)
+        # 📚 DOCAWARE INTEGRATION FOR DELEGATE AGENTS (SINGLE-INPUT PATH) - Chunk-based only
         document_context = ""
         docaware_enabled = self.docaware_handler.is_docaware_enabled(delegate_node)
         logger.info(f"📚 DOCAWARE CHECK (SINGLE-INPUT): Delegate {delegate_name} - DocAware enabled: {docaware_enabled}, Project ID: {project_id}")
@@ -1276,7 +1500,6 @@ class ChatManager:
                 logger.info(f"📚 DOCAWARE (SINGLE-INPUT): Processing DocAware for delegate {delegate_name}")
                 
                 # Extract search query from conversation history
-                # For single-input path, use conversation_history as the search query source
                 search_query = self.docaware_handler.extract_query_from_conversation(conversation_history)
                 
                 logger.info(f"📚 DOCAWARE (SINGLE-INPUT): Extracted search query: {search_query[:200] if search_query else 'None'}...")
@@ -1285,7 +1508,6 @@ class ChatManager:
                     logger.info(f"📚 DOCAWARE (SINGLE-INPUT): Delegate {delegate_name} using conversation history as search query")
                     logger.info(f"📚 DOCAWARE (SINGLE-INPUT): Query: {search_query[:100]}...")
                     
-                    # Use conversation-based query method (same as single AssistantAgent)
                     document_context = await self.docaware_handler.get_docaware_context_from_conversation_query(
                         delegate_node, search_query, project_id, conversation_history
                     )
@@ -1306,6 +1528,49 @@ class ChatManager:
             logger.info(f"📚 DOCAWARE (SINGLE-INPUT): DocAware is disabled for delegate {delegate_name}")
         elif not project_id:
             logger.warning(f"📚 DOCAWARE (SINGLE-INPUT): Project ID is missing for delegate {delegate_name}, cannot perform DocAware search")
+        
+        # 📎 FILE ATTACHMENTS FOR DELEGATE AGENTS (SINGLE-INPUT PATH) - Independent of DocAware
+        file_attachment_refs_delegate: Optional[List[Dict[str, Any]]] = None
+        if self.docaware_handler.is_file_attachments_enabled(delegate_node) and project_id:
+            logger.info(f"📎 FILE ATTACHMENTS (SINGLE-INPUT): Getting file references for delegate {delegate_name}")
+            attachment_result = await self.docaware_handler.get_file_attachment_references(
+                delegate_node, project_id
+            )
+            
+            if attachment_result.get('file_references'):
+                file_attachment_refs_delegate = attachment_result['file_references']
+                logger.info(f"📎 FILE ATTACHMENTS (SINGLE-INPUT): Retrieved {len(file_attachment_refs_delegate)} file references for delegate {delegate_name}")
+            else:
+                logger.warning(f"⚠️ FILE ATTACHMENTS (SINGLE-INPUT): No file references for delegate {delegate_name}")
+                if attachment_result.get('warning'):
+                    logger.warning(f"⚠️ FILE ATTACHMENTS (SINGLE-INPUT): {attachment_result['warning']}")
+        
+        # Merge any node-scoped inline attachments for the delegate
+        delegate_data = delegate_node.get('data', {})
+        inline_attachments_delegate = delegate_data.get('inline_file_attachments') or []
+        if inline_attachments_delegate:
+            provider = delegate_data.get('llm_provider', 'openai').lower()
+            if not file_attachment_refs_delegate:
+                file_attachment_refs_delegate = []
+            for att in inline_attachments_delegate:
+                att_provider = (att.get('provider') or provider).lower()
+                normalized_provider = 'google' if att_provider == 'gemini' else att_provider
+                if normalized_provider != ('google' if provider in ('google', 'gemini') else provider):
+                    continue
+                file_id = att.get('file_id')
+                if not file_id:
+                    continue
+                file_attachment_refs_delegate.append({
+                    'file_id': file_id,
+                    'filename': att.get('filename', 'attachment'),
+                    'document_id': att.get('id'),
+                    'provider': provider,
+                    'file_type': att.get('mime_type', 'application/octet-stream'),
+                    'file_size': att.get('size')
+                })
+            logger.info(
+                f"📎 FILE ATTACHMENTS (SINGLE-INPUT): Added {len(inline_attachments_delegate)} node-level attachments for delegate {delegate_name}"
+            )
         
         # 🌐 WEBSEARCH INTEGRATION FOR DELEGATE AGENTS (SINGLE-INPUT PATH)
         websearch_context = ""
@@ -1342,7 +1607,7 @@ class ChatManager:
             f"Current Iteration: {status['iterations'] + 1}/{status['max_iterations']}"
         ]
         
-        # Add DocAware document context to system message if available
+        # Add DocAware chunk-based document context to system message if available
         if document_context:
             system_message_parts.append("\n=== RELEVANT DOCUMENTS ===")
             system_message_parts.append("IMPORTANT: The following documents contain the ACTUAL CONTENT of the research paper you are reviewing.")
@@ -1352,6 +1617,16 @@ class ChatManager:
             system_message_parts.append(document_context)
             system_message_parts.append("=== END DOCUMENTS ===")
             system_message_parts.append("\nCRITICAL: Use the document content provided above to conduct your review. The documents above ARE the paper content.")
+        
+        # Add file attachment indicator to system message if file refs available (delegate)
+        if file_attachment_refs_delegate:
+            system_message_parts.append("\n=== FILE ATTACHMENTS ===")
+            system_message_parts.append("You have been provided with full access to the following documents via file attachments.")
+            system_message_parts.append("These may include project-level documents (from DocAware search) and/or node-level file attachments configured for this agent.")
+            for ref in file_attachment_refs_delegate:
+                system_message_parts.append(f"- {ref.get('filename', 'unknown')} ({ref.get('file_type', 'document')})")
+            system_message_parts.append("=== END FILE ATTACHMENTS ===")
+            system_message_parts.append("\nAnalyze the full document content provided in the attachments to complete your task.")
         
         # Add web search context to system message if available
         if websearch_context:
@@ -1366,19 +1641,18 @@ class ChatManager:
         # Debug logging for system message verification
         system_message_length = len(system_message)
         has_documents = "RELEVANT DOCUMENTS" in system_message
+        has_file_attachments = "FILE ATTACHMENTS" in system_message
         has_websearch = "WEB SEARCH RESULTS" in system_message
         system_message_preview = system_message[:500] if len(system_message) > 500 else system_message
         
         logger.info(f"📚 SYSTEM MESSAGE DEBUG: System message length: {system_message_length} chars")
-        logger.info(f"📚 SYSTEM MESSAGE DEBUG: Contains document context: {has_documents}")
+        logger.info(f"📚 SYSTEM MESSAGE DEBUG: Contains chunk context: {has_documents}, file attachments: {has_file_attachments}")
         logger.info(f"🌐 SYSTEM MESSAGE DEBUG: Contains web search context: {has_websearch}")
-        if has_documents:
+        if has_documents or has_file_attachments:
             logger.info(f"📚 SYSTEM MESSAGE DEBUG: System message preview (first 500 chars): {system_message_preview}...")
         elif document_context:
-            # Document context was retrieved but not added (shouldn't happen, but log for debugging)
             logger.warning(f"⚠️ SYSTEM MESSAGE DEBUG: Document context was retrieved ({len(document_context)} chars) but not added to system message!")
         else:
-            # This is expected when DocAware is disabled or all documents have failed extraction
             logger.info(f"ℹ️ SYSTEM MESSAGE DEBUG: No document context marker - DocAware may be disabled or all documents filtered due to failed extraction")
         
         # Convert conversation_history to structured messages array

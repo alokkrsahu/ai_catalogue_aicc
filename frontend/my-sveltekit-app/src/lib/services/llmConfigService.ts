@@ -114,20 +114,40 @@ class LLMConfigurationService {
   }
 
   /**
-   * Get LLM configuration for a specific agent
+   * Get LLM configuration for a specific agent.
+   *
+   * Agent LLM config is persisted in the workflow graph (node.data.llm_provider, node.data.llm_model).
+   * When nodeDataFromGraph is provided (e.g. from the selected workflow's node), returns config from it.
+   * Otherwise returns null so callers use defaults (e.g. in NodePropertiesPanel, nodeConfig is bound
+   * directly to node.data and is persisted when the workflow is saved).
+   *
+   * @param projectId - Project ID (for future backend API if added)
+   * @param agentId - Agent/node ID
+   * @param nodeDataFromGraph - Optional node.data from the workflow graph (source of truth for persistence)
    */
-  async getAgentLLMConfig(projectId: string, agentId: string): Promise<AgentLLMConfig | null> {
+  async getAgentLLMConfig(
+    projectId: string,
+    agentId: string,
+    nodeDataFromGraph?: { llm_provider?: string; llm_model?: string; [key: string]: unknown }
+  ): Promise<AgentLLMConfig | null> {
     try {
       console.log('🎯 LLM CONFIG: Fetching agent LLM config', { projectId, agentId });
       
-      // TODO: Implement API call when backend is ready
-      // const response = await fetch(`${this.baseUrl}/projects/${projectId}/agents/${agentId}/llm-config`);
-      // if (!response.ok) throw new Error('Failed to fetch agent LLM config');
-      // return await response.json();
-      
-      // For now, return null (will use defaults)
+      if (nodeDataFromGraph && (nodeDataFromGraph.llm_provider || nodeDataFromGraph.llm_model)) {
+        const defaults = this.getDefaultConfigForAgentType('AssistantAgent') || {};
+        return {
+          agentId,
+          agentName: '',
+          providerId: nodeDataFromGraph.llm_provider || (defaults.providerId as string) || 'openai',
+          modelId: nodeDataFromGraph.llm_model || (defaults.modelId as string) || 'gpt-4',
+          temperature: (defaults.temperature as number) ?? 0.7,
+          maxTokens: (defaults.maxTokens as number) ?? 2048,
+          topP: (defaults.topP as number) ?? 1.0,
+          frequencyPenalty: (defaults.frequencyPenalty as number) ?? 0,
+          presencePenalty: (defaults.presencePenalty as number) ?? 0
+        };
+      }
       return null;
-      
     } catch (error) {
       console.error('❌ LLM CONFIG: Failed to load agent config:', error);
       return null;
@@ -135,24 +155,17 @@ class LLMConfigurationService {
   }
 
   /**
-   * Update LLM configuration for a specific agent
+   * Update LLM configuration for a specific agent.
+   *
+   * Persistence: There is no separate backend API for per-agent LLM config. Config is stored in the
+   * workflow graph (node.data.llm_provider, node.data.llm_model). Callers in the workflow designer
+   * should update the node's data and then save the workflow to persist. This method returns the
+   * config for in-memory use; the actual persistence happens when the workflow is saved.
    */
   async updateAgentLLMConfig(projectId: string, agentId: string, config: AgentLLMConfig): Promise<AgentLLMConfig> {
     try {
-      console.log('💾 LLM CONFIG: Updating agent LLM config', { projectId, agentId });
-      
-      // TODO: Implement API call when backend is ready
-      // const response = await fetch(`${this.baseUrl}/projects/${projectId}/agents/${agentId}/llm-config`, {
-      //   method: 'PUT',
-      //   headers: { 'Content-Type': 'application/json' },
-      //   body: JSON.stringify(config)
-      // });
-      // if (!response.ok) throw new Error('Failed to update agent LLM config');
-      // const updatedConfig = await response.json();
-      
-      console.log('✅ LLM CONFIG: Agent LLM config updated successfully');
-      return config; // Return the config for now
-      
+      console.log('💾 LLM CONFIG: Updating agent LLM config (persist by saving workflow)', { projectId, agentId });
+      return config;
     } catch (error) {
       console.error('❌ LLM CONFIG: Failed to update agent config:', error);
       throw error;

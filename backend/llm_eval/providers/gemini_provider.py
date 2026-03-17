@@ -56,14 +56,26 @@ class GeminiProvider(LLMProvider):
             contents = []
             system_messages = []
             
-            # First pass: collect system messages
+            # First pass: collect system messages (extract text content only)
             for msg in messages:
                 role = msg.get("role", "user")
                 if role == "system":
-                    system_messages.append(msg.get("content", ""))
+                    sys_content = msg.get("content", "")
+                    # Handle both string and array content for system messages
+                    if isinstance(sys_content, list):
+                        # Extract text parts from array content
+                        text_parts = []
+                        for item in sys_content:
+                            if isinstance(item, dict) and item.get("type") == "text":
+                                text_parts.append(item.get("text", ""))
+                            elif isinstance(item, str):
+                                text_parts.append(item)
+                        system_messages.append("\n".join(text_parts))
+                    else:
+                        system_messages.append(sys_content)
             
             # Second pass: convert messages, prepending system messages to first user message
-            system_prefix = "\n\n".join(system_messages) if system_messages else ""
+            system_prefix = "\n\n".join(filter(None, system_messages)) if system_messages else ""
             first_user_message_processed = False
             
             for msg in messages:
@@ -78,16 +90,60 @@ class GeminiProvider(LLMProvider):
                 # Gemini uses "user" and "model" (not "assistant")
                 gemini_role = "model" if role == "assistant" else role
                 
-                # Prepend system messages to first user message
-                if system_prefix and role == "user" and not first_user_message_processed:
-                    content = f"{system_prefix}\n\n{content}" if content else system_prefix
-                    first_user_message_processed = True
-                
-                if content.strip():  # Only add non-empty messages
-                    contents.append({
-                        "role": gemini_role,
-                        "parts": [{"text": content.strip()}]
-                    })
+                # Handle both string and array content formats
+                if isinstance(content, list):
+                    # Array content (multi-modal with file attachments)
+                    parts = []
+                    
+                    # Prepend system messages to first user message
+                    if system_prefix and role == "user" and not first_user_message_processed:
+                        parts.append({"text": system_prefix})
+                        first_user_message_processed = True
+                    
+                    # Convert each content item to Gemini parts format
+                    for item in content:
+                        if isinstance(item, dict):
+                            item_type = item.get("type", "text")
+                            if item_type == "text":
+                                text = item.get("text", "")
+                                if text.strip():
+                                    parts.append({"text": text.strip()})
+                            elif item_type == "file_data":
+                                # Gemini file format
+                                parts.append({
+                                    "fileData": {
+                                        "fileUri": item.get("file_uri", item.get("fileUri", "")),
+                                        "mimeType": item.get("mime_type", item.get("mimeType", "application/pdf"))
+                                    }
+                                })
+                            elif item_type == "inline_data":
+                                # Inline base64 data
+                                parts.append({
+                                    "inlineData": {
+                                        "mimeType": item.get("mime_type", "application/pdf"),
+                                        "data": item.get("data", "")
+                                    }
+                                })
+                        elif isinstance(item, str) and item.strip():
+                            parts.append({"text": item.strip()})
+                    
+                    if parts:
+                        contents.append({
+                            "role": gemini_role,
+                            "parts": parts
+                        })
+                else:
+                    # Standard string content
+                    # Prepend system messages to first user message
+                    if system_prefix and role == "user" and not first_user_message_processed:
+                        content = f"{system_prefix}\n\n{content}" if content else system_prefix
+                        first_user_message_processed = True
+                    
+                    if content.strip():  # Only add non-empty messages
+                        contents.append({
+                            "role": gemini_role,
+                            "parts": [{"text": content.strip()}]
+                        })
             
             # If we only had system messages, create a user message with them
             if not contents and system_prefix:

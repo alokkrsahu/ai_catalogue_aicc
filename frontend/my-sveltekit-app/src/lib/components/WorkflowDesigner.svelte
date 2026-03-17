@@ -18,6 +18,8 @@
   export let hierarchicalPaths: any[] = []; // Hierarchical paths for Content Filter
   export let hierarchicalPathsLoaded: boolean = false; // Whether hierarchical paths are loaded
   export let documentsInfo: any = null; // Document and processing status info
+  export let documentLlmStatus: Record<string, {openai: boolean, anthropic: boolean, google: boolean}> = {}; // Per-document LLM upload status
+  export let designerMode: boolean = false; // Full-screen designer mode
   
   const dispatch = createEventDispatcher();
   
@@ -90,6 +92,24 @@
   let saving = false;
   let showInstructions = true; // State for dismissable instructions overlay
   let isPanelMaximized = false; // Whether the properties panel is maximized as modal
+  
+  // Designer Mode - exit handler
+  function exitDesignerMode() {
+    dispatch('exitDesignerMode');
+    console.log('🖼️ WORKFLOW DESIGNER: Exiting Designer Mode');
+  }
+  
+  // Handle Escape key to exit Designer Mode
+  function handleDesignerModeKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape' && designerMode && !isPanelMaximized && !showExpandedTextarea) {
+      event.preventDefault();
+      event.stopPropagation();
+      exitDesignerMode();
+    }
+  }
+  
+  // Track if any expanded textarea is open (to not exit designer mode on Escape)
+  let showExpandedTextarea = false;
   
   // Drag and drop state
   let draggedNodeType: string | null = null;
@@ -306,6 +326,7 @@
   onMount(async () => {
     updateCanvasRect();
     window.addEventListener('resize', updateCanvasRect);
+    window.addEventListener('keydown', handleDesignerModeKeydown);
     
     console.log('🔄 MOUNT: Initializing WorkflowDesigner with workflow:', workflow?.workflow_id);
     console.log('🔄 MOUNT: Workflow has graph_json:', !!workflow?.graph_json);
@@ -353,7 +374,9 @@
   onDestroy(() => {
     // Clean up human input subscription
     unsubscribeWorkflowStatus();
-    console.log('🧹 WORKFLOW DESIGNER: Cleaned up human input subscription');
+    // Clean up keyboard listener
+    window.removeEventListener('keydown', handleDesignerModeKeydown);
+    console.log('🧹 WORKFLOW DESIGNER: Cleaned up human input subscription and keyboard listeners');
   });
   
   // Track current workflow ID to detect changes
@@ -1658,7 +1681,47 @@
 
 </script>
 
-<div class="workflow-designer h-full flex bg-white w-full">
+<!-- Designer Mode Header Bar (fixed at top when active) -->
+{#if designerMode}
+  <div class="fixed top-0 left-0 right-0 z-[10000] flex items-center justify-between px-4 py-2 shadow-lg" style="background-color: #002147;">
+    <div class="flex items-center space-x-3">
+      <div class="w-8 h-8 rounded-lg flex items-center justify-center" style="background-color: rgba(255,255,255,0.2);">
+        <i class="fas fa-expand-arrows-alt" style="color: white;"></i>
+      </div>
+      <div>
+        <h2 class="font-semibold" style="color: white;">Designer Mode</h2>
+        <p class="text-xs" style="color: rgba(255,255,255,0.8);">{workflow?.name || 'Workflow'} - Press ESC to exit</p>
+      </div>
+    </div>
+    
+    <div class="flex items-center space-x-3">
+      <!-- Workflow info -->
+      <div class="text-sm px-3 py-1.5 rounded-lg" style="color: white; background-color: rgba(255,255,255,0.15);">
+        {nodes.length} agents • {edges.length} connections
+      </div>
+      
+      <!-- Exit Designer Mode Button -->
+      <button
+        class="flex items-center space-x-2 px-4 py-2 bg-white rounded-lg hover:bg-gray-100 transition-all font-medium shadow-md"
+        style="color: #002147;"
+        on:click={exitDesignerMode}
+        title="Exit Designer Mode (ESC)"
+      >
+        <i class="fas fa-compress-arrows-alt"></i>
+        <span>Exit Designer Mode</span>
+      </button>
+    </div>
+  </div>
+{/if}
+
+<!-- Main Workflow Designer (becomes fullscreen when in designer mode) -->
+<div 
+  class="workflow-designer flex bg-white w-full {designerMode ? 'fixed inset-0 z-[9999] pt-12' : 'h-full'}"
+  class:designer-mode-active={designerMode}
+  role={designerMode ? 'dialog' : undefined}
+  aria-modal={designerMode ? 'true' : undefined}
+  aria-label={designerMode ? 'Designer Mode - Full Screen Workflow Editor' : undefined}
+>
   <!-- Agent Palette (Left Sidebar) -->
   {#if showPalette}
     <div class="w-64 border-r border-gray-200 bg-gray-50 flex flex-col">
@@ -2319,6 +2382,7 @@
             {hierarchicalPaths}
             {hierarchicalPathsLoaded}
             documentsInfo={documentsInfo}
+            {documentLlmStatus}
             isMaximized={true}
             on:nodeUpdate={(e) => {
               const updatedNode = e.detail;
@@ -2367,6 +2431,7 @@
           {hierarchicalPaths}
           {hierarchicalPathsLoaded}
           documentsInfo={documentsInfo}
+          {documentLlmStatus}
           isMaximized={false}
           on:nodeUpdate={(e) => {
             const updatedNode = e.detail;
@@ -2593,5 +2658,26 @@
       opacity: 1;
       transform: translateY(0);
     }
+  }
+  
+  /* 🖼️ DESIGNER MODE: Full-screen immersive editing */
+  .designer-mode-active {
+    animation: designerModeEnter 0.3s ease-out;
+  }
+  
+  @keyframes designerModeEnter {
+    from {
+      opacity: 0;
+      transform: scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+  
+  /* Designer Mode header bar styling */
+  .designer-mode-active .workflow-designer {
+    border-radius: 0;
   }
 </style>

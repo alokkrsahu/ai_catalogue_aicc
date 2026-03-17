@@ -7,9 +7,14 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from asgiref.sync import sync_to_async
+from django.core.files.storage import default_storage
+from asgiref.sync import sync_to_async, async_to_sync
 from typing import List, Dict, Any
+from types import SimpleNamespace
 import logging
+import mimetypes
+import os
+import uuid
 
 from users.models import (
     IntelliDocProject, AgentWorkflow, AgentWorkflowStatus,
@@ -126,6 +131,134 @@ class AgentWorkflowViewSet(viewsets.ModelViewSet):
         
         return super().destroy(request, *args, **kwargs)
     
+    @action(
+        detail=True,
+        methods=['post'],
+        url_path=r'nodes/(?P<node_id>[^/.]+)/upload-file-attachment',
+        parser_classes=[MultiPartParser, FormParser],
+    )
+    def upload_file_attachment(self, request, project_id=None, workflow_id=None, node_id=None):
+        """
+        Upload a node-scoped file attachment and immediately upload it to the
+        selected LLM provider's File API.
+        
+        This does NOT create a ProjectDocument entry. The returned file_id is
+        meant to be stored in the workflow graph (nodeConfig.inline_file_attachments).
+        """
+        workflow = self.get_object()
+        project = workflow.project
+
+        upload = request.FILES.get('file')
+        provider = (request.data.get('provider') or '').lower() or 'openai'
+
+        if not upload:
+            return Response(
+                {'error': 'No file provided', 'reason': 'missing_file'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        valid_providers = {'openai', 'anthropic', 'google', 'gemini'}
+        if provider not in valid_providers:
+            return Response(
+                {'error': f'Unsupported provider: {provider}', 'reason': 'unsupported_provider'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Map gemini alias to google for the file service
+        file_service_provider = 'google' if provider == 'gemini' else provider
+
+        # Save file to temporary storage so LLMFileUploadService can read it
+        filename = upload.name
+        ext = os.path.splitext(filename)[1].lower()
+        mime_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+
+        storage_path = default_storage.save(
+            os.path.join(
+                'node_attachments',
+                str(project.project_id),
+                str(workflow.workflow_id),
+                node_id or 'unknown-node',
+                f'{uuid.uuid4().hex}_{filename}',
+            ),
+            upload,
+        )
+
+        file_size = upload.size
+
+        # Build a lightweight document-like object for validation/upload
+        pseudo_document = SimpleNamespace(
+            file_path=storage_path,
+            file_size=file_size,
+            file_extension=ext,
+            file_type=mime_type,
+            original_filename=filename,
+            document_id=None,
+        )
+
+        try:
+            from agent_orchestration.llm_file_service import LLMFileUploadService
+
+            service = LLMFileUploadService(project)
+            result = async_to_sync(service._upload_to_provider)(pseudo_document, file_service_provider)
+
+            if not result.get('file_id'):
+                # Clean up stored file if upload failed
+                try:
+                    if default_storage.exists(storage_path):
+                        default_storage.delete(storage_path)
+                except Exception:
+                    logger.debug("Failed to delete temp node attachment after upload failure")
+
+                return Response(
+                    {
+                        'error': result.get('error', 'Upload failed'),
+                        'reason': result.get('reason'),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # We can safely delete the temp file after successful provider upload
+            try:
+                if default_storage.exists(storage_path):
+                    default_storage.delete(storage_path)
+            except Exception:
+                logger.debug("Failed to delete temp node attachment after successful upload")
+
+            attachment_id = str(uuid.uuid4())
+            payload = {
+                'id': attachment_id,
+                'filename': filename,
+                'provider': provider,
+                'file_id': result['file_id'],
+                'size': file_size,
+                'mime_type': mime_type,
+                'uploaded_at': timezone.now().isoformat(),
+            }
+
+            logger.info(
+                f"📎 NODE ATTACHMENT: Uploaded file for workflow {workflow.workflow_id}, "
+                f"node {node_id}, provider {provider}: {filename}"
+            )
+
+            return Response(payload, status=status.HTTP_201_CREATED)
+
+        except Exception as e:
+            logger.error(f"❌ NODE ATTACHMENT: Error uploading file for workflow {workflow_id}, node {node_id}: {e}")
+            import traceback
+            logger.error(f"❌ NODE ATTACHMENT TRACEBACK: {traceback.format_exc()}")
+
+            # Attempt to clean up stored file
+            try:
+                if default_storage.exists(storage_path):
+                    default_storage.delete(storage_path)
+            except Exception:
+                logger.debug("Failed to delete temp node attachment after exception")
+
+            return Response(
+                {'error': 'Upload failed', 'detail': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+    
     @action(detail=True, methods=['post'])
     def execute(self, request, project_id=None, workflow_id=None):
         """
@@ -173,10 +306,20 @@ class AgentWorkflowViewSet(viewsets.ModelViewSet):
             })
             
         except Exception as error:
+            from .docaware_handler import FileAttachmentPreparationError
+            if isinstance(error, FileAttachmentPreparationError):
+                user_message = f"File attachments could not be prepared: {error.message}"
+                if getattr(error, 'missing_documents', None):
+                    user_message += f" Missing or not uploaded for provider: {', '.join(error.missing_documents)}."
+                logger.error(f"❌ WORKFLOW ERROR (file attachments): {workflow.workflow_id} - {error.message}")
+                return Response({
+                    'status': 'error',
+                    'message': user_message,
+                    'workflow_id': str(workflow.workflow_id)
+                }, status=400)
             logger.error(f"❌ WORKFLOW ERROR: {workflow.workflow_id} - {error}")
             import traceback
             logger.error(f"❌ WORKFLOW TRACEBACK: {traceback.format_exc()}")
-            
             return Response({
                 'status': 'error',
                 'message': f'Execution failed: {str(error)}',

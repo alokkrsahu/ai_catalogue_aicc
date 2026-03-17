@@ -110,7 +110,7 @@ class WebSearchHandler:
                 if not urls:
                     logger.warning("🌐 WEBSEARCH: URL mode enabled but no URLs configured")
                     return ""
-                context = await self._get_url_context(urls, cache_ttl)
+                context = await self._get_url_context(urls, cache_ttl, project_id)
                 
             elif mode == 'domains':
                 # Domain-restricted search mode
@@ -119,7 +119,7 @@ class WebSearchHandler:
                 if not query:
                     logger.warning("🌐 WEBSEARCH: Could not extract query from conversation")
                     return ""
-                context = await self._get_domain_search_context(query, domains, max_results, cache_ttl)
+                context = await self._get_domain_search_context(query, domains, max_results, cache_ttl, project_id)
                 
             else:
                 # General search mode (default)
@@ -127,7 +127,7 @@ class WebSearchHandler:
                 if not query:
                     logger.warning("🌐 WEBSEARCH: Could not extract query from conversation")
                     return ""
-                context = await self._get_general_search_context(query, max_results, cache_ttl)
+                context = await self._get_general_search_context(query, max_results, cache_ttl, project_id)
             
             duration_ms = (time.time() - start_time) * 1000
             logger.info(f"🌐 WEBSEARCH: Completed in {duration_ms:.2f}ms, context length: {len(context)} chars")
@@ -154,21 +154,22 @@ class WebSearchHandler:
     # Search Mode Handlers
     # =========================================================================
     
-    async def _get_url_context(self, urls: List[str], cache_ttl: int) -> str:
+    async def _get_url_context(self, urls: List[str], cache_ttl: int, project_id: str) -> str:
         """
-        Fetch content from specific URLs with caching.
+        Fetch content from specific URLs with per-project caching.
         
         Args:
             urls: List of URLs to fetch
             cache_ttl: Cache time-to-live in seconds
+            project_id: Project ID for per-project cache isolation
             
         Returns:
             Formatted context string from fetched URLs
         """
         logger.info(f"🌐 WEBSEARCH URL MODE: Fetching {len(urls)} URLs")
         
-        # Check cache for each URL
-        cached_results = self.cache_service.get_cached_urls_batch(urls)
+        # Check cache for each URL (per-project)
+        cached_results = self.cache_service.get_cached_urls_batch(urls, project_id)
         
         # Identify URLs that need fetching
         urls_to_fetch = [url for url, content in cached_results.items() if content is None]
@@ -180,45 +181,51 @@ class WebSearchHandler:
         if urls_to_fetch:
             fetch_results = await self.fetcher_service.fetch_urls_parallel(urls_to_fetch)
             
-            # Cache successful results
+            # Cache all fetched PageCapture objects per project
             to_cache = {}
             for result in fetch_results:
-                if result.get('success'):
-                    to_cache[result['url']] = result
+                url = result.get('url')
+                if not url:
+                    continue
+                to_cache[url] = result
             
             if to_cache:
-                self.cache_service.cache_urls_batch(to_cache, ttl=cache_ttl)
+                self.cache_service.cache_urls_batch(to_cache, project_id, ttl=cache_ttl)
             
             # Merge fetched results with cached results
             for result in fetch_results:
-                cached_results[result['url']] = result
+                url = result.get('url')
+                if url:
+                    cached_results[url] = result
         
-        # Format results for context
+        # Format results for context (derived view over PageCapture)
         return self._format_url_results(urls, cached_results)
     
     async def _get_domain_search_context(
-        self, 
-        query: str, 
-        domains: List[str], 
+        self,
+        query: str,
+        domains: List[str],
         max_results: int,
-        cache_ttl: int
+        cache_ttl: int,
+        project_id: str
     ) -> str:
         """
-        Perform DuckDuckGo search restricted to specific domains.
+        Perform DuckDuckGo search restricted to specific domains (per-project cache).
         
         Args:
             query: Search query
             domains: List of domains to restrict search to
             max_results: Maximum number of results
             cache_ttl: Cache time-to-live in seconds
+            project_id: Project ID for per-project cache isolation
             
         Returns:
             Formatted context string from search results
         """
         logger.info(f"🌐 WEBSEARCH DOMAIN MODE: Searching '{query[:50]}...' in domains: {domains}")
         
-        # Check cache first
-        cached_results = self.cache_service.get_cached_search(query, domains)
+        # Check cache first (per-project)
+        cached_results = self.cache_service.get_cached_search(query, project_id, domains=domains)
         if cached_results:
             logger.info(f"🌐 WEBSEARCH DOMAIN MODE: Using cached search results")
             return self.search_service.format_results_for_context(cached_results)
@@ -229,33 +236,35 @@ class WebSearchHandler:
         
         results = await sync_to_async(do_search)()
         
-        # Cache results
+        # Cache results (per-project)
         if results:
-            self.cache_service.cache_search(query, results, domains=domains, ttl=cache_ttl)
+            self.cache_service.cache_search(query, results, project_id, domains=domains, ttl=cache_ttl)
         
         return self.search_service.format_results_for_context(results)
     
     async def _get_general_search_context(
-        self, 
-        query: str, 
+        self,
+        query: str,
         max_results: int,
-        cache_ttl: int
+        cache_ttl: int,
+        project_id: str
     ) -> str:
         """
-        Perform general DuckDuckGo search.
+        Perform general DuckDuckGo search (per-project cache).
         
         Args:
             query: Search query
             max_results: Maximum number of results
             cache_ttl: Cache time-to-live in seconds
+            project_id: Project ID for per-project cache isolation
             
         Returns:
             Formatted context string from search results
         """
         logger.info(f"🌐 WEBSEARCH GENERAL MODE: Searching '{query[:50]}...'")
         
-        # Check cache first
-        cached_results = self.cache_service.get_cached_search(query, None)
+        # Check cache first (per-project)
+        cached_results = self.cache_service.get_cached_search(query, project_id, domains=None)
         if cached_results:
             logger.info(f"🌐 WEBSEARCH GENERAL MODE: Using cached search results")
             return self.search_service.format_results_for_context(cached_results)
@@ -266,9 +275,9 @@ class WebSearchHandler:
         
         results = await sync_to_async(do_search)()
         
-        # Cache results
+        # Cache results (per-project)
         if results:
-            self.cache_service.cache_search(query, results, ttl=cache_ttl)
+            self.cache_service.cache_search(query, results, project_id, ttl=cache_ttl)
         
         return self.search_service.format_results_for_context(results)
     
@@ -390,36 +399,68 @@ class WebSearchHandler:
         if not results:
             return "No content could be retrieved from the specified URLs."
         
-        parts = []
+        parts: List[str] = []
         successful = 0
         
+        # Hard cap for per-URL context (configurable via WEBSEARCH_CONFIG)
+        websearch_config = getattr(settings, 'WEBSEARCH_CONFIG', {})
+        per_url_limit = websearch_config.get('LLM_CONTEXT_PER_URL_LIMIT', 5000)
+        
         for i, url in enumerate(urls, 1):
-            result = results.get(url, {})
+            capture = results.get(url) or {}
             
-            if result.get('success'):
-                successful += 1
-                title = result.get('title', 'Untitled')
-                content = result.get('content', '')
-                metadata = result.get('metadata', {})
-                
-                parts.append(f"[{i}] {title}")
-                parts.append(f"    URL: {url}")
-                
-                if metadata.get('description'):
-                    parts.append(f"    Description: {metadata['description']}")
-                
-                if content:
-                    # Truncate very long content for context
-                    if len(content) > 5000:
-                        content = content[:5000] + "... [content truncated]"
-                    parts.append(f"    Content:\n{content}")
-                
-                parts.append("")
-            else:
-                error = result.get('error', 'Unknown error')
+            error = capture.get('extraction_error')
+            status_code = capture.get('status_code')
+            title = capture.get('title') or capture.get('domain') or 'Untitled'
+            meta_description = capture.get('meta_description') or ''
+            truncated = bool(capture.get('truncated'))
+            word_count = capture.get('word_count', 0)
+            
+            if error:
                 parts.append(f"[{i}] ❌ Failed to fetch: {url}")
                 parts.append(f"    Error: {error}")
+                if status_code is not None:
+                    parts.append(f"    Status code: {status_code}")
                 parts.append("")
+                continue
+            
+            successful += 1
+            parts.append(f"[{i}] {title}")
+            parts.append(f"    URL: {url}")
+            if meta_description:
+                parts.append(f"    Description: {meta_description}")
+            if status_code is not None:
+                parts.append(f"    Status code: {status_code}")
+            if word_count:
+                parts.append(f"    Approximate word count: {word_count}")
+            if truncated:
+                parts.append("    Note: Content truncated for context length limits.")
+            
+            # Build a flattened preview from sections for this URL
+            preview_lines: List[str] = []
+            sections = capture.get('sections') or []
+            for section in sections:
+                sec_type = section.get('type')
+                text = section.get('text') or ''
+                if not text:
+                    continue
+                if sec_type == 'heading':
+                    level = section.get('level') or 1
+                    prefix = '#' * max(1, min(level, 6))
+                    preview_lines.append(f"{prefix} {text}")
+                else:
+                    preview_lines.append(text)
+            
+            preview_text = "\n\n".join(preview_lines).strip()
+            if preview_text:
+                if len(preview_text) > per_url_limit:
+                    preview_text = preview_text[:per_url_limit] + "... [content truncated]"
+                parts.append("    Content:")
+                # Indent content block for readability
+                indented = "\n".join(f"{line}" for line in preview_text.splitlines())
+                parts.append(indented)
+            
+            parts.append("")
         
         header = f"Retrieved content from {successful}/{len(urls)} URLs:\n\n"
         return header + "\n".join(parts)
@@ -593,14 +634,14 @@ class WebSearchHandler:
                 urls = agent_data.get('web_search_urls', [])
                 if not urls:
                     return ""
-                context = await self._get_url_context(urls, cache_ttl)
+                context = await self._get_url_context(urls, cache_ttl, project_id)
                 
             elif mode == 'domains':
                 domains = agent_data.get('web_search_domains', [])
-                context = await self._get_domain_search_context(search_query, domains, max_results, cache_ttl)
+                context = await self._get_domain_search_context(search_query, domains, max_results, cache_ttl, project_id)
                 
             else:
-                context = await self._get_general_search_context(search_query, max_results, cache_ttl)
+                context = await self._get_general_search_context(search_query, max_results, cache_ttl, project_id)
             
             duration_ms = (time.time() - start_time) * 1000
             

@@ -275,6 +275,10 @@ When you open **Agent Orchestration**:
 ![AI Assistant node properties](documentation_images/screenshot_node_properties_ai_assistant.png)  
 Suggested content: Properties panel open for an AI Assistant Agent node.
 
+#### Agent configuration (LLM provider and model)
+
+In the properties panel you can set the **LLM provider** (e.g. OpenAI, Anthropic, Google) and **model** (e.g. GPT‑4, Claude) for each agent. This configuration is stored in the workflow: when you save the workflow, the provider and model choices are persisted with it. There is no separate “agent config” store; the workflow graph is the source of truth. Make sure to save the workflow after changing an agent’s provider or model.
+
 ---
 
 ### Using DocAware in Workflows

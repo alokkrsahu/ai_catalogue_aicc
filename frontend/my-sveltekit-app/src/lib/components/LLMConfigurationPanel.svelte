@@ -9,7 +9,11 @@
   export let agentName: string;
   export let agentType: string;
   export let currentConfig: AgentLLMConfig | null = null;
-  
+  /** When provided, load initial config from workflow graph (node.data) via getAgentLLMConfig. */
+  export let projectId: string = '';
+  /** Optional node.data from the workflow graph (llm_provider, llm_model). When set with projectId, config is loaded from graph. */
+  export let nodeDataFromGraph: { llm_provider?: string; llm_model?: string } | undefined = undefined;
+
   const dispatch = createEventDispatcher();
   
   // State
@@ -47,11 +51,15 @@
         llmConfigService.getModels()
       ]);
       
-      // Initialize configuration
-      if (currentConfig) {
+      // Initialize configuration: prefer graph (nodeDataFromGraph), then currentConfig, then defaults
+      const graphConfig = projectId && nodeDataFromGraph
+        ? await llmConfigService.getAgentLLMConfig(projectId, agentId, nodeDataFromGraph)
+        : null;
+      if (graphConfig) {
+        config = { ...graphConfig };
+      } else if (currentConfig) {
         config = { ...currentConfig };
       } else {
-        // Use defaults for agent type
         const defaults = llmConfigService.getDefaultConfigForAgentType(agentType);
         config = llmConfigService.getCompleteAgentConfig(agentId, agentName, agentType, defaults);
       }
@@ -128,12 +136,10 @@
       
       console.log('💾 LLM CONFIG PANEL: Saving configuration', config);
       
-      // Save via service (will extend to API later)
-      const savedConfig = await llmConfigService.updateAgentLLMConfig('', agentId, config);
-      
-      // Notify parent component
+      const savedConfig = await llmConfigService.updateAgentLLMConfig(projectId || '', agentId, config);
+
       dispatch('configurationUpdate', savedConfig);
-      
+
       toasts.success('LLM configuration saved successfully');
       console.log('✅ LLM CONFIG PANEL: Configuration saved');
       
@@ -186,8 +192,9 @@
         LLM Configuration
       </h4>
       <p class="text-sm text-gray-600">Configure AI model for this agent</p>
+      <p class="text-xs text-amber-700 mt-1">Save the workflow to persist agent LLM settings.</p>
     </div>
-    
+
     {#if validationErrors.length > 0}
       <div class="text-red-600 text-sm">
         <i class="fas fa-exclamation-triangle mr-1"></i>

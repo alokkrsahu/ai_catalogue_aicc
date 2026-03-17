@@ -80,8 +80,14 @@ def process_unified_consolidated(request, project_id, llm_config=None, processin
         processing_mode_override: Optional processing mode override
     """
     try:
-        # Verify project exists and user has access
+        # Verify project exists
         project = get_object_or_404(IntelliDocProject, project_id=project_id)
+        # Enforce project access (legacy path is not behind ViewSet get_object())
+        if not project.has_user_access(request.user):
+            return Response(
+                {'error': 'You do not have permission to access this project'},
+                status=status.HTTP_403_FORBIDDEN
+            )
         
         # Duplicate-run guard: do not start if this project is already processing (multi-project isolation)
         if project_id in PROCESSING_THREADS and PROCESSING_THREADS[project_id].is_alive():
@@ -359,6 +365,12 @@ def get_vector_status_consolidated(request, project_id):
     """
     try:
         project = get_object_or_404(IntelliDocProject, project_id=project_id)
+        # Enforce project access (legacy path is not behind ViewSet get_object())
+        if not project.has_user_access(request.user):
+            return Response(
+                {'error': 'You do not have permission to access this project'},
+                status=status.HTTP_403_FORBIDDEN
+            )
         logger.debug(f"📊 CONSOLIDATED: Getting status for project {project_id} ({project.name})")
         
         # Get status from enhanced manager

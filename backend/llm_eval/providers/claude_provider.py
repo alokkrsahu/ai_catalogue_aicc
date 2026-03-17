@@ -45,7 +45,21 @@ class ClaudeProvider(LLMProvider):
             claude_messages = []
             for msg in messages:
                 if msg.get("role") == "system":
-                    system_message_content = msg.get("content")
+                    raw_content = msg.get("content")
+                    # Defensive guard: Claude API expects system as a string.
+                    # If content is an array (e.g. from file attachment formatting),
+                    # extract text parts and join them.
+                    if isinstance(raw_content, list):
+                        text_parts = []
+                        for part in raw_content:
+                            if isinstance(part, dict):
+                                text_parts.append(part.get("text", ""))
+                            elif isinstance(part, str):
+                                text_parts.append(part)
+                        system_message_content = "\n".join(p for p in text_parts if p)
+                        logger.info(f"🔧 CLAUDE: Converted array system message to string ({len(text_parts)} parts)")
+                    else:
+                        system_message_content = raw_content
                 else:
                     claude_messages.append(msg)
             

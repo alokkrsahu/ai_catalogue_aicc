@@ -130,7 +130,10 @@ urlpatterns = [
     path('api/projects/<uuid:project_id>/workflows/<uuid:workflow_id>/evaluation_results/', AgentWorkflowViewSet.as_view({
         'get': 'evaluation_results'
     }), name='project-workflow-evaluation-results'),
-    
+    path('api/projects/<uuid:project_id>/workflows/<uuid:workflow_id>/nodes/<str:node_id>/upload-file-attachment/', AgentWorkflowViewSet.as_view({
+        'post': 'upload_file_attachment'
+    }), name='project-workflow-upload-file-attachment'),
+
     # PHASE 3: Universal Processing Endpoints (Consolidated via UniversalProjectViewSet)
     # All processing now handled through UniversalProjectViewSet actions:
     # - /api/projects/{project_id}/process_documents/ (POST)

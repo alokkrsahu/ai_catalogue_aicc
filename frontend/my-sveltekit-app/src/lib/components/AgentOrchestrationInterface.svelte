@@ -24,6 +24,9 @@
   let loading = true;
   let creatingWorkflow = false;
   
+  // Designer Mode state - full-screen workflow designer
+  let designerMode = false;
+  
   // LLM Models pre-loading state
   let modelsLoading = false;
   let modelsLoaded = false;
@@ -37,6 +40,16 @@
   let hierarchicalPathsLoaded = false; // Track if loading is complete (regardless of whether paths exist)
   let hierarchicalPathsError: string | null = null;
   let documentsInfo: any = null; // Store document and processing status info
+  // Per-document LLM upload status, keyed by original filename, then provider.
+  // Example shape:
+  // {
+  //   "paper.pdf": {
+  //     openai:   { status: 'ready' | 'not_uploaded' | 'file_too_large' | 'unsupported_type' | 'missing_api_key', reason?: string },
+  //     anthropic:{ ... },
+  //     google:   { ... }
+  //   }
+  // }
+  let documentLlmStatus: Record<string, Record<string, { status: string; reason?: string }>> = {};
   
   // Conversation history state
   let selectedRunId: string | null = null;
@@ -269,6 +282,9 @@
 
       // Store document info for better user feedback
       documentsInfo = pathsData.documents_info || null;
+
+      // Store per-document LLM upload status
+      documentLlmStatus = pathsData.document_llm_status || {};
 
       // Mark as loaded regardless of whether paths exist
       hierarchicalPathsLoaded = true;
@@ -879,6 +895,19 @@
             </div>
           {/if}
         </div>
+        
+        <!-- Designer Mode Button -->
+        {#if selectedWorkflow}
+          <button
+            class="px-4 py-2 bg-oxford-blue text-white rounded-lg hover:bg-blue-900 transition-all text-sm font-medium shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed"
+            on:click={() => designerMode = true}
+            title="Enter Designer Mode - full-screen workflow editor"
+          >
+            <i class="fas fa-expand-arrows-alt mr-2"></i>
+            Designer Mode
+          </button>
+        {/if}
+        
         <!-- Workflow Selector -->
         {#if allWorkflows.length > 0}
           <select 
@@ -1014,7 +1043,10 @@
               hierarchicalPaths={hierarchicalPaths}
               hierarchicalPathsLoaded={hierarchicalPathsLoaded}
               documentsInfo={documentsInfo}
+              documentLlmStatus={documentLlmStatus}
+              {designerMode}
               on:workflowUpdate={(e) => handleWorkflowUpdate(e.detail)}
+              on:exitDesignerMode={() => designerMode = false}
             />
           {:catch error}
             <div class="flex-1 flex items-center justify-center">

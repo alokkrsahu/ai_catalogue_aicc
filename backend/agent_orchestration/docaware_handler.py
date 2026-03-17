@@ -8,13 +8,35 @@ Handles DocAware integration and context management for conversation orchestrati
 import logging
 import time
 import json
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 from asgiref.sync import sync_to_async
 
 # Import DocAware services
 from .docaware import EnhancedDocAwareAgentService, SearchMethod
 
+# Import models for full document mode
+from users.models import ProjectDocument, IntelliDocProject
+
 logger = logging.getLogger('conversation_orchestrator')
+
+
+class FileAttachmentPreparationError(Exception):
+    """
+    Raised when File Attachments cannot be prepared for execution
+    (e.g. uploads fail for required documents for the selected provider).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        provider: str,
+        missing_documents: Optional[List[str]] = None,
+        reason: Optional[str] = None,
+    ):
+        super().__init__(message)
+        self.provider = provider
+        self.missing_documents = missing_documents or []
+        self.reason = reason
 
 
 class DocAwareHandler:
@@ -33,14 +55,192 @@ class DocAwareHandler:
     
     def is_docaware_enabled(self, agent_node: Dict[str, Any]) -> bool:
         """
-        Check if DocAware is enabled for this agent
+        Check if DocAware (chunk-based RAG) is enabled for this agent.
+        DocAware is considered enabled if:
+        - doc_aware is True AND search_method is set
         """
         agent_data = agent_node.get('data', {})
-        return agent_data.get('doc_aware', False) and agent_data.get('search_method')
+        doc_aware = agent_data.get('doc_aware', False)
+        search_method = agent_data.get('search_method')
+        
+        return doc_aware and bool(search_method)
     
-    async def get_docaware_context_from_conversation_query(self, agent_node: Dict[str, Any], search_query: str, project_id: str, conversation_history: str) -> str:
+    @staticmethod
+    def is_file_attachments_enabled(agent_node: Dict[str, Any]) -> bool:
         """
-        Retrieve document context using conversation-based search query for single agents
+        Check if file attachments are enabled for this agent (independent of DocAware).
+        """
+        agent_data = agent_node.get('data', {})
+        return agent_data.get('file_attachments_enabled', False)
+    
+    async def get_file_attachment_references(
+        self, 
+        agent_node: Dict[str, Any], 
+        project_id: str
+    ) -> Dict[str, Any]:
+        """
+        Get file references for the File Attachments feature.
+        
+        Retrieves file_ids from ProjectDocument records that have been uploaded
+        to the relevant LLM provider's File API. This is independent of DocAware.
+        
+        Args:
+            agent_node: Agent configuration containing selected documents
+            project_id: Project ID to get documents from
+            
+        Returns:
+            Dict with:
+            - mode: 'file_attachments'
+            - file_references: List of {file_id, filename, provider} dicts
+            - error: Optional error message
+        """
+        agent_data = agent_node.get('data', {})
+        selected_docs = agent_data.get('file_attachment_documents', [])
+        llm_provider = agent_data.get('llm_provider', 'openai')
+        
+        # Map provider names to field names
+        provider_field_map = {
+            'openai': 'llm_file_id_openai',
+            'anthropic': 'llm_file_id_anthropic',
+            'google': 'llm_file_id_google',
+            'gemini': 'llm_file_id_google',  # alias
+        }
+        
+        file_id_field = provider_field_map.get(llm_provider, 'llm_file_id_openai')
+        
+        logger.info(f"📎 FILE ATTACHMENTS: Getting file references for provider {llm_provider}")
+        logger.info(f"📎 FILE ATTACHMENTS: Selected documents: {selected_docs}")
+        
+        try:
+            # Get project
+            project = await sync_to_async(
+                IntelliDocProject.objects.get
+            )(project_id=project_id)
+            
+            file_references = []
+            missing_uploads = []
+            
+            if not selected_docs:
+                # If no specific documents selected, get all processed documents
+                documents = await sync_to_async(list)(
+                    ProjectDocument.objects.filter(
+                        project=project,
+                        upload_status='ready'
+                    )
+                )
+            else:
+                # Get specific selected documents by original filename.
+                # NOTE: If multiple documents share the same original filename,
+                # all of them will be included and attached. This is logged for visibility.
+                documents = await sync_to_async(list)(
+                    ProjectDocument.objects.filter(
+                        project=project,
+                        original_filename__in=selected_docs
+                    )
+                )
+
+                # Warn if there are duplicates by filename within the selection
+                name_counts: Dict[str, int] = {}
+                for d in documents:
+                    name_counts[d.original_filename] = name_counts.get(d.original_filename, 0) + 1
+                duplicate_names = [name for name, count in name_counts.items() if count > 1]
+                if duplicate_names:
+                    logger.warning(
+                        "⚠️ FILE ATTACHMENTS: Multiple documents share the same original "
+                        f"filename in project {project_id}: {', '.join(duplicate_names)}. "
+                        "All matching documents will be attached."
+                    )
+            
+            for doc in documents:
+                file_id = getattr(doc, file_id_field, None)
+                
+                if not file_id:
+                    # Lazy upload: attempt to upload the document to the provider now
+                    logger.info(f"📎 FILE ATTACHMENTS: Lazy uploading {doc.original_filename} to {llm_provider}...")
+                    try:
+                        from .llm_file_service import LLMFileUploadService
+                        service = LLMFileUploadService(project)
+                        upload_result = await service._upload_to_provider(doc, llm_provider)
+                        if upload_result.get('file_id'):
+                            file_id = upload_result['file_id']
+                            # Refresh from DB to get the updated field
+                            await sync_to_async(doc.refresh_from_db)()
+                            logger.info(f"📎 FILE ATTACHMENTS: Lazy upload succeeded for {doc.original_filename}: {file_id[:20]}...")
+                        else:
+                            error_msg = upload_result.get('error', 'Unknown error')
+                            missing_uploads.append(doc.original_filename)
+                            logger.warning(f"⚠️ FILE ATTACHMENTS: Lazy upload failed for {doc.original_filename}: {error_msg}")
+                            continue
+                    except Exception as upload_err:
+                        missing_uploads.append(doc.original_filename)
+                        logger.warning(f"⚠️ FILE ATTACHMENTS: Lazy upload exception for {doc.original_filename}: {upload_err}")
+                        continue
+                
+                if file_id:
+                    file_references.append({
+                        'file_id': file_id,
+                        'filename': doc.original_filename,
+                        'document_id': str(doc.document_id),
+                        'provider': llm_provider,
+                        'file_type': doc.file_type,
+                        'file_size': doc.file_size
+                    })
+                    logger.info(f"📎 FILE ATTACHMENTS: Found file_id for {doc.original_filename}: {file_id[:20]}...")
+                else:
+                    missing_uploads.append(doc.original_filename)
+                    logger.warning(f"⚠️ FILE ATTACHMENTS: Document {doc.original_filename} not uploaded to {llm_provider}")
+            
+            result = {
+                'mode': 'file_attachments',
+                'provider': llm_provider,
+                'file_references': file_references,
+                'documents_found': len(documents),
+                'documents_with_file_id': len(file_references)
+            }
+            
+            if missing_uploads:
+                # Treat missing uploads as a hard failure so the node fails clearly
+                message = (
+                    f"{len(missing_uploads)} document(s) could not be prepared for "
+                    f"file attachments for provider {llm_provider}: {', '.join(missing_uploads)}"
+                )
+                logger.error(f"❌ FILE ATTACHMENTS: {message}")
+                raise FileAttachmentPreparationError(
+                    message=message,
+                    provider=llm_provider,
+                    missing_documents=missing_uploads,
+                )
+            
+            logger.info(f"📎 FILE ATTACHMENTS: Returning {len(file_references)} file references")
+            return result
+            
+        except IntelliDocProject.DoesNotExist:
+            logger.error(f"❌ FILE ATTACHMENTS: Project {project_id} not found")
+            return {
+                'mode': 'file_attachments',
+                'error': f'Project {project_id} not found',
+                'file_references': []
+            }
+        except Exception as e:
+            logger.error(f"❌ FILE ATTACHMENTS: Error getting file references: {e}")
+            return {
+                'mode': 'file_attachments',
+                'error': str(e),
+                'file_references': []
+            }
+    
+    async def get_docaware_context_from_conversation_query(
+        self, 
+        agent_node: Dict[str, Any], 
+        search_query: str, 
+        project_id: str, 
+        conversation_history: str
+    ) -> str:
+        """
+        Retrieve document context using conversation-based search query for single agents.
+        
+        This is purely chunk-based DocAware. File attachments are handled
+        separately by get_file_attachment_references().
         
         Args:
             agent_node: Agent configuration
@@ -49,9 +249,11 @@ class DocAwareHandler:
             conversation_history: Full conversation history for context
             
         Returns:
-            Formatted document context string
+            Formatted document context string (chunk-based)
         """
         agent_data = agent_node.get('data', {})
+        
+        # Standard chunk-based DocAware
         search_method = agent_data.get('search_method', 'hybrid_search')
         search_parameters = agent_data.get('search_parameters', {})
         
@@ -234,11 +436,22 @@ class DocAwareHandler:
             logger.error(f"❌ DOCAWARE: Traceback: {traceback.format_exc()}")
             return f"⚠️ Document search failed: {str(e)}"
     
-    def get_docaware_context(self, agent_node: Dict[str, Any], conversation_history: str, project_id: str) -> str:
+    def get_docaware_context(
+        self, 
+        agent_node: Dict[str, Any], 
+        conversation_history: str, 
+        project_id: str
+    ) -> str:
         """
-        Retrieve document context using DocAware service
+        Retrieve document context using DocAware service (chunk-based only).
+        
+        File attachments are handled separately via get_file_attachment_references().
+        
+        Returns:
+            Formatted document context string
         """
         agent_data = agent_node.get('data', {})
+        
         search_method = agent_data.get('search_method', 'hybrid_search')
         search_parameters = agent_data.get('search_parameters', {})
         

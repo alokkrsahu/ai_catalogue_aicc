@@ -183,12 +183,12 @@ class DocAwareSearchMethods:
         
         SearchMethod.MULTI_COLLECTION: SearchMethodConfig(
             name="Multi-Collection Search",
-            description="Search across multiple document collections simultaneously",
+            description="Search across multiple document collections simultaneously. Only the project's document collection is searchable (project_documents).",
             parameters={
                 "collections": {
                     "type": "multiselect",
-                    "options": ["project_documents", "knowledge_base", "chat_history", "external_docs"],
-                    "description": "Collections to search across"
+                    "options": ["project_documents"],
+                    "description": "Collections to search across (only project_documents is allowed for project isolation)"
                 },
                 "collection_weights": {
                     "type": "text",

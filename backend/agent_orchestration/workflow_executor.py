@@ -773,15 +773,37 @@ class WorkflowExecutor:
                                 # Use multi-input processing
                                 logger.info(f"📥 ORCHESTRATOR: Agent {node_name} has {len(input_sources)} input sources - using multi-input mode")
                                 aggregated_context = self.workflow_parser.aggregate_multiple_inputs(input_sources, executed_nodes)
-                                llm_messages = await self.chat_manager.craft_conversation_prompt_with_docaware(
+                                prompt_result = await self.chat_manager.craft_conversation_prompt_with_docaware(
                                     aggregated_context, node, str(project_id), conversation_history
                                 )
+                                # Handle dict return with potential file_references (Full Document Mode)
+                                llm_messages = prompt_result.get('messages', prompt_result) if isinstance(prompt_result, dict) else prompt_result
+                                
+                                # Apply file reference formatting if file attachments are enabled
+                                if isinstance(prompt_result, dict) and prompt_result.get('file_references'):
+                                    logger.info(f"📎 FILE ATTACHMENTS: Formatting {len(prompt_result['file_references'])} file references for {node_name}")
+                                    llm_messages = self.chat_manager.format_messages_with_file_refs(
+                                        llm_messages,
+                                        prompt_result['file_references'],
+                                        prompt_result.get('provider', 'openai')
+                                    )
                             else:
                                 # Use traditional single-input processing
                                 logger.info(f"📥 ORCHESTRATOR: Agent {node_name} has {len(input_sources)} input source - using single-input mode")
-                                llm_messages = await self.chat_manager.craft_conversation_prompt(
+                                prompt_result_single = await self.chat_manager.craft_conversation_prompt(
                                     conversation_history, node, str(project_id)
                                 )
+                                # Handle dict return with potential file_references (File Attachments)
+                                llm_messages = prompt_result_single.get('messages', prompt_result_single) if isinstance(prompt_result_single, dict) else prompt_result_single
+                                
+                                # Apply file reference formatting if file attachments are enabled
+                                if isinstance(prompt_result_single, dict) and prompt_result_single.get('file_references'):
+                                    logger.info(f"📎 FILE ATTACHMENTS: Formatting {len(prompt_result_single['file_references'])} file references for {node_name}")
+                                    llm_messages = self.chat_manager.format_messages_with_file_refs(
+                                        llm_messages,
+                                        prompt_result_single['file_references'],
+                                        prompt_result_single.get('provider', 'openai')
+                                    )
                             
                             # CRITICAL FIX: Use separate variable for LLM-formatted messages
                             # These are for LLM API calls only, NOT for storage in messages_data
@@ -797,9 +819,13 @@ class WorkflowExecutor:
                             
                             # Check for empty response - this is an error condition
                             if not agent_response_text:
+                                provider_error = getattr(agent_response, "error", None)
+                                if provider_error == "":
+                                    logger.error("❌ ORCHESTRATOR: Provider returned empty error string; API may have signalled failure with no message.")
                                 error_msg = f"Agent {node_name} returned an empty response. This indicates an LLM error or configuration issue."
                                 logger.error(f"❌ ORCHESTRATOR: {error_msg}")
                                 logger.error(f"❌ ORCHESTRATOR: LLM Provider: {type(llm_provider).__name__}, Model: {agent_config.get('llm_model', 'unknown')}")
+                                logger.error(f"❌ ORCHESTRATOR: agent_response.error={provider_error!r}, agent_response.text (first 200 chars)={repr((agent_response.text or '')[:200])}")
                                 raise Exception(error_msg)
                             
                             logger.info(f"✅ ORCHESTRATOR: Agent {node_name} completed successfully - response length: {len(agent_response_text)} chars")
@@ -1682,20 +1708,42 @@ class WorkflowExecutor:
                         logger.info(f"📥 CONTINUE WORKFLOW: Agent {node_name} has {len(input_sources)} input sources - using multi-input mode")
                         aggregated_context = self.workflow_parser.aggregate_multiple_inputs(input_sources, executed_nodes)
                         # CRITICAL FIX: Use craft_conversation_prompt_with_docaware for multi-input (same as main execution)
-                        llm_messages = await self.chat_manager.craft_conversation_prompt_with_docaware(
+                        prompt_result = await self.chat_manager.craft_conversation_prompt_with_docaware(
                             aggregated_context, node, str(project.project_id), conversation_history
                         )
+                        # Handle dict return with potential file_references (Full Document Mode)
+                        llm_messages = prompt_result.get('messages', prompt_result) if isinstance(prompt_result, dict) else prompt_result
+                        
+                        # Apply file reference formatting if file attachments are enabled
+                        if isinstance(prompt_result, dict) and prompt_result.get('file_references'):
+                            logger.info(f"📎 FILE ATTACHMENTS: Formatting {len(prompt_result['file_references'])} file references for {node_name}")
+                            llm_messages = self.chat_manager.format_messages_with_file_refs(
+                                llm_messages,
+                                prompt_result['file_references'],
+                                prompt_result.get('provider', 'openai')
+                            )
                     else:
                         # Single-input mode - CRITICAL FIX: Use proper prompt crafting
                         logger.info(f"📥 CONTINUE WORKFLOW: Agent {node_name} has {len(input_sources)} input source - using single-input mode")
-                        llm_messages = await self.chat_manager.craft_conversation_prompt(
+                        prompt_result_single = await self.chat_manager.craft_conversation_prompt(
                             conversation_history, node, str(project.project_id)
                         )
+                        # Handle dict return with potential file_references (File Attachments)
+                        llm_messages = prompt_result_single.get('messages', prompt_result_single) if isinstance(prompt_result_single, dict) else prompt_result_single
+                        
+                        # Apply file reference formatting if file attachments are enabled
+                        if isinstance(prompt_result_single, dict) and prompt_result_single.get('file_references'):
+                            logger.info(f"📎 FILE ATTACHMENTS: Formatting {len(prompt_result_single['file_references'])} file references for {node_name}")
+                            llm_messages = self.chat_manager.format_messages_with_file_refs(
+                                llm_messages,
+                                prompt_result_single['file_references'],
+                                prompt_result_single.get('provider', 'openai')
+                            )
                     
                     # CRITICAL FIX: Use separate variable for LLM-formatted messages
                     # These are for LLM API calls only, NOT for storage in messages_data
                     # DEBUG: Log messages content for troubleshooting
-                    messages_preview = f"{len(llm_messages)} messages" + (f", first message: {llm_messages[0].get('content', '')[:100]}..." if llm_messages else "")
+                    messages_preview = f"{len(llm_messages)} messages" + (f", first message: {llm_messages[0].get('content', '')[:100]}..." if llm_messages and isinstance(llm_messages, list) else "")
                     logger.info(f"🔍 CONTINUE WORKFLOW: Agent {node_name} messages: {messages_preview}")
                     
                     # Make LLM call with structured messages
@@ -2194,13 +2242,35 @@ class WorkflowExecutor:
                 # This is correct - each node sees the state before parallel execution started
                 if len(input_sources) > 1:
                     aggregated_context = self.workflow_parser.aggregate_multiple_inputs(input_sources, executed_nodes)
-                    llm_messages = await self.chat_manager.craft_conversation_prompt_with_docaware(
+                    prompt_result = await self.chat_manager.craft_conversation_prompt_with_docaware(
                         aggregated_context, node, str(project_id), conversation_history
                     )
+                    # Handle dict return with potential file_references (Full Document Mode)
+                    llm_messages = prompt_result.get('messages', prompt_result) if isinstance(prompt_result, dict) else prompt_result
+                    
+                    # Apply file reference formatting if file attachments are enabled
+                    if isinstance(prompt_result, dict) and prompt_result.get('file_references'):
+                        logger.info(f"📎 FILE ATTACHMENTS: Formatting {len(prompt_result['file_references'])} file references for {node_name}")
+                        llm_messages = self.chat_manager.format_messages_with_file_refs(
+                            llm_messages,
+                            prompt_result['file_references'],
+                            prompt_result.get('provider', 'openai')
+                        )
                 else:
-                    llm_messages = await self.chat_manager.craft_conversation_prompt(
+                    prompt_result_single = await self.chat_manager.craft_conversation_prompt(
                         conversation_history, node, str(project_id)
                     )
+                    # Handle dict return with potential file_references (File Attachments)
+                    llm_messages = prompt_result_single.get('messages', prompt_result_single) if isinstance(prompt_result_single, dict) else prompt_result_single
+                    
+                    # Apply file reference formatting if file attachments are enabled
+                    if isinstance(prompt_result_single, dict) and prompt_result_single.get('file_references'):
+                        logger.info(f"📎 FILE ATTACHMENTS: Formatting {len(prompt_result_single['file_references'])} file references for {node_name}")
+                        llm_messages = self.chat_manager.format_messages_with_file_refs(
+                            llm_messages,
+                            prompt_result_single['file_references'],
+                            prompt_result_single.get('provider', 'openai')
+                        )
                 
                 # CRITICAL FIX: Use separate variable for LLM-formatted messages
                 # These are for LLM API calls only, NOT for storage in messages_data

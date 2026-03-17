@@ -1112,7 +1112,8 @@ export class CleanUniversalApiService {
     if (params?.limit) queryParams.append('limit', params.limit.toString());
     if (params?.offset) queryParams.append('offset', params.offset.toString());
     
-    const url = `${API_BASE}/agent-orchestration/projects/${projectId}/deployment/activity${queryParams.toString() ? '?' + queryParams.toString() : ''}`;
+    const path = `${API_BASE}/agent-orchestration/projects/${projectId}/deployment/activity/`;
+    const url = queryParams.toString() ? `${path}?${queryParams.toString()}` : path;
     
     const response = await this.handleAuthenticatedRequest(url, {
       method: 'GET',

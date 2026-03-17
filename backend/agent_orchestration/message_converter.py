@@ -11,7 +11,7 @@ from typing import List, Dict, Any, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
-def validate_messages_format(messages: List[Dict[str, str]]) -> Tuple[bool, Optional[str]]:
+def validate_messages_format(messages: List[Dict[str, Any]]) -> Tuple[bool, Optional[str]]:
     """
     Validate messages array format.
     
@@ -22,6 +22,13 @@ def validate_messages_format(messages: List[Dict[str, str]]) -> Tuple[bool, Opti
         Tuple of (is_valid, error_message)
         - is_valid: True if messages are valid, False otherwise
         - error_message: Error description if invalid, None if valid
+    
+    Note:
+        Supports both string content and array content (for file attachments).
+        Array content is used by LLM providers for multi-modal inputs:
+        - OpenAI: [{"type": "text", "text": "..."}, {"type": "file", ...}]
+        - Claude: [{"type": "text", "text": "..."}, {"type": "document", ...}]
+        - Gemini: [{"type": "text", "text": "..."}, {"type": "file_data", ...}]
     """
     if not isinstance(messages, list):
         return False, "Messages must be a list"
@@ -49,11 +56,41 @@ def validate_messages_format(messages: List[Dict[str, str]]) -> Tuple[bool, Opti
             return False, f"Message at index {i} has invalid role '{role}'. Must be one of: {valid_roles}"
         
         content = msg.get('content')
-        if not isinstance(content, str):
-            return False, f"Message at index {i} has invalid 'content' type (must be string)"
         
-        if len(content.strip()) == 0:
-            logger.warning(f"⚠️ MESSAGE CONVERTER: Message at index {i} has empty content")
+        # Support both string and array content formats
+        if isinstance(content, str):
+            # Standard string content
+            if len(content.strip()) == 0:
+                logger.warning(f"⚠️ MESSAGE CONVERTER: Message at index {i} has empty content")
+        elif isinstance(content, list):
+            # Array content for file attachments (multi-modal format)
+            if len(content) == 0:
+                return False, f"Message at index {i} has empty content array"
+            
+            # Validate each content item
+            for j, item in enumerate(content):
+                if not isinstance(item, dict):
+                    return False, f"Message at index {i}, content item {j} must be a dictionary"
+                
+                # Check for 'type' field which is required for multi-modal content
+                if 'type' not in item:
+                    return False, f"Message at index {i}, content item {j} missing 'type' field"
+                
+                item_type = item.get('type')
+                
+                # Validate based on type
+                if item_type == 'text':
+                    if 'text' not in item:
+                        return False, f"Message at index {i}, content item {j} of type 'text' missing 'text' field"
+                elif item_type in ('file', 'file_data', 'document', 'image', 'image_url'):
+                    # File/image attachments - provider-specific validation
+                    # These are handled by the LLM providers themselves
+                    pass
+                else:
+                    # Unknown type - log warning but allow (provider-specific types)
+                    logger.debug(f"ℹ️ MESSAGE CONVERTER: Unknown content type '{item_type}' at index {i}, item {j}")
+        else:
+            return False, f"Message at index {i} has invalid 'content' type (must be string or array)"
     
     return True, None
 
