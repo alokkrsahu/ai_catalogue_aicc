@@ -284,10 +284,16 @@ CACHES = {
 
 # WebSearch Configuration
 WEBSEARCH_CONFIG = {
+    # Cache TTL for WebSearch (URLs and search results)
     'DEFAULT_CACHE_TTL': 3600,  # 1 hour default
+    # DuckDuckGo result limits
     'MAX_RESULTS': 10,
+    # HTTP client timeouts
     'REQUEST_TIMEOUT': 30,  # seconds
-    'MAX_CONTENT_LENGTH': 100000,  # chars per page
+    # LLM-oriented flattened text cap per URL (characters)
+    'MAX_CONTENT_LENGTH': 100000,
+    # Maximum raw HTML bytes to keep in PageCapture.raw_html before truncating
+    'MAX_HTML_BYTES': 2_000_000,  # ~2 MB
 }
 
 # Vector Search Settings

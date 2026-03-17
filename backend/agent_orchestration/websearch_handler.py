@@ -402,10 +402,6 @@ class WebSearchHandler:
         parts: List[str] = []
         successful = 0
         
-        # Hard cap for per-URL context (configurable via WEBSEARCH_CONFIG)
-        websearch_config = getattr(settings, 'WEBSEARCH_CONFIG', {})
-        per_url_limit = websearch_config.get('LLM_CONTEXT_PER_URL_LIMIT', 5000)
-        
         for i, url in enumerate(urls, 1):
             capture = results.get(url) or {}
             
@@ -453,8 +449,6 @@ class WebSearchHandler:
             
             preview_text = "\n\n".join(preview_lines).strip()
             if preview_text:
-                if len(preview_text) > per_url_limit:
-                    preview_text = preview_text[:per_url_limit] + "... [content truncated]"
                 parts.append("    Content:")
                 # Indent content block for readability
                 indented = "\n".join(f"{line}" for line in preview_text.splitlines())

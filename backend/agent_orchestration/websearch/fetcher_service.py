@@ -9,13 +9,59 @@ Designed for efficient retrieval of multiple web pages concurrently.
 import asyncio
 import logging
 import re
+from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Any, Optional
 from urllib.parse import urlparse
+
 import aiohttp
 from bs4 import BeautifulSoup
 from django.conf import settings
 
 logger = logging.getLogger('agent_orchestration')
+
+
+@dataclass
+class PageSection:
+    """
+    Single section of a web page. This is part of the canonical
+    PageCapture representation – not a secondary cache layer.
+    """
+    type: str  # heading|paragraph|list|table|code|other
+    level: Optional[int] = None  # for headings
+    text: str = ""
+    html_snippet: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PageCapture:
+    """
+    Canonical, single-source-of-truth representation of a fetched URL.
+    All downstream views (LLM context, summaries, etc.) are derived
+    from this structure and not stored separately.
+    """
+    url: str
+    final_url: Optional[str] = None
+    domain: Optional[str] = None
+    status_code: Optional[int] = None
+    content_type: Optional[str] = None
+    title: Optional[str] = None
+    meta_description: Optional[str] = None
+    raw_html: Optional[str] = None
+    raw_html_size: int = 0
+    raw_html_truncated: bool = False
+    sections: List[PageSection] = field(default_factory=list)
+    word_count: int = 0
+    truncated: bool = False  # text-level truncation flag
+    extraction_error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convert PageCapture to a JSON-serialisable dict for caching.
+        """
+        data = asdict(self)
+        # dataclasses.asdict already converts nested dataclasses
+        return data
 
 
 class WebsiteFetcherService:
@@ -26,7 +72,8 @@ class WebsiteFetcherService:
     
     # Default configuration
     DEFAULT_TIMEOUT = 30  # seconds
-    DEFAULT_MAX_CONTENT_LENGTH = 100000  # characters
+    DEFAULT_MAX_CONTENT_LENGTH = 100000  # characters (LLM-oriented text cap)
+    DEFAULT_MAX_HTML_BYTES = 2_000_000  # 2 MB raw HTML cap
     
     # User agent to avoid being blocked
     USER_AGENT = (
@@ -34,16 +81,17 @@ class WebsiteFetcherService:
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
     
-    # Tags to remove from content
+    # Tags to remove from content (only for derived text, not raw_html)
     REMOVE_TAGS = [
-        'script', 'style', 'nav', 'footer', 'header', 'aside',
-        'form', 'noscript', 'iframe', 'svg', 'canvas', 'video', 'audio'
+        'script', 'style', 'noscript'
     ]
     
     # CSS classes/IDs often associated with non-content elements
     REMOVE_PATTERNS = [
-        'nav', 'menu', 'sidebar', 'footer', 'header', 'advertisement',
-        'ad-', 'ads-', 'social', 'share', 'comment', 'cookie', 'popup'
+        'advertisement',
+        'ad-', 'ads-',
+        'cookie',
+        'popup'
     ]
     
     def __init__(self):
@@ -51,7 +99,12 @@ class WebsiteFetcherService:
         websearch_config = getattr(settings, 'WEBSEARCH_CONFIG', {})
         self.timeout = websearch_config.get('REQUEST_TIMEOUT', self.DEFAULT_TIMEOUT)
         self.max_content_length = websearch_config.get('MAX_CONTENT_LENGTH', self.DEFAULT_MAX_CONTENT_LENGTH)
-        logger.info(f"🌐 WEBSITE FETCHER: Initialized (timeout: {self.timeout}s, max_content: {self.max_content_length} chars)")
+        self.max_html_bytes = websearch_config.get('MAX_HTML_BYTES', self.DEFAULT_MAX_HTML_BYTES)
+        logger.info(
+            f"🌐 WEBSITE FETCHER: Initialized "
+            f"(timeout: {self.timeout}s, max_content: {self.max_content_length} chars, "
+            f"max_html_bytes: {self.max_html_bytes})"
+        )
     
     # =========================================================================
     # Main Public Methods
@@ -70,7 +123,7 @@ class WebsiteFetcherService:
             timeout: Optional timeout override per request
             
         Returns:
-            List of result dicts, one per URL, in the same order
+            List of PageCapture dicts, one per URL, in the same order
         """
         if not urls:
             return []
@@ -98,18 +151,15 @@ class WebsiteFetcherService:
             results = await asyncio.gather(*tasks, return_exceptions=True)
         
         # Process results, converting exceptions to error dicts
-        processed_results = []
+        processed_results: List[Dict[str, Any]] = []
         for url, result in zip(urls, results):
             if isinstance(result, Exception):
                 logger.error(f"❌ WEBSITE FETCHER: Failed to fetch {url}: {result}")
-                processed_results.append({
-                    'url': url,
-                    'success': False,
-                    'error': str(result),
-                    'title': '',
-                    'content': '',
-                    'metadata': {}
-                })
+                capture = PageCapture(
+                    url=url,
+                    extraction_error=str(result),
+                )
+                processed_results.append(capture.to_dict())
             else:
                 processed_results.append(result)
         
@@ -128,17 +178,16 @@ class WebsiteFetcherService:
             timeout: Optional timeout override
             
         Returns:
-            Result dict with url, success, title, content, metadata, error
+            PageCapture dict
         """
         results = await self.fetch_urls_parallel([url], timeout)
-        return results[0] if results else {
-            'url': url,
-            'success': False,
-            'error': 'No results returned',
-            'title': '',
-            'content': '',
-            'metadata': {}
-        }
+        if results:
+            return results[0]
+        capture = PageCapture(
+            url=url,
+            extraction_error='No results returned',
+        )
+        return capture.to_dict()
     
     # =========================================================================
     # Internal Methods
@@ -153,183 +202,211 @@ class WebsiteFetcherService:
             url: URL to fetch
             
         Returns:
-            Result dict with extracted content
+            PageCapture dict with extracted data
         """
         try:
             logger.debug(f"🌐 FETCHING: {url}")
             
             async with session.get(url, allow_redirects=True) as response:
-                # Check response status
-                if response.status != 200:
-                    return {
-                        'url': url,
-                        'success': False,
-                        'error': f"HTTP {response.status}: {response.reason}",
-                        'title': '',
-                        'content': '',
-                        'metadata': {'status_code': response.status}
-                    }
-                
-                # Check content type
+                status = response.status
                 content_type = response.headers.get('Content-Type', '')
+                final_url = str(response.url)
+                
+                capture = PageCapture(
+                    url=url,
+                    final_url=final_url,
+                    status_code=status,
+                    content_type=content_type,
+                    domain=urlparse(url).netloc,
+                )
+                
+                # Non-200 responses: record metadata but do not attempt extraction
+                if status != 200:
+                    capture.extraction_error = f"HTTP {status}: {response.reason}"
+                    return capture.to_dict()
+                
+                # Only handle HTML/XHTML for now
                 if 'text/html' not in content_type and 'application/xhtml' not in content_type:
-                    return {
-                        'url': url,
-                        'success': False,
-                        'error': f"Non-HTML content type: {content_type}",
-                        'title': '',
-                        'content': '',
-                        'metadata': {'content_type': content_type}
-                    }
+                    capture.extraction_error = f"Non-HTML content type: {content_type}"
+                    return capture.to_dict()
                 
-                # Read content
-                html = await response.text()
+                # Read raw HTML (with byte cap)
+                raw_bytes = await response.read()
+                capture.raw_html_size = len(raw_bytes)
+                if len(raw_bytes) > self.max_html_bytes:
+                    capture.raw_html_truncated = True
+                    raw_bytes = raw_bytes[: self.max_html_bytes]
+                try:
+                    html = raw_bytes.decode(response.charset or 'utf-8', errors='replace')
+                except Exception:
+                    html = raw_bytes.decode('utf-8', errors='replace')
+                capture.raw_html = html
                 
-                # Extract content using BeautifulSoup
-                extracted = self.extract_content(html, url)
+                # Parse HTML and populate sections + derived text metadata
+                self._populate_from_html(capture, html)
                 
-                return {
-                    'url': url,
-                    'success': True,
-                    'error': None,
-                    'title': extracted['title'],
-                    'content': extracted['content'],
-                    'metadata': {
-                        'status_code': response.status,
-                        'content_type': content_type,
-                        'content_length': len(extracted['content']),
-                        'final_url': str(response.url),
-                        **extracted['metadata']
-                    }
-                }
+                return capture.to_dict()
                 
         except asyncio.TimeoutError:
-            return {
-                'url': url,
-                'success': False,
-                'error': 'Request timed out',
-                'title': '',
-                'content': '',
-                'metadata': {}
-            }
+            capture = PageCapture(
+                url=url,
+                extraction_error='Request timed out',
+            )
+            return capture.to_dict()
         except aiohttp.ClientError as e:
-            return {
-                'url': url,
-                'success': False,
-                'error': f"Client error: {str(e)}",
-                'title': '',
-                'content': '',
-                'metadata': {}
-            }
+            capture = PageCapture(
+                url=url,
+                extraction_error=f"Client error: {str(e)}",
+            )
+            return capture.to_dict()
         except Exception as e:
-            return {
-                'url': url,
-                'success': False,
-                'error': f"Unexpected error: {str(e)}",
-                'title': '',
-                'content': '',
-                'metadata': {}
-            }
+            capture = PageCapture(
+                url=url,
+                extraction_error=f"Unexpected error: {str(e)}",
+            )
+            logger.error(f"❌ CONTENT FETCH: Failed for {url}: {e}")
+            return capture.to_dict()
     
-    def extract_content(self, html: str, url: str) -> Dict[str, Any]:
+    def _populate_from_html(self, capture: PageCapture, html: str) -> None:
         """
-        Extract main content from HTML using BeautifulSoup.
-        Removes navigation, scripts, styles, and other boilerplate.
-        
-        Args:
-            html: Raw HTML content
-            url: Source URL (for context)
-            
-        Returns:
-            Dict with title, content, and metadata
+        Populate a PageCapture instance from raw HTML.
+        This function is responsible for building the single canonical
+        representation (sections + derived text metadata).
         """
         try:
             soup = BeautifulSoup(html, 'html.parser')
             
-            # Extract title
+            # Title
             title = ''
             if soup.title:
                 title = soup.title.get_text(strip=True)
             elif soup.find('h1'):
                 title = soup.find('h1').get_text(strip=True)
+            capture.title = (title[:500] if title else capture.domain)
             
-            # Extract meta description
+            # Meta description
             meta_description = ''
             meta_tag = soup.find('meta', attrs={'name': 'description'})
             if meta_tag and meta_tag.get('content'):
                 meta_description = meta_tag['content']
+            capture.meta_description = meta_description[:500] if meta_description else None
             
-            # Remove unwanted tags
+            # Remove only obviously non-content tags globally
             for tag_name in self.REMOVE_TAGS:
                 for tag in soup.find_all(tag_name):
                     tag.decompose()
             
-            # Remove elements with common non-content class/id patterns
+            # Remove elements with known junk patterns (ad/cookie/popups)
             for pattern in self.REMOVE_PATTERNS:
                 for element in soup.find_all(class_=re.compile(pattern, re.I)):
                     element.decompose()
                 for element in soup.find_all(id=re.compile(pattern, re.I)):
                     element.decompose()
             
-            # Try to find main content area
-            main_content = None
+            sections: List[PageSection] = []
             
-            # Check for common content containers
-            for selector in ['main', 'article', '[role="main"]', '.content', '#content', '.post', '.article']:
-                if selector.startswith('.') or selector.startswith('#'):
-                    # CSS class or ID selector
-                    if selector.startswith('.'):
-                        main_content = soup.find(class_=selector[1:])
-                    else:
-                        main_content = soup.find(id=selector[1:])
-                elif selector.startswith('['):
-                    # Attribute selector
-                    attr_match = re.match(r'\[(\w+)="(\w+)"\]', selector)
-                    if attr_match:
-                        main_content = soup.find(attrs={attr_match.group(1): attr_match.group(2)})
+            # Headings
+            for level in range(1, 7):
+                for h in soup.find_all(f'h{level}'):
+                    text = h.get_text(strip=True)
+                    if not text:
+                        continue
+                    sections.append(
+                        PageSection(
+                            type='heading',
+                            level=level,
+                            text=text,
+                            html_snippet=str(h)[:1000],
+                        )
+                    )
+            
+            # Paragraphs
+            for p in soup.find_all('p'):
+                text = p.get_text(strip=True)
+                if not text:
+                    continue
+                sections.append(
+                    PageSection(
+                        type='paragraph',
+                        text=text,
+                        html_snippet=str(p)[:1000],
+                    )
+                )
+            
+            # Lists (ul/ol)
+            for lst in soup.find_all(['ul', 'ol']):
+                items = [li.get_text(strip=True) for li in lst.find_all('li')]
+                items = [i for i in items if i]
+                if not items:
+                    continue
+                sections.append(
+                    PageSection(
+                        type='list',
+                        text='\n'.join(f"- {item}" for item in items),
+                        html_snippet=str(lst)[:1000],
+                        metadata={'item_count': len(items)},
+                    )
+                )
+            
+            # Tables
+            for tbl in soup.find_all('table'):
+                rows = []
+                for tr in tbl.find_all('tr'):
+                    cells = [c.get_text(strip=True) for c in tr.find_all(['th', 'td'])]
+                    if cells:
+                        rows.append(cells)
+                if not rows:
+                    continue
+                sections.append(
+                    PageSection(
+                        type='table',
+                        text='\n'.join(' | '.join(row) for row in rows),
+                        html_snippet=str(tbl)[:1000],
+                        metadata={'row_count': len(rows)},
+                    )
+                )
+            
+            # Code/pre blocks
+            for code_block in soup.find_all(['pre', 'code']):
+                text = code_block.get_text('\n', strip=True)
+                if not text:
+                    continue
+                sections.append(
+                    PageSection(
+                        type='code',
+                        text=text,
+                        html_snippet=str(code_block)[:1000],
+                    )
+                )
+            
+            capture.sections = sections
+            
+            # Build a flattened text view for metrics and eventual LLM context
+            # (not cached separately – always derived from this capture).
+            parts: List[str] = []
+            for sec in sections:
+                if sec.type == 'heading':
+                    prefix = '#' * (sec.level or 1)
+                    parts.append(f"{prefix} {sec.text}")
                 else:
-                    main_content = soup.find(selector)
-                
-                if main_content:
-                    break
+                    parts.append(sec.text)
+            flat_text = '\n\n'.join(parts).strip()
             
-            # Fall back to body if no main content area found
-            if not main_content:
-                main_content = soup.find('body') or soup
+            # Clean whitespace
+            flat_text = re.sub(r'\n\s*\n', '\n\n', flat_text)
+            flat_text = re.sub(r' +', ' ', flat_text)
+            flat_text = flat_text.strip()
             
-            # Extract text content
-            text_content = main_content.get_text(separator='\n', strip=True)
+            # Truncate for metrics/LLM usage but keep flag
+            if len(flat_text) > self.max_content_length:
+                capture.truncated = True
+                flat_text = flat_text[: self.max_content_length] + "... [truncated]"
             
-            # Clean up whitespace
-            text_content = re.sub(r'\n\s*\n', '\n\n', text_content)
-            text_content = re.sub(r' +', ' ', text_content)
-            text_content = text_content.strip()
-            
-            # Truncate if too long
-            if len(text_content) > self.max_content_length:
-                text_content = text_content[:self.max_content_length] + "... [truncated]"
-            
-            # Extract some metadata
-            domain = urlparse(url).netloc
-            
-            return {
-                'title': title[:500] if title else domain,  # Limit title length
-                'content': text_content,
-                'metadata': {
-                    'domain': domain,
-                    'description': meta_description[:500] if meta_description else '',
-                    'word_count': len(text_content.split()),
-                    'truncated': len(text_content) >= self.max_content_length
-                }
-            }
+            capture.word_count = len(flat_text.split()) if flat_text else 0
             
         except Exception as e:
-            logger.error(f"❌ CONTENT EXTRACTION: Failed for {url}: {e}")
-            return {
-                'title': urlparse(url).netloc,
-                'content': '',
-                'metadata': {'extraction_error': str(e)}
-            }
+            logger.error(f"❌ CONTENT EXTRACTION: Failed for {capture.url}: {e}")
+            capture.extraction_error = str(e)
     
     # =========================================================================
     # Utility Methods
