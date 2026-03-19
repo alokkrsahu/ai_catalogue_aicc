@@ -1644,7 +1644,10 @@ def embed_chatbot_html(request, project_id):
             )
         
         # Get the endpoint URL and customization settings
+        # Use X-Forwarded-Proto to determine the scheme when behind a reverse proxy
         base_url = request.build_absolute_uri('/').rstrip('/')
+        if request.META.get('HTTP_X_FORWARDED_PROTO') == 'https' and base_url.startswith('http://'):
+            base_url = 'https://' + base_url[len('http://'):]
         endpoint_url = f"{base_url}{deployment.endpoint_path}"
         initial_greeting = getattr(deployment, 'initial_greeting', 'Hi! I am your AI assistant.')
         
