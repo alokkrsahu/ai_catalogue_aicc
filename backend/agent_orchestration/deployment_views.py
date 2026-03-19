@@ -1649,8 +1649,8 @@ def embed_chatbot_html(request, project_id):
         # Get branding customization with defaults
         chatbot_title = getattr(deployment, 'chatbot_title', 'AI Assistant')
         chatbot_subtitle = getattr(deployment, 'chatbot_subtitle', 'Powered by AICC IntelliDoc')
-        primary_color = getattr(deployment, 'primary_color', '#0b3b66')
-        secondary_color = getattr(deployment, 'secondary_color', '#1e5a8a')
+        primary_color = getattr(deployment, 'primary_color', '#78b2e8')
+        secondary_color = getattr(deployment, 'secondary_color', '#3a6d98')
         logo_url = getattr(deployment, 'logo_url', None) or ''
         
         # Generate the modern HTML with glassmorphism design
@@ -2335,7 +2335,10 @@ def embed_chatbot_html(request, project_id):
   }}
 
   const messages = [];
-  const sessionId = 'sess_' + Math.random().toString(36).slice(2);
+  // Allow explicit session_id via URL for in-app chatbot, fallback to random for external embeds
+  const urlParams = new URLSearchParams(window.location.search || '');
+  const urlSessionId = (urlParams.get('session_id') || '').trim();
+  const sessionId = urlSessionId || ('sess_' + Math.random().toString(36).slice(2));
   let currentExecutionId = null;
   let awaitingHumanInput = false;
 
@@ -2349,6 +2352,44 @@ def embed_chatbot_html(request, project_id):
   const humanInputTextarea = document.getElementById('humanInputTextarea');
   const humanInputSubmit = document.getElementById('humanInputSubmit');
   const humanInputCancel = document.getElementById('humanInputCancel');
+  
+  // Preload existing conversation history for this session (if any)
+  (async function preloadConversation() {
+    try {
+      // Extract projectId from URL path: /api/workflow-deploy/<project_id>/embed/
+      const pathParts = window.location.pathname.split('/').filter(Boolean);
+      const projectIdIndex = pathParts.indexOf('workflow-deploy') + 1;
+      const projectId = projectIdIndex > 0 && projectIdIndex < pathParts.length ? pathParts[projectIdIndex] : null;
+
+      if (!projectId || !sessionId) {
+        return;
+      }
+
+      const activityUrl = `/api/agent-orchestration/projects/${projectId}/deployment/activity/?session_id=${encodeURIComponent(sessionId)}&limit=1`;
+      const resp = await fetch(activityUrl, { credentials: 'include' });
+      if (!resp.ok) {
+        return;
+      }
+
+      const data = await resp.json().catch(() => null);
+      if (!data || !Array.isArray(data.sessions) || data.sessions.length === 0) {
+        return;
+      }
+
+      const session = data.sessions[0];
+      const history = Array.isArray(session.conversation_history) ? session.conversation_history : [];
+
+      // Optionally cap to last 100 messages
+      const recentHistory = history.slice(-100);
+      for (const msg of recentHistory) {
+        if (!msg || !msg.role || typeof msg.content !== 'string') continue;
+        appendMessage(msg.role === 'user' ? 'user' : 'assistant', msg.content);
+        messages.push({ role: msg.role, content: msg.content });
+      }
+    } catch (e) {
+      console.warn('Chatbot preload failed:', e);
+    }
+  })();
   
   // Auto-resize textarea
   function autoResize() {{
