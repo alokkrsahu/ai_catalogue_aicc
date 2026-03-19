@@ -229,6 +229,113 @@ class DocAwareHandler:
                 'file_references': []
             }
     
+    async def validate_and_reupload_inline_attachments(
+        self,
+        inline_attachments: List[Dict[str, Any]],
+        provider: str,
+        project_id: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        Validate inline file attachment file_ids against the current API key.
+        If a file_id is stale (uploaded with a previous key), re-upload the file
+        and return the updated attachment with the new file_id.
+
+        Args:
+            inline_attachments: List of inline attachment dicts with file_id, filename, etc.
+            provider: LLM provider name ('openai', 'anthropic', 'google')
+            project_id: Project ID for API key access
+
+        Returns:
+            List of validated attachment dicts (stale ones re-uploaded or skipped)
+        """
+        if not inline_attachments:
+            return []
+
+        import aiohttp
+
+        try:
+            project = await sync_to_async(IntelliDocProject.objects.get)(project_id=project_id)
+        except IntelliDocProject.DoesNotExist:
+            logger.error(f"❌ INLINE VALIDATE: Project {project_id} not found")
+            return inline_attachments  # Return as-is, let downstream handle errors
+
+        from project_api_keys.services import get_project_api_key_service
+        svc = get_project_api_key_service()
+        api_key = await svc.get_project_api_key_async(project, provider)
+        if not api_key:
+            logger.warning(f"⚠️ INLINE VALIDATE: No API key for {provider}, skipping validation")
+            return inline_attachments
+
+        validated = []
+        for att in inline_attachments:
+            file_id = att.get('file_id')
+            filename = att.get('filename', 'attachment')
+            if not file_id:
+                continue
+
+            # Validate file_id is accessible with the current API key
+            is_valid = False
+            if provider == 'openai':
+                try:
+                    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                        async with session.get(
+                            f"https://api.openai.com/v1/files/{file_id}",
+                            headers={"Authorization": f"Bearer {api_key}"},
+                        ) as resp:
+                            is_valid = resp.status == 200
+                            if not is_valid:
+                                logger.warning(
+                                    f"⚠️ INLINE VALIDATE: OpenAI file_id {file_id[:20]}... for '{filename}' "
+                                    f"returned status {resp.status} — stale file_id from a different API key"
+                                )
+                except Exception as e:
+                    logger.warning(f"⚠️ INLINE VALIDATE: Error checking file_id {file_id[:20]}...: {e}")
+            else:
+                # For other providers, assume valid (add validation later if needed)
+                is_valid = True
+
+            if is_valid:
+                validated.append(att)
+            else:
+                # Attempt re-upload from project documents matching the filename
+                logger.info(f"🔄 INLINE VALIDATE: Attempting re-upload of '{filename}' to {provider}")
+                try:
+                    docs = await sync_to_async(list)(
+                        ProjectDocument.objects.filter(
+                            project=project,
+                            original_filename=filename,
+                        )
+                    )
+                    if docs:
+                        doc = docs[0]
+                        # Clear the stale file_id so the upload service doesn't skip it
+                        field_name = f'llm_file_id_{provider}'
+                        if getattr(doc, field_name, None) == file_id:
+                            setattr(doc, field_name, None)
+                            await sync_to_async(doc.save)(update_fields=[field_name])
+
+                        from .llm_file_service import LLMFileUploadService
+                        service = LLMFileUploadService(project)
+                        upload_result = await service._upload_to_provider(doc, provider)
+                        new_file_id = upload_result.get('file_id')
+                        if new_file_id:
+                            logger.info(f"✅ INLINE VALIDATE: Re-uploaded '{filename}' — new file_id: {new_file_id[:20]}...")
+                            att_copy = dict(att)
+                            att_copy['file_id'] = new_file_id
+                            validated.append(att_copy)
+                        else:
+                            logger.warning(f"⚠️ INLINE VALIDATE: Re-upload failed for '{filename}': {upload_result.get('error')}")
+                    else:
+                        logger.warning(
+                            f"⚠️ INLINE VALIDATE: Cannot re-upload '{filename}' — "
+                            f"document not found in project. The file was likely uploaded "
+                            f"directly to a previous OpenAI account and is no longer accessible."
+                        )
+                except Exception as re_err:
+                    logger.warning(f"⚠️ INLINE VALIDATE: Re-upload exception for '{filename}': {re_err}")
+
+        return validated
+
     async def get_docaware_context_from_conversation_query(
         self, 
         agent_node: Dict[str, Any], 

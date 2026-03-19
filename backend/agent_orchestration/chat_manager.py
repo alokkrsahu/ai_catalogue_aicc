@@ -837,6 +837,11 @@ class ChatManager:
         inline_attachments = agent_data.get('inline_file_attachments') or []
         if inline_attachments:
             provider = agent_data.get('llm_provider', 'openai').lower()
+            # Validate inline file_ids against the current API key (they may be stale after key rotation)
+            if project_id:
+                inline_attachments = await self.docaware_handler.validate_and_reupload_inline_attachments(
+                    inline_attachments, provider, project_id
+                )
             if not file_attachment_refs:
                 file_attachment_refs = []
             for att in inline_attachments:
@@ -861,7 +866,7 @@ class ChatManager:
                 logger.info(
                     f"📎 FILE ATTACHMENTS: Added {len(inline_attachments)} node-level attachments for {agent_name}"
                 )
-        
+
         # If we have any attachments (project-level or node-scoped), add indicator to system message
         if file_attachment_refs:
             system_parts.append("\n=== FILE ATTACHMENTS ===")
@@ -1019,6 +1024,11 @@ class ChatManager:
         inline_attachments = agent_data.get('inline_file_attachments') or []
         if inline_attachments:
             provider = agent_data.get('llm_provider', 'openai').lower()
+            # Validate inline file_ids against the current API key (they may be stale after key rotation)
+            if project_id:
+                inline_attachments = await self.docaware_handler.validate_and_reupload_inline_attachments(
+                    inline_attachments, provider, project_id
+                )
             if not file_attachment_refs:
                 file_attachment_refs = []
             for att in inline_attachments:
@@ -1550,6 +1560,11 @@ class ChatManager:
         inline_attachments_delegate = delegate_data.get('inline_file_attachments') or []
         if inline_attachments_delegate:
             provider = delegate_data.get('llm_provider', 'openai').lower()
+            # Validate inline file_ids against the current API key (they may be stale after key rotation)
+            if project_id:
+                inline_attachments_delegate = await self.docaware_handler.validate_and_reupload_inline_attachments(
+                    inline_attachments_delegate, provider, project_id
+                )
             if not file_attachment_refs_delegate:
                 file_attachment_refs_delegate = []
             for att in inline_attachments_delegate:

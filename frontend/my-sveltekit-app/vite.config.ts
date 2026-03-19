@@ -8,11 +8,13 @@ export default defineConfig({
   server: {
     hmr: {
       overlay: true,
-      clientPort: 5173,
+      // When accessed via nginx (HTTPS on 443), route HMR through nginx too
+      clientPort: parseInt(process.env.HMR_CLIENT_PORT || '443'),
+      protocol: process.env.HMR_PROTOCOL || 'wss',
     },
     port: 5173,
     strictPort: false,
-    host: 'localhost',
+    host: '0.0.0.0',
     allowedHosts: ['aicc.uksouth.cloudapp.azure.com'],
     // Add watch configuration to ignore node_modules
     watch: {
