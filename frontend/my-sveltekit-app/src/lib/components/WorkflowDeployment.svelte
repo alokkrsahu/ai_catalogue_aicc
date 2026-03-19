@@ -54,8 +54,8 @@
     const escapedGreeting = JSON.stringify(initialGreeting);
     const title = chatbotTitle || 'AI Assistant';
     const subtitle = chatbotSubtitle || 'Powered by AICC IntelliDoc';
-    const pColor = primaryColor || '#0b3b66';
-    const sColor = secondaryColor || '#1e5a8a';
+    const pColor = primaryColor || '#78b2e8';
+    const sColor = secondaryColor || '#3a6d98';
     const logo = logoUrl || '';
     const primaryRgb = hexToRgb(pColor);
     const logoHtml = logo 
@@ -514,8 +514,8 @@
         // Load branding customization
         chatbotTitle = deployment.chatbot_title || 'AI Assistant';
         chatbotSubtitle = deployment.chatbot_subtitle || 'Powered by AICC IntelliDoc';
-        primaryColor = deployment.primary_color || '#0b3b66';
-        secondaryColor = deployment.secondary_color || '#1e5a8a';
+        primaryColor = deployment.primary_color || '#78b2e8';
+        secondaryColor = deployment.secondary_color || '#3a6d98';
         logoUrl = deployment.logo_url || '';
         
         // Construct endpoint URL

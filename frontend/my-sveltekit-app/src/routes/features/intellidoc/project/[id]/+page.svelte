@@ -130,6 +130,12 @@
   // Folder structure preservation setting
   let preserveOriginalFolderStructure = false;
   let updatingFolderStructureSetting = false;
+
+  // In-app chatbot session management
+  type ChatbotSessionMeta = { id: string; label: string; createdAt: string };
+  let chatbotSessions: ChatbotSessionMeta[] = [];
+  let activeChatbotSessionId: string | null = null;
+  let chatbotFullscreen = false;
   
   console.log(`🎯 UNIVERSAL: Initializing universal project interface for project ${projectId}`);
   
@@ -157,8 +163,94 @@
         clearInterval(statusPollingInterval);
         statusPollingInterval = null;
       }
+      // Cleanup fullscreen key handler
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('keydown', handleChatbotFullscreenKeydown);
+      }
     };
   });
+
+  // Initialize chatbot sessions when project or deployment changes
+  $: if (projectId && deployment) {
+    initializeChatbotSessions();
+  }
+
+  function makeChatbotStorageKey() {
+    const deploymentKey = deployment?.id || deployment?.deployment_id || 'default';
+    return `chatbot_sessions_${projectId}_${deploymentKey}`;
+  }
+
+  function initializeChatbotSessions() {
+    if (typeof window === 'undefined') return;
+    const storageKey = makeChatbotStorageKey();
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          chatbotSessions = parsed;
+          activeChatbotSessionId = parsed[0].id;
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('CHATBOT: Failed to parse stored sessions', e);
+    }
+
+    // No sessions yet: create an initial one
+    const id = `sess_${Math.random().toString(36).slice(2)}`;
+    const createdAt = new Date().toISOString();
+    chatbotSessions = [{ id, label: 'Conversation 1', createdAt }];
+    activeChatbotSessionId = id;
+    persistChatbotSessions();
+  }
+
+  function persistChatbotSessions() {
+    if (typeof window === 'undefined') return;
+    const storageKey = makeChatbotStorageKey();
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(chatbotSessions));
+    } catch (e) {
+      console.warn('CHATBOT: Failed to persist sessions', e);
+    }
+  }
+
+  function handleNewChatbotConversation() {
+    const index = chatbotSessions.length + 1;
+    const id = `sess_${Math.random().toString(36).slice(2)}`;
+    const createdAt = new Date().toISOString();
+    chatbotSessions = [
+      { id, label: `Conversation ${index}`, createdAt },
+      ...chatbotSessions
+    ];
+    activeChatbotSessionId = id;
+    persistChatbotSessions();
+  }
+
+  function handleChatbotSessionChange(event: Event) {
+    const target = event.target as HTMLSelectElement;
+    const value = target.value || null;
+    activeChatbotSessionId = value;
+  }
+
+  function toggleChatbotFullscreen() {
+    chatbotFullscreen = !chatbotFullscreen;
+  }
+
+  function handleChatbotFullscreenKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape' && chatbotFullscreen) {
+      chatbotFullscreen = false;
+    }
+  }
+
+  // Attach key handler when fullscreen toggles
+  $: if (typeof window !== 'undefined') {
+    if (chatbotFullscreen) {
+      window.addEventListener('keydown', handleChatbotFullscreenKeydown);
+    } else {
+      window.removeEventListener('keydown', handleChatbotFullscreenKeydown);
+    }
+  }
   
   async function loadLLMModels(forceRefresh = false) {
     try {
@@ -1600,57 +1692,101 @@
 
     {#if hasNavigation && currentPage === 7}
       <!-- Page 7: Chatbot (In-App) -->
-      <div class="chatbot-page h-full flex-1 w-full px-6 py-8">
-        <div class="mb-6 flex items-center justify-between flex-wrap gap-4">
-          <div>
-            <h2 class="text-2xl font-bold text-gray-900 flex items-center">
-              <i class="fas fa-comments mr-3 text-oxford-blue"></i>
-              Chatbot
-            </h2>
-            <p class="text-gray-600 mt-2">
-              Chat with this workflow using the same assistant your end-users see.
-            </p>
-          </div>
-        </div>
-
-        {#if loadingDeployment}
-          <div class="flex items-center justify-center min-h-96">
-            <div class="text-center">
-              <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
-              <p class="text-oxford-blue">Loading deployment information...</p>
-            </div>
-          </div>
-        {:else if !deployment || !deployment.workflow_id}
-          <div class="flex items-center justify-center min-h-96">
-            <div class="text-center max-w-md">
-              <div class="w-16 h-16 bg-gray-100 text-gray-400 rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
-                <i class="fas fa-robot text-2xl"></i>
-              </div>
-              <h3 class="text-xl font-bold text-gray-900 mb-2">No Deployment Found</h3>
-              <p class="text-gray-600 mb-4">
-                Chatbot requires an active deployment. Please deploy a workflow from the Deploy page first.
+      <div class={chatbotFullscreen ? 'fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/60' : 'chatbot-page h-full flex-1 w-full px-6 py-8'}>
+        <div class={chatbotFullscreen ? 'w-full max-w-6xl max-h-[95vh] bg-white rounded-2xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden p-6' : 'w-full h-full'}>
+          <div class="mb-4 flex items-center justify-between flex-wrap gap-4">
+            <div>
+              <h2 class="text-2xl font-bold text-gray-900 flex items-center">
+                <i class="fas fa-comments mr-3 text-oxford-blue"></i>
+                Chatbot
+              </h2>
+              <p class="text-gray-600 mt-2">
+                Chat with this workflow using the same assistant your end-users see.
               </p>
-              <button
-                class="px-4 py-2 bg-oxford-blue text-white rounded-lg hover:bg-blue-700 transition-colors"
-                on:click={() => goToPage(4)}
-              >
-                <i class="fas fa-rocket mr-2"></i>
-                Go to Deploy
-              </button>
             </div>
+
+            {#if deployment}
+              <div class="flex items-center gap-3 flex-wrap">
+                <!-- Session selector -->
+                <div class="flex items-center gap-2">
+                  <label class="text-sm text-gray-700 font-medium">
+                    Session
+                  </label>
+                  <select
+                    class="text-sm border border-gray-300 rounded-lg px-3 py-1.5 bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-oxford-blue focus:border-oxford-blue"
+                    on:change={handleChatbotSessionChange}
+                    bind:value={activeChatbotSessionId}
+                  >
+                    {#each chatbotSessions as session}
+                      <option value={session.id}>
+                        {session.label}
+                      </option>
+                    {/each}
+                  </select>
+                </div>
+
+                <!-- New conversation button -->
+                <button
+                  class="inline-flex items-center px-3 py-1.5 text-sm bg-oxford-blue text-white rounded-lg hover:bg-blue-900 transition-colors shadow-sm"
+                  on:click={handleNewChatbotConversation}
+                  title="Start a new conversation"
+                >
+                  <i class="fas fa-plus mr-2"></i>
+                  New Conversation
+                </button>
+
+                <!-- Fullscreen toggle -->
+                <button
+                  class="inline-flex items-center px-3 py-1.5 text-sm border border-gray-300 rounded-lg bg-white hover:bg-gray-100 text-gray-700 shadow-sm"
+                  on:click={toggleChatbotFullscreen}
+                  title={chatbotFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
+                >
+                  <i class={`fas ${chatbotFullscreen ? 'fa-compress-arrows-alt' : 'fa-expand-arrows-alt'} mr-2`}></i>
+                  {chatbotFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+                </button>
+              </div>
+            {/if}
           </div>
-        {:else}
-          <div class="bg-white rounded-2xl shadow-md border border-slate-200 h-[600px] md:h-[700px] xl:h-[780px] flex flex-col overflow-hidden">
-            <iframe
-              title="In-App Chatbot"
-              src={`/api/workflow-deploy/${projectId}/embed/`}
-              class="w-full h-full border-0"
-              loading="lazy"
-              referrerpolicy="no-referrer-when-downgrade"
-            >
-            </iframe>
-          </div>
-        {/if}
+
+          {#if loadingDeployment}
+            <div class="flex items-center justify-center min-h-96">
+              <div class="text-center">
+                <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
+                <p class="text-oxford-blue">Loading deployment information...</p>
+              </div>
+            </div>
+          {:else if !deployment || !deployment.workflow_id}
+            <div class="flex items-center justify-center min-h-96">
+              <div class="text-center max-w-md">
+                <div class="w-16 h-16 bg-gray-100 text-gray-400 rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
+                  <i class="fas fa-robot text-2xl"></i>
+                </div>
+                <h3 class="text-xl font-bold text-gray-900 mb-2">No Deployment Found</h3>
+                <p class="text-gray-600 mb-4">
+                  Chatbot requires an active deployment. Please deploy a workflow from the Deploy page first.
+                </p>
+                <button
+                  class="px-4 py-2 bg-oxford-blue text-white rounded-lg hover:bg-blue-700 transition-colors"
+                  on:click={() => goToPage(4)}
+                >
+                  <i class="fas fa-rocket mr-2"></i>
+                  Go to Deploy
+                </button>
+              </div>
+            </div>
+          {:else}
+            <div class={chatbotFullscreen ? 'flex-1 flex flex-col min-h-[400px]' : 'bg-white rounded-2xl shadow-md border border-slate-200 h-[600px] md:h-[700px] xl:h-[780px] flex flex-col overflow-hidden'}>
+              <iframe
+                title="In-App Chatbot"
+                src={`/api/workflow-deploy/${projectId}/embed/${activeChatbotSessionId ? `?session_id=${activeChatbotSessionId}` : ''}`}
+                class="w-full h-full border-0"
+                loading="lazy"
+                referrerpolicy="no-referrer-when-downgrade"
+              >
+              </iframe>
+            </div>
+          {/if}
+        </div>
       </div>
     {/if}
       </div>
