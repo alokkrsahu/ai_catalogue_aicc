@@ -29,8 +29,13 @@ class WorkflowDeploymentCORSMiddleware(MiddlewareMixin):
         """Process incoming requests to add CORS headers for deployment endpoints"""
         # Check if this is a deployment endpoint
         is_deployment_path = request.path.startswith('/api/workflow-deploy/')
-        
+
         if not is_deployment_path:
+            return None
+
+        # Skip CORS processing for embed HTML pages — they are loaded as page
+        # navigations (in iframes or directly), not as XHR/fetch API calls.
+        if '/embed/' in request.path:
             return None
         
         # Extract project_id from URL
@@ -69,8 +74,12 @@ class WorkflowDeploymentCORSMiddleware(MiddlewareMixin):
         """Add CORS headers to responses for deployment endpoints"""
         # Check if this is a deployment endpoint
         is_deployment_path = request.path.startswith('/api/workflow-deploy/')
-        
+
         if not is_deployment_path:
+            return response
+
+        # Skip CORS processing for embed HTML pages
+        if '/embed/' in request.path:
             return response
         
         # Extract project_id from URL
