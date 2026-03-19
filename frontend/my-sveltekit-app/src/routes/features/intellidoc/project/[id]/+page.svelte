@@ -740,9 +740,10 @@
   function goToPage(page: number) {
     if (hasNavigation && page >= 1 && page <= project.total_pages) {
       currentPage = page;
-      
+
       // Load deployment when navigating to Activity Tracker page (page 5)
-      if (page === 5 && !deployment && !loadingDeployment) {
+      // or Chatbot page (page 7)
+      if ((page === 5 || page === 7) && !deployment && !loadingDeployment) {
         loadDeployment();
       }
     }
@@ -1594,6 +1595,62 @@
             </div>
           {/await}
         {/key}
+      </div>
+    {/if}
+
+    {#if hasNavigation && currentPage === 7}
+      <!-- Page 7: Chatbot (In-App) -->
+      <div class="chatbot-page h-full flex-1 w-full px-6 py-8">
+        <div class="mb-6 flex items-center justify-between flex-wrap gap-4">
+          <div>
+            <h2 class="text-2xl font-bold text-gray-900 flex items-center">
+              <i class="fas fa-comments mr-3 text-oxford-blue"></i>
+              Chatbot
+            </h2>
+            <p class="text-gray-600 mt-2">
+              Chat with this workflow using the same assistant your end-users see.
+            </p>
+          </div>
+        </div>
+
+        {#if loadingDeployment}
+          <div class="flex items-center justify-center min-h-96">
+            <div class="text-center">
+              <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
+              <p class="text-oxford-blue">Loading deployment information...</p>
+            </div>
+          </div>
+        {:else if !deployment || !deployment.workflow_id}
+          <div class="flex items-center justify-center min-h-96">
+            <div class="text-center max-w-md">
+              <div class="w-16 h-16 bg-gray-100 text-gray-400 rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
+                <i class="fas fa-robot text-2xl"></i>
+              </div>
+              <h3 class="text-xl font-bold text-gray-900 mb-2">No Deployment Found</h3>
+              <p class="text-gray-600 mb-4">
+                Chatbot requires an active deployment. Please deploy a workflow from the Deploy page first.
+              </p>
+              <button
+                class="px-4 py-2 bg-oxford-blue text-white rounded-lg hover:bg-blue-700 transition-colors"
+                on:click={() => goToPage(4)}
+              >
+                <i class="fas fa-rocket mr-2"></i>
+                Go to Deploy
+              </button>
+            </div>
+          </div>
+        {:else}
+          <div class="bg-white rounded-2xl shadow-md border border-slate-200 h-[600px] md:h-[700px] xl:h-[780px] flex flex-col overflow-hidden">
+            <iframe
+              title="In-App Chatbot"
+              src={`/api/workflow-deploy/${projectId}/embed/`}
+              class="w-full h-full border-0"
+              loading="lazy"
+              referrerpolicy="no-referrer-when-downgrade"
+            >
+            </iframe>
+          </div>
+        {/if}
       </div>
     {/if}
       </div>

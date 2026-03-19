@@ -109,6 +109,13 @@ Navigate through different pages to access various features and capabilities.'''
                     'short_name': 'Performance',
                     'icon': 'fa-chart-bar',
                     'features': ['experiment_metrics', 'performance_analysis', 'system_evaluation']
+                },
+                {
+                    'page_number': 7,
+                    'name': 'Chatbot',
+                    'short_name': 'Chatbot',
+                    'icon': 'fa-comments',
+                    'features': ['in_app_chatbot']
                 }
             ],
             'processing_capabilities': {
