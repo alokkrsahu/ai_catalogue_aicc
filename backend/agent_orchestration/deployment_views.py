@@ -17,6 +17,7 @@ from typing import Dict, Any, Optional
 
 from django.http import JsonResponse, StreamingHttpResponse
 from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.clickjacking import xframe_options_exempt
 from django.views.decorators.http import require_http_methods
 from django.utils import timezone
 from django.views.decorators.cache import never_cache
@@ -1617,6 +1618,7 @@ def submit_deployment_human_input(request, project_id):
 
 
 @csrf_exempt
+@xframe_options_exempt
 def embed_chatbot_html(request, project_id):
     """
     Serve the chatbot HTML for iframe embedding.
