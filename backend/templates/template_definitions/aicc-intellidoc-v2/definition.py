@@ -66,7 +66,7 @@ Navigate through different pages to access various features and capabilities.'''
             'icon_class': 'fa-sitemap',
             'color_theme': 'oxford-blue',
             'has_navigation': True,
-            'total_pages': 6,
+            'total_pages': 7,
             'navigation_pages': [
                 {
                     'page_number': 1,
