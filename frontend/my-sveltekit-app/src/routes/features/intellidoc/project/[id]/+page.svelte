@@ -37,6 +37,11 @@
     deployment = null;
     apiKeyStatus = { hasValidKeys: false, missingProviders: [], checking: true };
     preserveOriginalFolderStructure = false;
+    documentsViewMode = 'list';
+    hierarchicalPaths = [];
+    folderBrowsePath = '';
+    loadingHierarchicalPaths = false;
+    hierarchicalPathsError = '';
     
     // 3. Clear search state (prevents search results from previous project)
     searchQuery = '';
@@ -154,6 +159,13 @@
   // Folder structure preservation setting
   let preserveOriginalFolderStructure = false;
   let updatingFolderStructureSetting = false;
+
+  // Document view mode: list (default grid) vs folder (hierarchical browser)
+  let documentsViewMode: 'list' | 'folder' = 'list';
+  let hierarchicalPaths: any[] = [];
+  let folderBrowsePath = '';
+  let loadingHierarchicalPaths = false;
+  let hierarchicalPathsError = '';
 
   // In-app chatbot session management
   type ChatbotSessionMeta = { id: string; label: string; createdAt: string; preview?: string; updatedAt?: string };
@@ -530,11 +542,12 @@
         capabilities: Object.keys(projectCapabilities)
       });
       
-      // Load documents, status, and check API keys
+      // Load documents, status, folder hierarchy, and check API keys
       await Promise.all([
         loadDocuments(),
         loadProcessingStatus(),
-        checkApiKeyStatus()
+        checkApiKeyStatus(),
+        loadHierarchicalPaths()
       ]);
       
     } catch (error) {
@@ -649,6 +662,20 @@
       toasts.error('Failed to load documents');
     }
   }
+
+  async function loadHierarchicalPaths() {
+    try {
+      loadingHierarchicalPaths = true;
+      hierarchicalPathsError = '';
+      const data = await cleanUniversalApi.getUploadedHierarchicalPaths(projectId);
+      hierarchicalPaths = data.hierarchical_paths || [];
+    } catch (error: any) {
+      console.error('❌ UNIVERSAL: Failed to load hierarchical paths:', error);
+      hierarchicalPathsError = error.message || 'Failed to load folder structure';
+    } finally {
+      loadingHierarchicalPaths = false;
+    }
+  }
   
   async function loadProcessingStatus() {
     if (statusRequestInFlight) {
@@ -718,6 +745,7 @@
       // Stop polling when we have a definitive completed/failed status AND not processing
       if (!shouldContinuePolling || pollingAttempts >= MAX_POLLING_ATTEMPTS) {
         stopStatusPolling();
+        loadHierarchicalPaths();
         if (status === 'completed') {
           toasts.success('Document processing completed!');
         } else if (status === 'failed' || status === 'error') {
@@ -863,8 +891,8 @@
         toasts.error('No files were uploaded successfully');
       }
       
-      // Reload documents
-      await loadDocuments();
+      // Reload documents and folder hierarchy
+      await Promise.all([loadDocuments(), loadHierarchicalPaths()]);
       
     } catch (error) {
       console.error('❌ UNIVERSAL: File upload failed:', error);
@@ -882,8 +910,8 @@
       console.log('✅ UNIVERSAL: Document deleted successfully');
       toasts.success(`Deleted "${documentName}" successfully`);
       
-      // Reload documents
-      await loadDocuments();
+      // Reload documents and folder hierarchy
+      await Promise.all([loadDocuments(), loadHierarchicalPaths()]);
       
     } catch (error) {
       console.error('❌ UNIVERSAL: Document deletion failed:', error);
@@ -1397,7 +1425,7 @@
               </div>
             </div>
             
-            <!-- Documents List -->
+            <!-- Documents List / Folder Browser -->
             <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
               <div class="px-6 py-4 bg-gray-50 border-b border-gray-200">
                 <div class="flex items-center justify-between">
@@ -1406,71 +1434,246 @@
                     Documents
                     <span class="ml-2 bg-oxford-blue text-white text-sm px-2 py-1 rounded-full">{uploadedDocuments.length}</span>
                   </h2>
-                  {#if uploadedDocuments.length > 0}
-                    <div class="text-sm text-gray-500">
-                      Total: {uploadedDocuments.reduce((total, doc) => total + (doc.file_size || 0), 0) > 1024 * 1024 ? 
-                        Math.round(uploadedDocuments.reduce((total, doc) => total + (doc.file_size || 0), 0) / (1024 * 1024)) + ' MB' : 
-                        Math.round(uploadedDocuments.reduce((total, doc) => total + (doc.file_size || 0), 0) / 1024) + ' KB'}
+                  <div class="flex items-center gap-3">
+                    {#if uploadedDocuments.length > 0}
+                      <span class="text-sm text-gray-500">
+                        Total: {uploadedDocuments.reduce((total, doc) => total + (doc.file_size || 0), 0) > 1024 * 1024
+                          ? Math.round(uploadedDocuments.reduce((total, doc) => total + (doc.file_size || 0), 0) / (1024 * 1024)) + ' MB'
+                          : Math.round(uploadedDocuments.reduce((total, doc) => total + (doc.file_size || 0), 0) / 1024) + ' KB'}
+                      </span>
+                    {/if}
+                    <!-- View mode segmented control -->
+                    <div class="inline-flex rounded-lg border border-gray-300 bg-white overflow-hidden text-sm">
+                      <button
+                        class="px-3 py-1.5 flex items-center gap-1.5 transition-colors {documentsViewMode === 'list' ? 'bg-oxford-blue text-white' : 'text-gray-600 hover:bg-gray-100'}"
+                        on:click={() => documentsViewMode = 'list'}
+                      >
+                        <i class="fas fa-list text-xs"></i> List
+                      </button>
+                      <button
+                        class="px-3 py-1.5 flex items-center gap-1.5 transition-colors border-l border-gray-300 {documentsViewMode === 'folder' ? 'bg-oxford-blue text-white' : 'text-gray-600 hover:bg-gray-100'}"
+                        on:click={() => { documentsViewMode = 'folder'; folderBrowsePath = ''; }}
+                      >
+                        <i class="fas fa-folder-tree text-xs"></i> Folders
+                      </button>
                     </div>
-                  {/if}
+                  </div>
                 </div>
               </div>
               
               <div class="p-6">
-                {#if uploadedDocuments.length === 0}
-                  <div class="text-center py-12">
-                    <i class="fas fa-folder-open text-5xl text-gray-300 mb-4"></i>
-                    <h3 class="text-lg font-medium text-gray-700 mb-2">No documents uploaded yet</h3>
-                    <p class="text-gray-500">Upload documents to get started with AI analysis</p>
-                  </div>
-                {:else}
-                  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                    {#each uploadedDocuments as doc}
-                      <div class="flex items-start p-4 border border-gray-200 rounded-lg hover:border-oxford-blue hover:shadow-md transition-all duration-200 group">
-                        <div class="flex-shrink-0 w-10 h-10 bg-gradient-to-br from-oxford-blue to-blue-600 text-white rounded-lg flex items-center justify-center mr-4">
-                          <i class="fas fa-file text-sm"></i>
-                        </div>
-                        <div class="flex-1 min-w-0">
-                          <p class="font-medium text-gray-900 truncate">{doc.original_filename || doc.filename}</p>
-                          <div class="flex items-center text-sm text-gray-500 mt-1 space-x-4">
-                            <span class="flex items-center">
-                              <i class="fas fa-weight-hanging mr-1"></i>
-                              {doc.file_size_formatted || 'Unknown size'}
-                            </span>
-                            <span class="flex items-center">
-                              <i class="fas fa-circle mr-1 {doc.upload_status === 'ready' ? 'text-green-500' : 'text-yellow-500'}"></i>
-                              {doc.upload_status || 'ready'}
-                            </span>
+                {#if documentsViewMode === 'list'}
+                  <!-- LIST VIEW (original grid) -->
+                  {#if uploadedDocuments.length === 0}
+                    <div class="text-center py-12">
+                      <i class="fas fa-folder-open text-5xl text-gray-300 mb-4"></i>
+                      <h3 class="text-lg font-medium text-gray-700 mb-2">No documents uploaded yet</h3>
+                      <p class="text-gray-500">Upload documents to get started with AI analysis</p>
+                    </div>
+                  {:else}
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                      {#each uploadedDocuments as doc}
+                        <div class="flex items-start p-4 border border-gray-200 rounded-lg hover:border-oxford-blue hover:shadow-md transition-all duration-200 group">
+                          <div class="flex-shrink-0 w-10 h-10 bg-gradient-to-br from-oxford-blue to-blue-600 text-white rounded-lg flex items-center justify-center mr-4">
+                            <i class="fas fa-file text-sm"></i>
+                          </div>
+                          <div class="flex-1 min-w-0">
+                            <p class="font-medium text-gray-900 truncate">{doc.original_filename || doc.filename}</p>
+                            <div class="flex items-center text-sm text-gray-500 mt-1 space-x-4">
+                              <span class="flex items-center">
+                                <i class="fas fa-weight-hanging mr-1"></i>
+                                {doc.file_size_formatted || 'Unknown size'}
+                              </span>
+                              <span class="flex items-center">
+                                <i class="fas fa-circle mr-1 {doc.upload_status === 'ready' ? 'text-green-500' : 'text-yellow-500'}"></i>
+                                {doc.upload_status || 'ready'}
+                              </span>
+                            </div>
+                          </div>
+                          <div class="opacity-0 group-hover:opacity-100 transition-all duration-200 ml-2 flex items-center space-x-2">
+                            {#if doc.download_url || doc.document_id}
+                              <button
+                                class="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                                title="View document"
+                                on:click={() => viewDocument(doc)}
+                              >
+                                <i class="fas fa-eye text-sm"></i>
+                              </button>
+                              <button
+                                class="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
+                                title="Download document"
+                                on:click={() => downloadDocument(doc)}
+                              >
+                                <i class="fas fa-download text-sm"></i>
+                              </button>
+                            {/if}
+                            <AdminDeleteButton
+                              size="small"
+                              itemName={doc.original_filename || doc.filename}
+                              on:delete={() => deleteDocument(doc.document_id || doc.id, doc.original_filename || doc.filename)}
+                            />
                           </div>
                         </div>
-                        <div class="opacity-0 group-hover:opacity-100 transition-all duration-200 ml-2 flex items-center space-x-2">
-                          <!-- View/Preview Button -->
-                          {#if doc.download_url || doc.document_id}
-                            <button
-                              class="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
-                              title="View document"
-                              on:click={() => viewDocument(doc)}
-                            >
-                              <i class="fas fa-eye text-sm"></i>
-                            </button>
-                            <!-- Download Button -->
-                            <button
-                              class="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
-                              title="Download document"
-                              on:click={() => downloadDocument(doc)}
-                            >
-                              <i class="fas fa-download text-sm"></i>
-                            </button>
-                          {/if}
-                          <AdminDeleteButton
-                            size="small"
-                            itemName={doc.original_filename || doc.filename}
-                            on:delete={() => deleteDocument(doc.document_id || doc.id, doc.original_filename || doc.filename)}
-                          />
-                        </div>
+                      {/each}
+                    </div>
+                  {/if}
+                {:else}
+                  <!-- FOLDER VIEW -->
+                  {#if loadingHierarchicalPaths}
+                    <div class="flex items-center justify-center py-12">
+                      <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-oxford-blue mr-3"></div>
+                      <span class="text-gray-500">Loading folder structure...</span>
+                    </div>
+                  {:else if hierarchicalPathsError}
+                    <div class="text-center py-12">
+                      <i class="fas fa-exclamation-triangle text-4xl text-red-300 mb-4"></i>
+                      <h3 class="text-lg font-medium text-gray-700 mb-2">Failed to load folders</h3>
+                      <p class="text-gray-500 mb-4">{hierarchicalPathsError}</p>
+                      <button
+                        class="px-4 py-2 bg-oxford-blue text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+                        on:click={loadHierarchicalPaths}
+                      >
+                        <i class="fas fa-redo mr-2"></i>Retry
+                      </button>
+                    </div>
+                  {:else if hierarchicalPaths.length === 0}
+                    <div class="text-center py-12">
+                      <i class="fas fa-folder-open text-5xl text-gray-300 mb-4"></i>
+                      <h3 class="text-lg font-medium text-gray-700 mb-2">No folder structure yet</h3>
+                      <p class="text-gray-500">
+                        {#if preserveOriginalFolderStructure}
+                          Run <strong>Start Processing</strong> to generate AI-based folder classification.
+                        {:else}
+                          Upload documents to see folder structure.
+                        {/if}
+                      </p>
+                    </div>
+                  {:else}
+                    <!-- Breadcrumb -->
+                    <nav class="flex items-center text-sm mb-4 flex-wrap gap-1">
+                      <button
+                        class="hover:text-oxford-blue transition-colors {folderBrowsePath === '' ? 'text-oxford-blue font-semibold' : 'text-gray-500'}"
+                        on:click={() => folderBrowsePath = ''}
+                      >
+                        <i class="fas fa-home mr-1"></i>Root
+                      </button>
+                      {#each folderBrowsePath.split('/').filter(Boolean) as segment, i}
+                        <span class="text-gray-400">/</span>
+                        <button
+                          class="hover:text-oxford-blue transition-colors {i === folderBrowsePath.split('/').filter(Boolean).length - 1 ? 'text-oxford-blue font-semibold' : 'text-gray-500'}"
+                          on:click={() => folderBrowsePath = folderBrowsePath.split('/').filter(Boolean).slice(0, i + 1).join('/')}
+                        >
+                          {segment}
+                        </button>
+                      {/each}
+                    </nav>
+
+                    <!-- Back button when inside a folder -->
+                    {#if folderBrowsePath !== ''}
+                      <button
+                        class="flex items-center gap-2 text-sm text-gray-500 hover:text-oxford-blue mb-3 transition-colors"
+                        on:click={() => {
+                          const parts = folderBrowsePath.split('/').filter(Boolean);
+                          parts.pop();
+                          folderBrowsePath = parts.join('/');
+                        }}
+                      >
+                        <i class="fas fa-arrow-left"></i> Back
+                      </button>
+                    {/if}
+
+                    {@const currentFolders = hierarchicalPaths.filter(item =>
+                      item.type === 'folder' && (() => {
+                        const itemPath = item.path || '';
+                        if (folderBrowsePath === '') {
+                          return itemPath !== '' && !itemPath.includes('/');
+                        }
+                        return itemPath.startsWith(folderBrowsePath + '/') && !itemPath.slice(folderBrowsePath.length + 1).includes('/');
+                      })()
+                    )}
+                    {@const currentFiles = hierarchicalPaths.filter(item =>
+                      item.type === 'file' && (item.path || '') === folderBrowsePath
+                    )}
+
+                    {#if currentFolders.length === 0 && currentFiles.length === 0}
+                      <div class="text-center py-8 text-gray-400">
+                        <i class="fas fa-folder-open text-3xl mb-2"></i>
+                        <p class="text-sm">This folder is empty</p>
                       </div>
-                    {/each}
-                  </div>
+                    {:else}
+                      <div class="space-y-2">
+                        <!-- Folders -->
+                        {#each currentFolders as folder}
+                          <button
+                            class="w-full flex items-center p-3 border border-gray-200 rounded-lg hover:border-oxford-blue hover:bg-blue-50/40 transition-all duration-200 text-left group"
+                            on:dblclick={() => folderBrowsePath = folder.path}
+                            on:click={() => folderBrowsePath = folder.path}
+                          >
+                            <div class="flex-shrink-0 w-10 h-10 bg-amber-100 text-amber-600 rounded-lg flex items-center justify-center mr-4">
+                              <i class="fas fa-folder text-lg"></i>
+                            </div>
+                            <div class="flex-1 min-w-0">
+                              <p class="font-medium text-gray-900">{folder.displayName?.split('/').pop() || folder.name}</p>
+                              <p class="text-xs text-gray-400 mt-0.5">
+                                {hierarchicalPaths.filter(f => f.type === 'file' && (f.path || '') === folder.path).length} file(s)
+                              </p>
+                            </div>
+                            <i class="fas fa-chevron-right text-gray-300 group-hover:text-oxford-blue transition-colors"></i>
+                          </button>
+                        {/each}
+
+                        <!-- Files -->
+                        {#each currentFiles as file}
+                          {@const matchedDoc = uploadedDocuments.find(d => String(d.document_id) === file.document_id || d.original_filename === file.name)}
+                          <div class="flex items-center p-3 border border-gray-200 rounded-lg hover:border-oxford-blue hover:shadow-md transition-all duration-200 group">
+                            <div class="flex-shrink-0 w-10 h-10 bg-gradient-to-br from-oxford-blue to-blue-600 text-white rounded-lg flex items-center justify-center mr-4">
+                              <i class="fas fa-file text-sm"></i>
+                            </div>
+                            <div class="flex-1 min-w-0">
+                              <p class="font-medium text-gray-900 truncate">{file.displayName?.split('/').pop() || file.name}</p>
+                              {#if matchedDoc}
+                                <div class="flex items-center text-sm text-gray-500 mt-0.5 space-x-4">
+                                  <span class="flex items-center">
+                                    <i class="fas fa-weight-hanging mr-1"></i>
+                                    {matchedDoc.file_size_formatted || 'Unknown size'}
+                                  </span>
+                                  <span class="flex items-center">
+                                    <i class="fas fa-circle mr-1 {matchedDoc.upload_status === 'ready' ? 'text-green-500' : 'text-yellow-500'}"></i>
+                                    {matchedDoc.upload_status || 'ready'}
+                                  </span>
+                                </div>
+                              {/if}
+                            </div>
+                            <div class="opacity-0 group-hover:opacity-100 transition-all duration-200 ml-2 flex items-center space-x-2">
+                              {#if matchedDoc && (matchedDoc.download_url || matchedDoc.document_id)}
+                                <button
+                                  class="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                                  title="View document"
+                                  on:click={() => viewDocument(matchedDoc)}
+                                >
+                                  <i class="fas fa-eye text-sm"></i>
+                                </button>
+                                <button
+                                  class="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
+                                  title="Download document"
+                                  on:click={() => downloadDocument(matchedDoc)}
+                                >
+                                  <i class="fas fa-download text-sm"></i>
+                                </button>
+                              {/if}
+                              {#if matchedDoc}
+                                <AdminDeleteButton
+                                  size="small"
+                                  itemName={matchedDoc.original_filename || matchedDoc.filename}
+                                  on:delete={() => deleteDocument(matchedDoc.document_id || matchedDoc.id, matchedDoc.original_filename || matchedDoc.filename)}
+                                />
+                              {/if}
+                            </div>
+                          </div>
+                        {/each}
+                      </div>
+                    {/if}
+                  {/if}
                 {/if}
               </div>
             </div>

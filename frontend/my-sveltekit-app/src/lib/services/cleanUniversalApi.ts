@@ -1146,6 +1146,30 @@ export class CleanUniversalApiService {
   }
 
   // ============================================================================
+  // DOCUMENT FOLDER HIERARCHY
+  // ============================================================================
+
+  /**
+   * Get uploaded hierarchical paths (folders + files) for the project.
+   * Uses LLM folder organization when Auto Folder Classification is enabled.
+   */
+  async getUploadedHierarchicalPaths(projectId: string): Promise<{ hierarchical_paths: any[]; folders_count: number; files_count: number }> {
+    const url = `${API_BASE}/agent-orchestration/docaware/uploaded_hierarchical_paths/?project_id=${projectId}&include_files=true&include_llm_status=false`;
+
+    const response = await this.handleAuthenticatedRequest(url, {
+      method: 'GET',
+      headers: this.getAuthHeaders(),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Get hierarchical paths failed: ${response.status}`);
+    }
+
+    return await response.json();
+  }
+
+  // ============================================================================
   // SYSTEM PERFORMANCE ANALYSIS
   // ============================================================================
 
