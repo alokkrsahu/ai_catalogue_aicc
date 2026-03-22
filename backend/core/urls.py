@@ -134,10 +134,15 @@ urlpatterns = [
         'post': 'upload_file_attachment'
     }), name='project-workflow-upload-file-attachment'),
 
+    # Document summary endpoint (explicit registration — router version not matched in live server)
+    path('api/projects/<uuid:project_id>/documents/<uuid:document_id>/summary/', UniversalProjectViewSet.as_view({
+        'get': 'document_summary'
+    }), name='project-document-summary'),
+
     # PHASE 3: Universal Processing Endpoints (Consolidated via UniversalProjectViewSet)
     # All processing now handled through UniversalProjectViewSet actions:
     # - /api/projects/{project_id}/process_documents/ (POST)
-    # - /api/projects/{project_id}/search/ (POST) 
+    # - /api/projects/{project_id}/search/ (POST)
     # - /api/projects/{project_id}/vector_status/ (GET)
     # - /api/projects/{project_id}/capabilities/ (GET)
     # - /api/projects/{project_id}/documents/ (GET)

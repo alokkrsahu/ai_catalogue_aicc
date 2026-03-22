@@ -4,7 +4,9 @@ Document Tool Service — exposes project documents as LLM-callable tools.
 Each uploaded document becomes a tool whose description is the document's
 short summary.  When an agent invokes a tool the service sends the full
 document (via provider File API) together with the agent's query to the
-LLM and returns the extracted answer.
+LLM and returns the extracted answer.  The execution prompt also includes
+``long_summary`` (or ``short_summary`` if long is empty) plus prior
+``memory`` entries when present.
 
 Memory: every tool-call result is persisted as a memory entry on the
 document's ``ProjectDocumentSummary.memory`` JSONField so that future
@@ -36,6 +38,23 @@ PROVIDER_FILE_FIELD = {
 MAX_TOOL_NAME_LEN = 64
 CONDENSATION_THRESHOLD = 15
 KEEP_RECENT_ENTRIES = 5
+# Cap overview text in execute_document_tool system prompt (long_summary / short fallback).
+MAX_DOCUMENT_OVERVIEW_CHARS = 14000
+
+
+def _maybe_truncate_document_overview(text: str, max_chars: int = MAX_DOCUMENT_OVERVIEW_CHARS) -> str:
+    """Truncate very long summaries so small-model context is not dominated."""
+    if len(text) <= max_chars:
+        return text
+    logger.info(
+        "📄 DOC TOOL EXEC: Document overview truncated from %s to %s chars",
+        len(text),
+        max_chars,
+    )
+    return (
+        text[:max_chars]
+        + "\n\n[... Document overview truncated due to length; the full document is attached.]"
+    )
 
 
 # ── helpers ──────────────────────────────────────────────────────────
@@ -383,6 +402,10 @@ async def execute_document_tool(
     Execute a document tool call: send the full document + query to the
     LLM via the provider's File API and return the answer text.
 
+    The system prompt includes (when available): ``long_summary`` with
+    ``short_summary`` as fallback, then prior ``memory`` entries, then
+    citation instructions.
+
     Side effects:
     - Appends a memory entry to ``ProjectDocumentSummary.memory``.
     - On first call, extracts bibliographic citation metadata.
@@ -425,11 +448,27 @@ async def execute_document_tool(
 
     memory_context = _format_memory_for_prompt(existing_memory)
 
-    # ── Build system prompt with memory + citation instructions ──
+    overview_text = ""
+    if doc_summary:
+        overview_text = (doc_summary.long_summary or "").strip() or (
+            doc_summary.short_summary or ""
+        ).strip()
+    if overview_text:
+        overview_text = _maybe_truncate_document_overview(overview_text)
+
+    # ── Build system prompt: overview → memory → citation instructions ──
     system_parts = [
         "You are a document analysis assistant. Extract the requested "
         "information from the attached document. Be precise and thorough."
     ]
+
+    if overview_text:
+        system_parts.append(
+            "\nDOCUMENT OVERVIEW (from prior analysis):\n"
+            f"{overview_text}\n"
+            "Use this overview to focus your answer; always ground claims in the "
+            "attached document."
+        )
 
     if memory_context:
         system_parts.append(

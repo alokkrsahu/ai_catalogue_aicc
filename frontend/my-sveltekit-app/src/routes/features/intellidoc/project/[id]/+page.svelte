@@ -131,6 +131,22 @@
   
   // API Management modal state
   let showApiManagement = false;
+
+  // Document AI summary modal (long/short from ProjectDocumentSummary)
+  let summaryModalOpen = false;
+  let summaryLoading = false;
+  let summaryError = '';
+  let summaryModalTitle = '';
+  let summaryData: {
+    long_summary: string;
+    short_summary: string;
+    has_summary: boolean;
+    message: string;
+    generated_at: string | null;
+    updated_at: string | null;
+    llm_provider: string;
+    llm_model: string;
+  } | null = null;
   
   // API Key status state
   let apiKeyStatus: {
@@ -924,6 +940,40 @@
     return {};
   }
 
+  function closeSummaryModal() {
+    summaryModalOpen = false;
+    summaryLoading = false;
+    summaryError = '';
+    summaryData = null;
+    summaryModalTitle = '';
+  }
+
+  async function openDocumentSummary(doc: any) {
+    const did = doc.document_id || doc.id;
+    if (!did || !projectId) return;
+    summaryModalTitle = doc.original_filename || doc.filename || 'Document';
+    summaryModalOpen = true;
+    summaryLoading = true;
+    summaryError = '';
+    summaryData = null;
+    try {
+      summaryData = await cleanUniversalApi.getDocumentSummary(projectId, String(did));
+    } catch (e: any) {
+      summaryError = e?.message || 'Failed to load summary';
+      toasts.error(summaryError);
+    } finally {
+      summaryLoading = false;
+    }
+  }
+
+  function handleSummaryModalKeydown(e: KeyboardEvent) {
+    if (!summaryModalOpen) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeSummaryModal();
+    }
+  }
+
   async function viewDocument(doc: any) {
     const downloadUrl = doc.download_url || `/api/projects/${projectId}/documents/${doc.document_id || doc.id}/download/`;
     const previewableExtensions = ['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.txt'];
@@ -1467,7 +1517,18 @@
                   {:else}
                     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
                       {#each uploadedDocuments as doc}
-                        <div class="flex items-start p-4 border border-gray-200 rounded-lg hover:border-oxford-blue hover:shadow-md transition-all duration-200 group">
+                        <div
+                          class="flex items-start p-4 border border-gray-200 rounded-lg hover:border-oxford-blue hover:shadow-md transition-all duration-200 group cursor-pointer"
+                          role="button"
+                          tabindex="0"
+                          on:click={() => openDocumentSummary(doc)}
+                          on:keydown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              openDocumentSummary(doc);
+                            }
+                          }}
+                        >
                           <div class="flex-shrink-0 w-10 h-10 bg-gradient-to-br from-oxford-blue to-blue-600 text-white rounded-lg flex items-center justify-center mr-4">
                             <i class="fas fa-file text-sm"></i>
                           </div>
@@ -1483,8 +1544,13 @@
                                 {doc.upload_status || 'ready'}
                               </span>
                             </div>
+                            <p class="text-xs text-oxford-blue mt-1">Click to view AI summary</p>
                           </div>
-                          <div class="opacity-0 group-hover:opacity-100 transition-all duration-200 ml-2 flex items-center space-x-2">
+                          <div
+                            class="opacity-0 group-hover:opacity-100 transition-all duration-200 ml-2 flex items-center space-x-2"
+                            on:click|stopPropagation
+                            on:keydown|stopPropagation
+                          >
                             {#if doc.download_url || doc.document_id}
                               <button
                                 class="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
@@ -1634,7 +1700,18 @@
                         <!-- Files -->
                         {#each currentFiles as file}
                           {@const matchedDoc = uploadedDocuments.find(d => String(d.document_id) === file.document_id || d.original_filename === file.name)}
-                          <div class="flex items-center p-3 border border-gray-200 rounded-lg hover:border-oxford-blue hover:shadow-md transition-all duration-200 group">
+                          <div
+                            class="flex items-center p-3 border border-gray-200 rounded-lg hover:border-oxford-blue hover:shadow-md transition-all duration-200 group cursor-pointer"
+                            role="button"
+                            tabindex="0"
+                            on:click={() => matchedDoc && openDocumentSummary(matchedDoc)}
+                            on:keydown={(e) => {
+                              if (matchedDoc && (e.key === 'Enter' || e.key === ' ')) {
+                                e.preventDefault();
+                                openDocumentSummary(matchedDoc);
+                              }
+                            }}
+                          >
                             <div class="flex-shrink-0 w-10 h-10 bg-gradient-to-br from-oxford-blue to-blue-600 text-white rounded-lg flex items-center justify-center mr-4">
                               <i class="fas fa-file text-sm"></i>
                             </div>
@@ -1651,9 +1728,14 @@
                                     {matchedDoc.upload_status || 'ready'}
                                   </span>
                                 </div>
+                                <p class="text-xs text-oxford-blue mt-0.5">Click to view AI summary</p>
                               {/if}
                             </div>
-                            <div class="opacity-0 group-hover:opacity-100 transition-all duration-200 ml-2 flex items-center space-x-2">
+                            <div
+                              class="opacity-0 group-hover:opacity-100 transition-all duration-200 ml-2 flex items-center space-x-2"
+                              on:click|stopPropagation
+                              on:keydown|stopPropagation
+                            >
                               {#if matchedDoc && (matchedDoc.download_url || matchedDoc.document_id)}
                                 <button
                                   class="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
@@ -2399,6 +2481,92 @@
     }
   }
 </style>
+
+<svelte:window on:keydown={handleSummaryModalKeydown} />
+
+<!-- Document AI summary modal -->
+{#if summaryModalOpen}
+  <div
+    class="fixed inset-0 z-[10000] flex items-center justify-center p-4"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="doc-summary-modal-title"
+  >
+    <button
+      type="button"
+      class="absolute inset-0 bg-black/50 cursor-default border-0 w-full h-full"
+      aria-label="Close summary"
+      on:click={closeSummaryModal}
+    ></button>
+    <div
+      class="relative bg-white rounded-xl shadow-2xl max-w-3xl w-full max-h-[85vh] flex flex-col border border-gray-200 z-10"
+    >
+      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-200 bg-gray-50 rounded-t-xl">
+        <h2 id="doc-summary-modal-title" class="text-lg font-semibold text-gray-900 truncate pr-4">
+          AI summary — {summaryModalTitle}
+        </h2>
+        <button
+          type="button"
+          class="p-2 text-gray-500 hover:text-gray-800 hover:bg-gray-200 rounded-lg transition-colors"
+          aria-label="Close"
+          on:click={closeSummaryModal}
+        >
+          <i class="fas fa-times text-lg"></i>
+        </button>
+      </div>
+      <div class="overflow-y-auto flex-1 px-5 py-4 text-sm text-gray-800">
+        {#if summaryLoading}
+          <div class="flex flex-col items-center justify-center py-16 text-gray-500">
+            <div class="animate-spin rounded-full h-10 w-10 border-b-2 border-oxford-blue mb-3"></div>
+            <p>Loading summary…</p>
+          </div>
+        {:else if summaryError}
+          <p class="text-red-600">{summaryError}</p>
+        {:else if summaryData}
+          {#if summaryData.has_summary}
+            {#if summaryData.short_summary && summaryData.long_summary}
+              <div class="mb-6">
+                <h3 class="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">Short overview</h3>
+                <p class="whitespace-pre-wrap text-gray-700 border border-gray-100 rounded-lg p-3 bg-gray-50/80">
+                  {summaryData.short_summary}
+                </p>
+              </div>
+              <div>
+                <h3 class="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">Full summary</h3>
+                <div class="whitespace-pre-wrap text-gray-800 leading-relaxed border border-gray-100 rounded-lg p-3 bg-white">
+                  {summaryData.long_summary}
+                </div>
+              </div>
+            {:else if summaryData.long_summary}
+              <div class="whitespace-pre-wrap text-gray-800 leading-relaxed">
+                {summaryData.long_summary}
+              </div>
+            {:else if summaryData.short_summary}
+              <p class="text-gray-600 mb-2">No long summary stored yet. Showing short summary:</p>
+              <div class="whitespace-pre-wrap text-gray-800 leading-relaxed border border-gray-100 rounded-lg p-3 bg-gray-50/80">
+                {summaryData.short_summary}
+              </div>
+            {/if}
+            {#if summaryData.generated_at || summaryData.llm_provider}
+              <p class="mt-6 text-xs text-gray-400 border-t border-gray-100 pt-3">
+                {#if summaryData.generated_at}
+                  Generated: {new Date(summaryData.generated_at).toLocaleString()}
+                {/if}
+                {#if summaryData.llm_provider}
+                  <span class="ml-2">
+                    · {summaryData.llm_provider}{summaryData.llm_model ? ` / ${summaryData.llm_model}` : ''}
+                  </span>
+                {/if}
+              </p>
+            {/if}
+          {:else}
+            <p class="text-gray-600">{summaryData.message || 'No AI summary available for this document yet.'}</p>
+          {/if}
+        {/if}
+      </div>
+    </div>
+  </div>
+{/if}
 
 <!-- API Management Modal -->
 <ApiManagement 

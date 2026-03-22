@@ -19,8 +19,16 @@ AI Catalogue (AICC-IntelliDoc) — a full-stack AI document analysis platform. U
 ### Full Stack (Docker — recommended)
 ```bash
 cp .env.example .env          # Configure API keys and credentials
-./scripts/start-dev.sh        # Start all services with hot reload
+./scripts/start-dev.sh        # Start all services with hot reload (~8-12 min first run)
 docker compose down            # Stop all services
+```
+
+### Deployment (after changes are live)
+See `scripts/SCRIPTS.md` for the full decision table. Short version:
+```bash
+./scripts/quick-deploy.sh     # Code-only changes (.py/.svelte/.ts), ~2s downtime
+./scripts/rebuild-deploy.sh   # New pip/npm packages or Dockerfile changes, ~10s downtime
+./scripts/start-dev.sh        # Fresh infra (docker-compose changes, new DB version)
 ```
 
 ### Backend (standalone)
@@ -88,6 +96,9 @@ All APIs are under `/api/`. Key endpoints:
 - `/api/llm/` — Multi-provider LLM configuration
 - `/api/project-api-keys/` — Per-project API key management
 - `/api/public-chatbot/` — Public chatbot (isolated)
+- `/api/workflow-deploy/{project_id}/` — Public deployment endpoints (no auth required)
+- `/api/mcp-servers/` — MCP server integration
+- `/api/templates/discover/`, `/api/templates/endpoints/`, `/api/templates/refresh/` — Dynamic template URL registration
 
 ### Data Flow
 1. Documents uploaded → backend processes and indexes in Milvus (vector embeddings via `all-MiniLM-L6-v2`, 384 dims)
@@ -104,9 +115,14 @@ postgres, redis, etcd, minio, milvus, chromadb, backend, frontend, nginx — all
 - **Custom User model**: Always reference `users.User`, never `auth.User`.
 - **Project-scoped resources**: Workflows, documents, API keys are all scoped under a project UUID. URLs follow `/api/projects/{project_id}/...` nesting.
 - **Encryption**: API keys stored with Fernet encryption. Keys come from `API_KEY_ENCRYPTION_KEY` and `PROJECT_API_KEY_ENCRYPTION_KEY` env vars.
-- **CORS**: Three layers — `PublicChatbotCORSMiddleware`, `WorkflowDeploymentCORSMiddleware`, then `corsheaders.CorsMiddleware`. Order matters in `settings.py` MIDDLEWARE.
+- **CORS**: Three layers — `PublicChatbotCORSMiddleware`, `WorkflowDeploymentCORSMiddleware`, then `corsheaders.CorsMiddleware`. Order matters in `settings.py` MIDDLEWARE. Custom CORS middleware must come before `corsheaders.CorsMiddleware`.
 - **Embedding model**: SentenceTransformers `all-MiniLM-L6-v2` (384-dim vectors). Configured in `settings.py`.
+- **WebSocket rooms**: `AgentOrchestrationConsumer` uses project-scoped channel groups (`agent_orchestration_{project_id}`). Key message types: `workflow_connected` (handshake), `ping`/`pong` (keep-alive), `human_input_response` (human-in-the-loop), `execution_control` (pause/cancel).
+- **Dynamic template URLs**: The `templates/` app registers project-type-specific URL patterns at runtime via `include_template_urls()`. If a template's URLs fail to load, `core/urls.py` has a hardcoded JSON fallback for AICC-IntelliDoc.
+- **Tests**: No formal test framework configured. Ad-hoc test scripts live in `backend/` (e.g., `test_workflow_api.py`, `test_cors.py`, `test_conversation_workflow.py`) and are run directly with `python <file>.py`.
 
 ## Environment Variables
 
 Copy `.env.example` to `.env`. Critical variables: `DB_*` (PostgreSQL), `MILVUS_*`, `DJANGO_SECRET_KEY`, `API_KEY_ENCRYPTION_KEY`, `PROJECT_API_KEY_ENCRYPTION_KEY`, LLM API keys (`GOOGLE_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`), `CORS_ALLOWED_ORIGINS`, `CSRF_TRUSTED_ORIGINS`.
+
+Runtime env vars set automatically in code (no `.env` needed): `TOKENIZERS_PARALLELISM=false` (prevents HuggingFace warnings), `PYTORCH_ENABLE_MPS_FALLBACK=1` (Mac M1/M2 GPU fallback), `HF_HUB_DOWNLOAD_TIMEOUT=300` (prevents model download timeouts).

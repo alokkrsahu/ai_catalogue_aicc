@@ -255,6 +255,42 @@ export class CleanUniversalApiService {
   }
 
   /**
+   * Get AI-generated long/short summaries for a single document.
+   */
+  async getDocumentSummary(
+    projectId: string,
+    documentId: string
+  ): Promise<{
+    document_id: string;
+    original_filename: string;
+    long_summary: string;
+    short_summary: string;
+    has_summary: boolean;
+    generated_at: string | null;
+    updated_at: string | null;
+    llm_provider: string;
+    llm_model: string;
+    message: string;
+    api_version?: string;
+  }> {
+    const url = `${API_BASE}/projects/${projectId}/documents/${documentId}/summary/`;
+
+    const response = await this.handleAuthenticatedRequest(url, {
+      method: 'GET',
+      headers: this.getAuthHeaders(),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(
+        errorData.detail || errorData.error || `Get document summary failed: ${response.status}`
+      );
+    }
+
+    return await response.json();
+  }
+
+  /**
    * Upload documents (Universal endpoint)
    */
   async uploadDocument(projectId: string, file: File): Promise<any> {

@@ -13,7 +13,14 @@ from django.core.files.base import ContentFile
 from django.http import FileResponse, Http404
 from asgiref.sync import async_to_sync
 import mimetypes
-from users.models import IntelliDocProject, ProjectDocument, AgentWorkflow, SimulationRun, AgentMessage
+from users.models import (
+    IntelliDocProject,
+    ProjectDocument,
+    ProjectDocumentSummary,
+    AgentWorkflow,
+    SimulationRun,
+    AgentMessage,
+)
 from templates.discovery import TemplateDiscoverySystem
 from .serializers import IntelliDocProjectSerializer, ProjectDocumentSerializer
 from .template_cloning_utils import clone_template_configuration
@@ -1032,6 +1039,75 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                 'error': 'Download failed',
                 'detail': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=True, methods=['get'], url_path='documents/(?P<document_id>[^/.]+)/summary')
+    def document_summary(self, request, project_id=None, document_id=None):
+        """Return AI-generated long/short summaries for a project document."""
+        project = self.get_object()
+        try:
+            document = ProjectDocument.objects.get(
+                document_id=document_id,
+                project=project,
+            )
+        except ProjectDocument.DoesNotExist:
+            return Response(
+                {
+                    'error': 'Document not found',
+                    'message': f'No document found with ID {document_id} in this project',
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        summary_row = (
+            ProjectDocumentSummary.objects.filter(document=document).first()
+        )
+        long_text = ""
+        short_text = ""
+        generated_at = None
+        updated_at = None
+        llm_provider = ""
+        llm_model = ""
+
+        if summary_row:
+            long_text = (summary_row.long_summary or "").strip()
+            short_text = (summary_row.short_summary or "").strip()
+            generated_at = (
+                summary_row.generated_at.isoformat()
+                if summary_row.generated_at
+                else None
+            )
+            updated_at = (
+                summary_row.updated_at.isoformat()
+                if summary_row.updated_at
+                else None
+            )
+            llm_provider = summary_row.llm_provider or ""
+            llm_model = summary_row.llm_model or ""
+
+        has_summary = bool(long_text or short_text)
+        message = ""
+        if not has_summary:
+            message = (
+                "No AI summary yet. Run processing with Enable Summary turned on "
+                "in Document Processing."
+            )
+
+        return Response(
+            {
+                'document_id': str(document.document_id),
+                'original_filename': document.original_filename,
+                'long_summary': long_text,
+                'short_summary': short_text,
+                'has_summary': has_summary,
+                'generated_at': generated_at,
+                'updated_at': updated_at,
+                'llm_provider': llm_provider,
+                'llm_model': llm_model,
+                'message': message,
+                'api_version': 'universal_v1',
+            },
+            status=status.HTTP_200_OK,
+        )
     
     @action(detail=True, methods=['post'], url_path='documents/upload-to-llm')
     def upload_documents_to_llm(self, request, project_id=None):
