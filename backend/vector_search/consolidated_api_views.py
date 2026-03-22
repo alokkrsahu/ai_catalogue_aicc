@@ -135,15 +135,30 @@ def process_unified_consolidated(request, project_id, llm_config=None, processin
                 }
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Synchronous pre-flight: if all ready docs are already COMPLETED, skip thread entirely
-        from users.models import DocumentVectorStatus, VectorProcessingStatus as VPS
+        # Synchronous pre-flight: if all ready docs are already COMPLETED, skip thread
+        # UNLESS summaries are requested and some documents are missing summaries.
+        from users.models import DocumentVectorStatus, VectorProcessingStatus as VPS, ProjectDocumentSummary
         completed_doc_ids = DocumentVectorStatus.objects.filter(
             document__in=ready_documents,
             status=VPS.COMPLETED,
         ).values_list('document_id', flat=True)
         new_docs_count = ready_documents.exclude(id__in=completed_doc_ids).count()
 
-        if new_docs_count == 0:
+        enable_summary = (llm_config or {}).get('enable_summary', False)
+        needs_summaries = False
+        if new_docs_count == 0 and enable_summary:
+            # Check if any ready documents are missing summaries
+            docs_with_summaries = ProjectDocumentSummary.objects.filter(
+                document__in=ready_documents,
+            ).exclude(long_summary='').exclude(short_summary='').count()
+            needs_summaries = docs_with_summaries < ready_documents.count()
+            if needs_summaries:
+                logger.info(
+                    f"📝 CONSOLIDATED: All docs vectorized but {ready_documents.count() - docs_with_summaries} "
+                    f"missing summaries — proceeding to generate them."
+                )
+
+        if new_docs_count == 0 and not needs_summaries:
             logger.info(
                 f"✅ CONSOLIDATED: All {ready_documents.count()} documents already processed "
                 f"for project {project_id}. Nothing to do."

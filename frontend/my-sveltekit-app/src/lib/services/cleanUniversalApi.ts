@@ -386,6 +386,24 @@ export class CleanUniversalApiService {
     console.log('✅ UNIVERSAL: Document deleted successfully');
   }
 
+  async bulkDeleteDocuments(projectId: string, documentIds: string[]): Promise<any> {
+    console.log(`🗑️ UNIVERSAL: Bulk deleting ${documentIds.length} documents from project ${projectId}`);
+
+    const response = await fetch(`${API_BASE}/projects/${projectId}/bulk_delete_documents/`, {
+      method: 'DELETE',
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify({ document_ids: documentIds }),
+    });
+
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(result.error || `Bulk delete failed: ${response.status}`);
+    }
+
+    console.log(`✅ UNIVERSAL: Bulk delete completed: ${result.total_deleted} deleted, ${result.total_failed} failed`);
+    return result;
+  }
+
   // ============================================================================
   // DOCUMENT PROCESSING (Universal - same for ALL projects)
   // ============================================================================

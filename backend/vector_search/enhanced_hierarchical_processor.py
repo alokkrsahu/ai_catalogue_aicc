@@ -654,15 +654,26 @@ class EnhancedHierarchicalProcessor:
             chunk.total_chunks = total_chunks
             if chunk.metadata:
                 chunk.metadata['total_chunks'] = total_chunks
-            
-            # Generate embeddings for all chunks
-            if chunk.embedding is None:
-                try:
-                    logger.info(f"      [4.2.{i+1}] Creating embedding for chunk {chunk.chunk_index}...")
-                    chunk.embedding = self.embedder.create_embeddings(chunk.content)
-                except Exception as e:
-                    logger.error(f"      [4.2.{i+1}] ❌ Failed to create embedding for chunk {chunk.chunk_index}: {e}")
-        
+
+        # Batch embedding: collect all chunks needing embeddings and process in one call
+        chunks_needing_embeddings = [(i, chunk) for i, chunk in enumerate(chunks) if chunk.embedding is None]
+        if chunks_needing_embeddings:
+            try:
+                texts = [chunk.content for _, chunk in chunks_needing_embeddings]
+                logger.info(f"      [4.2] Batch embedding {len(texts)} chunks...")
+                embeddings = self.embedder.batch_create_embeddings(texts)
+                for idx, (_, chunk) in enumerate(chunks_needing_embeddings):
+                    chunk.embedding = embeddings[idx]
+                logger.info(f"      [4.2] ✅ Batch embedded {len(texts)} chunks")
+            except Exception as e:
+                logger.error(f"      [4.2] ❌ Batch embedding failed, falling back to per-chunk: {e}")
+                for i, chunk in chunks_needing_embeddings:
+                    if chunk.embedding is None:
+                        try:
+                            chunk.embedding = self.embedder.create_embeddings(chunk.content)
+                        except Exception as chunk_err:
+                            logger.error(f"      [4.2.{i+1}] ❌ Failed to create embedding for chunk {chunk.chunk_index}: {chunk_err}")
+
         logger.info(f"   [4.2] ✔️ All chunks finalized.")
         return chunks
     

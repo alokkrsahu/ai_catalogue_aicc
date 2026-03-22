@@ -182,6 +182,55 @@
   let loadingHierarchicalPaths = false;
   let hierarchicalPathsError = '';
 
+  // Document multi-select state
+  let selectedDocumentIds: Set<string> = new Set();
+  let isSelectionMode = false;
+  let bulkDeleting = false;
+
+  function toggleDocumentSelection(docId: string) {
+    if (selectedDocumentIds.has(docId)) {
+      selectedDocumentIds.delete(docId);
+    } else {
+      selectedDocumentIds.add(docId);
+    }
+    selectedDocumentIds = new Set(selectedDocumentIds); // trigger reactivity
+  }
+
+  function selectAllDocuments() {
+    selectedDocumentIds = new Set(uploadedDocuments.map((d: any) => d.document_id || d.id));
+  }
+
+  function deselectAllDocuments() {
+    selectedDocumentIds = new Set();
+  }
+
+  function exitSelectionMode() {
+    isSelectionMode = false;
+    selectedDocumentIds = new Set();
+  }
+
+  async function bulkDeleteSelected() {
+    if (selectedDocumentIds.size === 0) return;
+    const count = selectedDocumentIds.size;
+    if (!confirm(`Delete ${count} document(s)? This will also remove their vector data, summaries, and workflow references. This cannot be undone.`)) return;
+
+    bulkDeleting = true;
+    try {
+      const result = await cleanUniversalApi.bulkDeleteDocuments(projectId, Array.from(selectedDocumentIds));
+      toasts.success(`Deleted ${result.total_deleted} document(s)${result.workflows_cleaned ? ` (${result.workflows_cleaned} workflow(s) cleaned)` : ''}`);
+      if (result.total_failed > 0) {
+        toasts.warning(`${result.total_failed} document(s) failed to delete`);
+      }
+      exitSelectionMode();
+      await Promise.all([loadDocuments(), loadHierarchicalPaths()]);
+    } catch (error: any) {
+      console.error('Bulk delete failed:', error);
+      toasts.error(error.message || 'Bulk delete failed');
+    } finally {
+      bulkDeleting = false;
+    }
+  }
+
   // In-app chatbot session management
   type ChatbotSessionMeta = { id: string; label: string; createdAt: string; preview?: string; updatedAt?: string };
   let chatbotSessions: ChatbotSessionMeta[] = [];
@@ -1518,6 +1567,54 @@
               </div>
               
               <div class="p-6">
+                <!-- Bulk action toolbar -->
+                {#if uploadedDocuments.length > 0 && documentsViewMode === 'list'}
+                  <div class="flex items-center justify-between mb-4">
+                    {#if isSelectionMode}
+                      <div class="flex items-center space-x-3">
+                        <button
+                          class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 transition-colors"
+                          on:click={() => selectedDocumentIds.size === uploadedDocuments.length ? deselectAllDocuments() : selectAllDocuments()}
+                        >
+                          {selectedDocumentIds.size === uploadedDocuments.length ? 'Deselect All' : 'Select All'}
+                        </button>
+                        <span class="text-sm text-gray-600">
+                          {selectedDocumentIds.size} of {uploadedDocuments.length} selected
+                        </span>
+                      </div>
+                      <div class="flex items-center space-x-2">
+                        {#if selectedDocumentIds.size > 0}
+                          <button
+                            class="text-sm px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50"
+                            disabled={bulkDeleting}
+                            on:click={bulkDeleteSelected}
+                          >
+                            {#if bulkDeleting}
+                              <i class="fas fa-spinner fa-spin mr-1"></i> Deleting...
+                            {:else}
+                              <i class="fas fa-trash mr-1"></i> Delete {selectedDocumentIds.size} Selected
+                            {/if}
+                          </button>
+                        {/if}
+                        <button
+                          class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 transition-colors"
+                          on:click={exitSelectionMode}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    {:else}
+                      <div></div>
+                      <button
+                        class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 transition-colors text-gray-600"
+                        on:click={() => isSelectionMode = true}
+                      >
+                        <i class="fas fa-check-square mr-1"></i> Select
+                      </button>
+                    {/if}
+                  </div>
+                {/if}
+
                 {#if documentsViewMode === 'list'}
                   <!-- LIST VIEW (original grid) -->
                   {#if uploadedDocuments.length === 0}
@@ -1530,17 +1627,37 @@
                     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
                       {#each uploadedDocuments as doc}
                         <div
-                          class="flex items-start p-4 border border-gray-200 rounded-lg hover:border-oxford-blue hover:shadow-md transition-all duration-200 group cursor-pointer"
+                          class="flex items-start p-4 border rounded-lg hover:shadow-md transition-all duration-200 group cursor-pointer {isSelectionMode && selectedDocumentIds.has(doc.document_id || doc.id) ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-oxford-blue'}"
                           role="button"
                           tabindex="0"
-                          on:click={() => openDocumentSummary(doc)}
-                          on:keydown={(e) => {
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault();
+                          on:click={() => {
+                            if (isSelectionMode) {
+                              toggleDocumentSelection(doc.document_id || doc.id);
+                            } else {
                               openDocumentSummary(doc);
                             }
                           }}
+                          on:keydown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              if (isSelectionMode) {
+                                toggleDocumentSelection(doc.document_id || doc.id);
+                              } else {
+                                openDocumentSummary(doc);
+                              }
+                            }
+                          }}
                         >
+                          {#if isSelectionMode}
+                            <div class="flex-shrink-0 w-6 h-6 mr-3 mt-1" on:click|stopPropagation={() => toggleDocumentSelection(doc.document_id || doc.id)}>
+                              <input
+                                type="checkbox"
+                                checked={selectedDocumentIds.has(doc.document_id || doc.id)}
+                                class="w-5 h-5 rounded border-gray-300 text-oxford-blue focus:ring-oxford-blue cursor-pointer"
+                                on:change={() => toggleDocumentSelection(doc.document_id || doc.id)}
+                              />
+                            </div>
+                          {/if}
                           <div class="flex-shrink-0 w-10 h-10 bg-gradient-to-br from-oxford-blue to-blue-600 text-white rounded-lg flex items-center justify-center mr-4">
                             <i class="fas fa-file text-sm"></i>
                           </div>

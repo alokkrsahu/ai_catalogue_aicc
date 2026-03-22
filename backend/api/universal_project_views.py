@@ -728,12 +728,19 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
     def upload_document(self, request, project_id=None):
         """Upload document to project"""
         project = self.get_object()
-        
+
         if 'file' not in request.FILES:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
-        
+
         uploaded_file = request.FILES['file']
-        
+
+        # Check for duplicate filename
+        if ProjectDocument.objects.filter(project=project, original_filename=uploaded_file.name).exists():
+            return Response(
+                {'error': f'File "{uploaded_file.name}" already exists in this project'},
+                status=status.HTTP_409_CONFLICT
+            )
+
         try:
             with transaction.atomic():
                 document = ProjectDocument.objects.create(
@@ -767,55 +774,69 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
     def upload_bulk_files(self, request, project_id=None):
         """Upload multiple files in a single request"""
         project = self.get_object()
-        
+
         if not request.FILES:
             return Response({'error': 'No files provided'}, status=status.HTTP_400_BAD_REQUEST)
-        
+
         uploaded_documents = []
         failed_uploads = []
-        
-        try:
-            with transaction.atomic():
-                for file_key, uploaded_file in request.FILES.items():
-                    try:
-                        document = ProjectDocument.objects.create(
-                            project=project,
-                            original_filename=uploaded_file.name,
-                            file_size=uploaded_file.size,
-                            file_type=uploaded_file.content_type,
-                            file_extension=os.path.splitext(uploaded_file.name)[1].lower(),
-                            upload_status='processing',
-                            uploaded_by=request.user
-                        )
-                        
-                        file_path = document.get_storage_path()
-                        saved_path = default_storage.save(file_path, ContentFile(uploaded_file.read()))
-                        document.file_path = saved_path
-                        document.upload_status = 'ready'
-                        document.save()
-                        self._mark_vector_collection_stale(project)
-                        
-                        uploaded_documents.append(ProjectDocumentSerializer(document).data)
-                        
-                    except Exception as e:
-                        failed_uploads.append({
-                            'filename': uploaded_file.name,
-                            'error': str(e)
-                        })
-                        logger.error(f"Failed to upload {uploaded_file.name}: {e}")
-                
-                return Response({
-                    'uploaded_documents': uploaded_documents,
-                    'failed_uploads': failed_uploads,
-                    'total_attempted': len(request.FILES),
-                    'total_successful': len(uploaded_documents),
-                    'total_failed': len(failed_uploads),
-                    'message': f'Bulk upload completed: {len(uploaded_documents)} successful, {len(failed_uploads)} failed',
-                    'api_version': 'universal_v1'
-                }, status=status.HTTP_201_CREATED if uploaded_documents else status.HTTP_400_BAD_REQUEST)
-                
-        except Exception as e:
-            return Response({'error': 'Bulk upload failed', 'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        skipped_duplicates = []
+
+        # Pre-fetch existing filenames for fast duplicate checking
+        existing_filenames = set(
+            ProjectDocument.objects.filter(project=project)
+            .values_list('original_filename', flat=True)
+        )
+
+        for file_key, uploaded_file in request.FILES.items():
+            # Skip duplicates with a clear message
+            if uploaded_file.name in existing_filenames:
+                skipped_duplicates.append(uploaded_file.name)
+                failed_uploads.append({
+                    'filename': uploaded_file.name,
+                    'error': 'File already exists in this project'
+                })
+                continue
+
+            try:
+                with transaction.atomic():
+                    document = ProjectDocument.objects.create(
+                        project=project,
+                        original_filename=uploaded_file.name,
+                        file_size=uploaded_file.size,
+                        file_type=uploaded_file.content_type,
+                        file_extension=os.path.splitext(uploaded_file.name)[1].lower(),
+                        upload_status='processing',
+                        uploaded_by=request.user
+                    )
+
+                    file_path = document.get_storage_path()
+                    saved_path = default_storage.save(file_path, ContentFile(uploaded_file.read()))
+                    document.file_path = saved_path
+                    document.upload_status = 'ready'
+                    document.save()
+                    self._mark_vector_collection_stale(project)
+
+                    uploaded_documents.append(ProjectDocumentSerializer(document).data)
+                    existing_filenames.add(uploaded_file.name)
+
+            except Exception as e:
+                failed_uploads.append({
+                    'filename': uploaded_file.name,
+                    'error': str(e)
+                })
+                logger.error(f"Failed to upload {uploaded_file.name}: {e}")
+
+        return Response({
+            'uploaded_documents': uploaded_documents,
+            'failed_uploads': failed_uploads,
+            'skipped_duplicates': skipped_duplicates,
+            'total_attempted': len(request.FILES),
+            'total_successful': len(uploaded_documents),
+            'total_failed': len(failed_uploads),
+            'message': f'Bulk upload completed: {len(uploaded_documents)} successful, {len(failed_uploads)} failed',
+            'api_version': 'universal_v1'
+        }, status=status.HTTP_201_CREATED if uploaded_documents else status.HTTP_400_BAD_REQUEST)
     
     @action(detail=True, methods=['post'])
     def upload_zip_file(self, request, project_id=None):
@@ -875,41 +896,51 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                     # Check for supported file types
                     supported_extensions = ['.pdf', '.doc', '.docx', '.txt', '.md', '.rtf']
                     
-                    with transaction.atomic():
-                        for file_path in valid_files:
-                            try:
-                                # Get file extension
-                                _, ext = os.path.splitext(file_path.lower())
-                                
-                                if ext not in supported_extensions:
-                                    failed_extractions.append({
-                                        'filename': file_path,
-                                        'error': f'Unsupported file type: {ext}'
-                                    })
-                                    continue
-                                
-                                # Extract file data
-                                with zip_ref.open(file_path) as extracted_file:
-                                    file_data = extracted_file.read()
-                                
-                                # Preserve the full relative path (like folder upload)
-                                # Only clean up the path for problematic characters but keep structure
-                                filename = file_path
-                                
-                                # Clean up path separators for cross-platform compatibility
-                                filename = filename.replace('\\', '/').strip('/')
-                                
-                                # Skip files that are in system directories we filtered out earlier
-                                if (filename.startswith('__MACOSX/') or 
-                                    filename.startswith('.DS_Store') or
-                                    '/.DS_Store' in filename):
-                                    failed_extractions.append({
-                                        'filename': filename,
-                                        'error': 'System file or directory'
-                                    })
-                                    continue
-                                
-                                # Create document record
+                    # Pre-fetch existing filenames for duplicate checking
+                    existing_filenames = set(
+                        ProjectDocument.objects.filter(project=project)
+                        .values_list('original_filename', flat=True)
+                    )
+
+                    for file_path in valid_files:
+                        try:
+                            # Get file extension
+                            _, ext = os.path.splitext(file_path.lower())
+
+                            if ext not in supported_extensions:
+                                failed_extractions.append({
+                                    'filename': file_path,
+                                    'error': f'Unsupported file type: {ext}'
+                                })
+                                continue
+
+                            # Extract file data
+                            with zip_ref.open(file_path) as extracted_file:
+                                file_data = extracted_file.read()
+
+                            # Preserve the full relative path (like folder upload)
+                            filename = file_path
+                            filename = filename.replace('\\', '/').strip('/')
+
+                            # Skip system files
+                            if (filename.startswith('__MACOSX/') or
+                                filename.startswith('.DS_Store') or
+                                '/.DS_Store' in filename):
+                                failed_extractions.append({
+                                    'filename': filename,
+                                    'error': 'System file or directory'
+                                })
+                                continue
+
+                            # Skip duplicates with a clear message
+                            if filename in existing_filenames:
+                                failed_extractions.append({
+                                    'filename': filename,
+                                    'error': 'File already exists in this project'
+                                })
+                                continue
+
+                            with transaction.atomic():
                                 document = ProjectDocument.objects.create(
                                     project=project,
                                     original_filename=filename,
@@ -919,29 +950,29 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                                     upload_status='processing',
                                     uploaded_by=request.user
                                 )
-                                
-                                # Save file
+
                                 doc_file_path = document.get_storage_path()
                                 saved_path = default_storage.save(doc_file_path, ContentFile(file_data))
                                 document.file_path = saved_path
                                 document.upload_status = 'ready'
                                 document.save()
                                 self._mark_vector_collection_stale(project)
-                                
-                                uploaded_documents.append(ProjectDocumentSerializer(document).data)
-                                extracted_files_info.append({
-                                    'original_path': file_path,
-                                    'filename': filename,  # Now includes full path
-                                    'size': len(file_data),
-                                    'extension': ext
-                                })
-                                
-                            except Exception as e:
-                                failed_extractions.append({
-                                    'filename': file_path,
-                                    'error': str(e)
-                                })
-                                logger.error(f"Failed to extract {file_path}: {e}")
+
+                            uploaded_documents.append(ProjectDocumentSerializer(document).data)
+                            extracted_files_info.append({
+                                'original_path': file_path,
+                                'filename': filename,
+                                'size': len(file_data),
+                                'extension': ext
+                            })
+                            existing_filenames.add(filename)
+
+                        except Exception as e:
+                            failed_extractions.append({
+                                'filename': file_path,
+                                'error': str(e)
+                            })
+                            logger.error(f"Failed to extract {file_path}: {e}")
                 
             finally:
                 # Clean up temporary file
@@ -1342,71 +1373,160 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
             "api_version": "universal_v1"
         })
     
+    def _cleanup_llm_files(self, document, project):
+        """Best-effort deletion of files uploaded to LLM provider APIs."""
+        for provider, field in [('openai', 'llm_file_id_openai'), ('anthropic', 'llm_file_id_anthropic'), ('google', 'llm_file_id_google')]:
+            file_id = getattr(document, field, None)
+            if not file_id:
+                continue
+            try:
+                from agent_orchestration.llm_file_service import LLMFileUploadService
+                service = LLMFileUploadService(project)
+                from asgiref.sync import async_to_sync
+                async_to_sync(service.delete_file)(provider, file_id)
+                logger.info(f"🗑️ LLM FILE: Deleted {provider} file {file_id[:20]}... for {document.original_filename}")
+            except Exception as e:
+                logger.warning(f"⚠️ LLM FILE: Failed to delete {provider} file for {document.original_filename}: {e}")
+
+    def _cleanup_workflow_references(self, project, deleted_filenames):
+        """Remove references to deleted documents from workflow graph_json nodes."""
+        from users.models import AgentWorkflow
+        workflows_cleaned = 0
+        for workflow in AgentWorkflow.objects.filter(project=project):
+            graph = workflow.graph_json
+            if not graph or not graph.get('nodes'):
+                continue
+            changed = False
+            for node in graph['nodes']:
+                data = node.get('data', {})
+                # Clean file_attachment_documents
+                fa_docs = data.get('file_attachment_documents')
+                if isinstance(fa_docs, list):
+                    filtered = [f for f in fa_docs if f not in deleted_filenames]
+                    if len(filtered) != len(fa_docs):
+                        data['file_attachment_documents'] = filtered
+                        changed = True
+                # Clean inline_file_attachments
+                inline = data.get('inline_file_attachments')
+                if isinstance(inline, list):
+                    filtered = [a for a in inline if a.get('filename') not in deleted_filenames]
+                    if len(filtered) != len(inline):
+                        data['inline_file_attachments'] = filtered
+                        changed = True
+            if changed:
+                workflow.graph_json = graph
+                workflow.save(update_fields=['graph_json'])
+                workflows_cleaned += 1
+                logger.info(f"🗑️ WORKFLOW: Cleaned references in workflow {workflow.name} ({workflow.workflow_id})")
+        return workflows_cleaned
+
+    def _delete_single_document(self, document, project):
+        """Full cleanup and deletion of a single document. Returns document name on success."""
+        from users.models import DocumentVectorStatus, ProjectDocumentSummary, ProjectDocumentFolderOrganization
+        doc_name = document.original_filename
+        doc_uuid = str(document.document_id)
+
+        # 1. Delete LLM provider files
+        self._cleanup_llm_files(document, project)
+
+        # 2. Clean up related DB records
+        DocumentVectorStatus.objects.filter(document=document).delete()
+        ProjectDocumentSummary.objects.filter(document=document).delete()
+        ProjectDocumentFolderOrganization.objects.filter(document=document).delete()
+
+        # 3. Delete Milvus vectors
+        try:
+            from vector_search.enhanced_hierarchical_database import EnhancedHierarchicalVectorDatabase
+            vector_db = EnhancedHierarchicalVectorDatabase(str(project.project_id))
+            vector_db.delete_document_and_chunks(doc_uuid)
+        except Exception as vec_err:
+            logger.warning(f"⚠️ UNIVERSAL: Failed to delete Milvus vectors for {doc_name}: {vec_err}")
+
+        # 4. Delete physical file
+        if document.file_path and default_storage.exists(document.file_path):
+            default_storage.delete(document.file_path)
+
+        # 5. Delete DB record
+        document.delete()
+        return doc_name
+
+    @action(detail=True, methods=['delete'], url_path='bulk_delete_documents')
+    def bulk_delete_documents(self, request, project_id=None):
+        """Delete multiple documents from the project with full cleanup."""
+        project = self.get_object()
+        document_ids = request.data.get('document_ids', [])
+
+        if not document_ids:
+            return Response({'error': 'document_ids list is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        deleted = []
+        failed = []
+        deleted_filenames = set()
+
+        documents = list(project.documents.filter(document_id__in=document_ids))
+        found_ids = {str(d.document_id) for d in documents}
+        for doc_id in document_ids:
+            if doc_id not in found_ids:
+                failed.append({'document_id': doc_id, 'error': 'Document not found'})
+
+        for document in documents:
+            try:
+                doc_name = self._delete_single_document(document, project)
+                deleted.append({'document_id': str(document.document_id), 'filename': doc_name})
+                deleted_filenames.add(doc_name)
+            except Exception as e:
+                failed.append({'document_id': str(document.document_id), 'error': str(e)})
+                logger.error(f"❌ BULK DELETE: Failed to delete {document.original_filename}: {e}")
+
+        # Clean workflow references for all deleted filenames at once
+        workflows_cleaned = 0
+        if deleted_filenames:
+            workflows_cleaned = self._cleanup_workflow_references(project, deleted_filenames)
+            self._mark_vector_collection_stale(project)
+
+        logger.info(f"🗑️ BULK DELETE: {len(deleted)} deleted, {len(failed)} failed, {workflows_cleaned} workflows cleaned")
+
+        return Response({
+            'deleted': deleted,
+            'failed': failed,
+            'total_deleted': len(deleted),
+            'total_failed': len(failed),
+            'workflows_cleaned': workflows_cleaned,
+            'message': f'{len(deleted)} document(s) deleted successfully',
+            'api_version': 'universal_v1'
+        }, status=status.HTTP_200_OK)
+
     @action(detail=True, methods=['delete'])
     def delete_document(self, request, project_id=None):
-        """Delete a specific document from the project"""
+        """Delete a specific document from the project with full cleanup."""
         project = self.get_object()
         document_id = request.data.get('document_id') or request.query_params.get('document_id')
-        
+
         if not document_id:
             return Response({
                 'error': 'document_id is required',
                 'message': 'Please specify which document to delete'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
+
         try:
-            # Try to find by document_id (UUID) first, then fallback to id (integer)
             try:
-                # First try as UUID (most likely case)
                 document = project.documents.get(document_id=document_id)
             except (ValueError, ProjectDocument.DoesNotExist):
-                # Fallback to integer id if UUID lookup fails
                 document = project.documents.get(id=document_id)
-            document_name = document.original_filename
-            doc_uuid = str(document.document_id)
 
-            # Clean up related DB records before deleting the document
-            from users.models import DocumentVectorStatus, ProjectDocumentSummary, ProjectDocumentFolderOrganization
-            dvs_deleted, _ = DocumentVectorStatus.objects.filter(document=document).delete()
-            sum_deleted, _ = ProjectDocumentSummary.objects.filter(document=document).delete()
-            forg_deleted, _ = ProjectDocumentFolderOrganization.objects.filter(document=document).delete()
-            if dvs_deleted or sum_deleted or forg_deleted:
-                logger.info(
-                    "🗑️ UNIVERSAL: Cleaned up related records for %s "
-                    "(vector_status=%d, summaries=%d, folder_org=%d)",
-                    document_name, dvs_deleted, sum_deleted, forg_deleted,
-                )
-
-            # Delete vectors from Milvus so the hierarchical_paths endpoint
-            # no longer returns stale entries for this document.
-            try:
-                from vector_search.enhanced_hierarchical_database import EnhancedHierarchicalVectorDatabase
-                vector_db = EnhancedHierarchicalVectorDatabase(str(project.project_id))
-                vector_db.delete_document_and_chunks(doc_uuid)
-                logger.info("🗑️ UNIVERSAL: Deleted Milvus vectors for document %s", document_name)
-            except Exception as vec_err:
-                logger.warning(
-                    "⚠️ UNIVERSAL: Failed to delete Milvus vectors for doc %s: %s",
-                    doc_uuid, vec_err,
-                )
-
-            # Delete the file from storage if it exists
-            if document.file_path and default_storage.exists(document.file_path):
-                default_storage.delete(document.file_path)
-            
-            # Delete the database record
-            document.delete()
+            document_name = self._delete_single_document(document, project)
+            self._cleanup_workflow_references(project, {document_name})
             self._mark_vector_collection_stale(project)
-            
+
             logger.info(f"🗑️ UNIVERSAL: Deleted document {document_name} from project {project_id}")
-            
+
             return Response({
                 'message': f'Document "{document_name}" deleted successfully',
                 'document_id': document_id,
                 'project_id': project_id,
                 'api_version': 'universal_v1'
             }, status=status.HTTP_200_OK)
-            
+
         except ProjectDocument.DoesNotExist:
             return Response({
                 'error': 'Document not found',

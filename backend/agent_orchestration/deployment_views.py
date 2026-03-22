@@ -1286,7 +1286,7 @@ def public_chat_endpoint_stream(request, project_id):
                 yield f"data: {json.dumps({'type': 'error', 'error': 'No response generated', 'request_id': request_id})}\n\n"
                 return
             
-            # Persist conversation (including assistant response) BEFORE streaming
+            # Persist conversation (including full assistant response) BEFORE streaming
             # so the response survives even if the client disconnects mid-stream.
             stream_citations = execution_result.get('citations') or []
             assistant_history_entry = {
@@ -1299,21 +1299,42 @@ def public_chat_endpoint_stream(request, project_id):
             conversation_history.append(assistant_history_entry)
             _save_session_conversation_sync(deployment_session, conversation_history)
 
-            # Stream the response word by word for smooth appearance
+            # Strip ---CITATIONS--- block from the response before streaming.
+            # Citations are sent as a separate SSE event after the content stream.
+            import re as _re
+            _citations_match = _re.search(
+                r'---CITATIONS---\s*([\s\S]*?)\s*---END_?CITATIONS---',
+                assistant_response,
+            )
+            parsed_citations_json = None
+            if _citations_match:
+                try:
+                    parsed_citations_json = json.loads(_citations_match.group(1))
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                assistant_response = assistant_response[:_citations_match.start()].rstrip()
+            # Strip trailing "CITATIONS" header some models leave
+            assistant_response = _re.sub(r'\n*CITATIONS\s*$', '', assistant_response).rstrip()
+
+            # Stream the cleaned response word by word for smooth appearance
             words = assistant_response.split(' ')
             accumulated = ""
-            
+
             for i, word in enumerate(words):
                 accumulated += word
                 if i < len(words) - 1:
                     accumulated += " "
-                
+
                 # Send chunk
                 yield f"data: {json.dumps({'type': 'content', 'content': word + (' ' if i < len(words) - 1 else ''), 'request_id': request_id})}\n\n"
-                
+
                 # Small delay for smooth streaming (optional)
                 import time
                 time.sleep(0.02)  # 20ms delay between words
+
+            # Send parsed citations as a separate event after content stream
+            if parsed_citations_json:
+                yield f"data: {json.dumps({'type': 'citations', 'citations': parsed_citations_json, 'request_id': request_id})}\n\n"
             
             # Save execution metadata in background (conversation already persisted above)
             background_thread = threading.Thread(
@@ -3119,6 +3140,13 @@ def embed_chatbot_html(request, project_id):
                 accumulatedContent += data.content;
                 markdownEl.innerHTML = renderMarkdown(accumulatedContent);
                 messagesEl.scrollTop = messagesEl.scrollHeight;
+              }} else if (data.type === 'citations') {{
+                // Render citation chips below the streamed message
+                if (markdownEl && Array.isArray(data.citations) && data.citations.length > 0) {{
+                  _chatCitations = data.citations;
+                  markdownEl.innerHTML = renderCitationChips(renderMarkdown(accumulatedContent), data.citations);
+                  messagesEl.scrollTop = messagesEl.scrollHeight;
+                }}
               }} else if (data.type === 'awaiting_human_input') {{
                 hideThinkingIndicator();
                 showHumanInputModal(data.title, data.last_conversation_message);

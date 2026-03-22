@@ -1,8 +1,10 @@
 # Enhanced-Only Vector Search Service - Full AI Processing
 # backend/vector_search/unified_services_fixed.py
 
+import asyncio
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, List, Optional
 from django.utils import timezone
 from django.db import transaction
@@ -175,6 +177,46 @@ class UnifiedVectorSearchManager:
                 }
             }
 
+        # "Preserve Original Folder Structure" now means: use LLM-based folder organization
+        # based on ProjectDocumentSummary.short_summary.
+        folder_org_enabled = bool(getattr(project, 'preserve_original_folder_structure', False))
+        llm_folder_org_enabled = bool(folder_org_enabled and llm_provider and llm_model)
+        doc_summaries_will_generate = bool((enable_summary or folder_org_enabled) and llm_provider and llm_model)
+
+        # Generate per-document summaries for ALL ready documents concurrently.
+        # Uses asyncio.gather() for parallel LLM API calls (I/O-bound).
+        # upsert_document_summary is idempotent — skips docs that already have summaries.
+        summaries_generated = 0
+        if doc_summaries_will_generate:
+            try:
+                from .document_summarization.file_based_document_summarizer import upsert_document_summary
+
+                all_ready_list = list(ready_documents)
+                logger.info(f"📝 Generating summaries for {len(all_ready_list)} ready documents in parallel (idempotent)")
+
+                async def _generate_all_summaries():
+                    tasks = [
+                        upsert_document_summary(
+                            project=project,
+                            document=doc,
+                            llm_provider=llm_provider,
+                            llm_model=llm_model,
+                        )
+                        for doc in all_ready_list
+                    ]
+                    return await asyncio.gather(*tasks, return_exceptions=True)
+
+                results = async_to_sync(_generate_all_summaries)()
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        doc_name = getattr(all_ready_list[i], "original_filename", "unknown")
+                        logger.error("❌ Failed generating document summary for %s: %s", doc_name, result)
+                    else:
+                        summaries_generated += 1
+                logger.info(f"✅ Summary generation complete: {summaries_generated}/{len(all_ready_list)} succeeded")
+            except Exception as e:
+                logger.error("❌ Failed generating document summaries batch: %s", e)
+
         # Incremental: skip docs already successfully embedded in Milvus
         already_completed_doc_ids = DocumentVectorStatus.objects.filter(
             document__in=ready_documents,
@@ -193,45 +235,17 @@ class UnifiedVectorSearchManager:
             logger.info(f"All documents already processed for project {project.name}")
             return {
                 'status': 'all_already_processed',
-                'message': 'All documents are already processed',
+                'message': f'All documents are already processed. {summaries_generated} summaries checked/generated.',
                 'processed_documents': 0,
                 'failed_documents': 0,
                 'skipped_documents': skipped_count,
+                'summaries_generated': summaries_generated,
                 'total_chunks_created': 0,
                 'processing_mode': 'enhanced',
             }
 
         logger.info(f"🚀 Starting enhanced processing for {documents.count()} documents in project {project.name}")
         documents_list = list(documents)
-
-        # "Preserve Original Folder Structure" now means: use LLM-based folder organization
-        # based on ProjectDocumentSummary.short_summary.
-        folder_org_enabled = bool(getattr(project, 'preserve_original_folder_structure', False))
-        llm_folder_org_enabled = bool(folder_org_enabled and llm_provider and llm_model)
-        doc_summaries_will_generate = bool((enable_summary or folder_org_enabled) and llm_provider and llm_model)
-
-        # Generate per-document summaries first (needed for short_summary-based folder decisions).
-        if doc_summaries_will_generate:
-            try:
-                from .document_summarization.file_based_document_summarizer import upsert_document_summary
-
-                for original_doc in documents_list:
-                    try:
-                        async_to_sync(upsert_document_summary)(
-                            project=project,
-                            document=original_doc,
-                            llm_provider=llm_provider,
-                            llm_model=llm_model,
-                        )
-                    except Exception as summary_err:
-                        logger.error(
-                            "❌ Failed generating document summary for %s: %s",
-                            getattr(original_doc, "original_filename", "unknown"),
-                            summary_err,
-                        )
-                        # Do not fail the whole vectorization run.
-            except Exception as e:
-                logger.error("❌ Failed generating document summaries batch: %s", e)
 
         folder_organization_map: Dict[str, str] = {}
         if llm_folder_org_enabled:
