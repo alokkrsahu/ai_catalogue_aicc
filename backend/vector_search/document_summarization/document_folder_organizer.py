@@ -1,9 +1,8 @@
+import asyncio
 import json
 import logging
 import re
 from typing import Any, Dict, List, Optional
-
-from asgiref.sync import async_to_sync
 
 from agent_orchestration.llm_provider_manager import LLMProviderManager
 from users.models import (
@@ -216,7 +215,9 @@ def generate_and_persist_document_folder_organization(
 
     # One-shot assignment for this initial implementation.
     # If you expect extremely large document sets, we can upgrade this to a taxonomy+batch strategy.
-    parsed = async_to_sync(_llm_call_assign_folders)(project, llm_provider, llm_model, docs_payload)
+    # asyncio.run() creates an isolated event loop — safe in a sync Django view context and
+    # does not depend on any shared ThreadPoolExecutor that can fail on interpreter shutdown.
+    parsed = asyncio.run(_llm_call_assign_folders(project, llm_provider, llm_model, docs_payload))
 
     assignments = (parsed or {}).get("assignments") or {}
     return _persist_folder_organization(
