@@ -709,7 +709,7 @@ class WorkflowExecutor:
                                 'llm_model': agent_config['llm_model'],
                                 'cost_estimate': getattr(agent_response, 'cost_estimate', None) if hasattr(agent_response, 'cost_estimate') else None,
                             }
-                            if node_data.get('doc_tool_calling') and _synthesis_citations:
+                            if _synthesis_citations:
                                 _msg_metadata['citations'] = _synthesis_citations
 
                             messages.append({
@@ -841,17 +841,13 @@ class WorkflowExecutor:
                             
                             # CRITICAL FIX: Update conversation history with agent response (plain text + optional citation appendix for downstream single-input prompts)
                             conversation_history += f"\n{node_name}: {agent_response_text}"
-                            if node_data.get('doc_tool_calling') and _synthesis_citations:
+                            if _synthesis_citations:
                                 conversation_history += format_upstream_citations_block(
                                     node_name, _synthesis_citations
                                 )
                             
                             # Store node output for multi-input support (pack citations for aggregate_multiple_inputs)
-                            handoff_cites = (
-                                _synthesis_citations
-                                if node_data.get('doc_tool_calling') and _synthesis_citations
-                                else None
-                            )
+                            handoff_cites = _synthesis_citations if _synthesis_citations else None
                             executed_nodes[node_id] = pack_executed_output(
                                 agent_response_text, handoff_cites
                             )
@@ -2062,14 +2058,17 @@ class WorkflowExecutor:
                 if event_callback:
                     event_callback("synthesizing", {"agent": node_name})
                 logger.info(f"✅ DOC TOOL CALLING [{node_name}]: Synthesis after {iteration} tool iterations")
-                from agent_orchestration.document_tool_service import _parse_citations_block
+                from agent_orchestration.document_tool_service import (
+                    _append_citations_block,
+                    _parse_citations_block,
+                )
                 clean_text, citations = _parse_citations_block(response.text.strip())
                 title_to_docid = {title_map.get(tn, ""): did for tn, did in tool_map.items() if title_map.get(tn)}
                 for cit in citations:
                     dt = cit.get("document_title", "")
                     if dt and dt in title_to_docid and not cit.get("url"):
                         cit["document_id"] = title_to_docid[dt]
-                return clean_text, citations
+                return _append_citations_block(clean_text, citations), citations
 
             # Record the assistant's tool-call turn in the conversation
             tool_conv.append(
@@ -2264,14 +2263,17 @@ class WorkflowExecutor:
         synthesis_resp = await llm_provider.generate_response(messages=synthesis_messages)
         if synthesis_resp.error:
             raise Exception(f"Agent {node_name} synthesis error: {synthesis_resp.error}")
-        from agent_orchestration.document_tool_service import _parse_citations_block
+        from agent_orchestration.document_tool_service import (
+            _append_citations_block,
+            _parse_citations_block,
+        )
         clean_text, citations = _parse_citations_block(synthesis_resp.text.strip())
         title_to_docid = {title_map.get(tn, ""): did for tn, did in tool_map.items() if title_map.get(tn)}
         for cit in citations:
             dt = cit.get("document_title", "")
             if dt and dt in title_to_docid and not cit.get("url"):
                 cit["document_id"] = title_to_docid[dt]
-        return clean_text, citations
+        return _append_citations_block(clean_text, citations), citations
 
     async def _save_messages_to_database(self, messages, execution_record):
         """

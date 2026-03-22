@@ -107,6 +107,20 @@ def _parse_citations_block(text: str) -> Tuple[str, List[Dict[str, Any]]]:
     return clean_text, []
 
 
+def _append_citations_block(clean_text: str, citations: List[Dict[str, Any]]) -> str:
+    """
+    Re-attach the ``---CITATIONS---`` JSON block after parsing / enrichment.
+
+    ``_parse_citations_block`` strips this block from the LLM output; deployment
+    chat UIs (``parseCitations``) expect it to remain in the stored/streamed
+    message content so inline ``[n]`` markers can link to structured entries.
+    """
+    if not citations:
+        return clean_text
+    blob = json.dumps(citations, ensure_ascii=False)
+    return f"{clean_text.rstrip()}\n\n---CITATIONS---\n{blob}\n---END_CITATIONS---"
+
+
 def _parse_text_citations(text: str) -> Tuple[str, List[Dict[str, Any]]]:
     """
     Parse a text-based Sources/References section into structured citation objects.
