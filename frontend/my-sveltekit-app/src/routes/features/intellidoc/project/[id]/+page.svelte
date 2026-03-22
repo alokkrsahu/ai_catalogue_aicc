@@ -1598,6 +1598,13 @@
                       <div class="space-y-2">
                         <!-- Folders -->
                         {#each currentFolders as folder}
+                          {@const fp = folder.path || ''}
+                          {@const childFolderCount = hierarchicalPaths.filter(f => f.type === 'folder' && (() => {
+                            const p = f.path || '';
+                            return p.startsWith(fp + '/') && !p.slice(fp.length + 1).includes('/');
+                          })()).length}
+                          {@const directFileCount = hierarchicalPaths.filter(f => f.type === 'file' && (f.path || '') === fp).length}
+                          {@const subtreeFileCount = hierarchicalPaths.filter(f => f.type === 'file' && ((f.path || '') === fp || (f.path || '').startsWith(fp + '/'))).length}
                           <button
                             class="w-full flex items-center p-3 border border-gray-200 rounded-lg hover:border-oxford-blue hover:bg-blue-50/40 transition-all duration-200 text-left group"
                             on:dblclick={() => folderBrowsePath = folder.path}
@@ -1609,7 +1616,15 @@
                             <div class="flex-1 min-w-0">
                               <p class="font-medium text-gray-900">{folder.displayName?.split('/').pop() || folder.name}</p>
                               <p class="text-xs text-gray-400 mt-0.5">
-                                {hierarchicalPaths.filter(f => f.type === 'file' && (f.path || '') === folder.path).length} file(s)
+                                {#if childFolderCount > 0 && subtreeFileCount > 0}
+                                  {childFolderCount} {childFolderCount === 1 ? 'subfolder' : 'subfolders'} · {subtreeFileCount} {subtreeFileCount === 1 ? 'file' : 'files'}{directFileCount > 0 && directFileCount < subtreeFileCount ? ` (${directFileCount} here)` : ''}
+                                {:else if childFolderCount > 0}
+                                  {childFolderCount} {childFolderCount === 1 ? 'subfolder' : 'subfolders'}
+                                {:else if subtreeFileCount > 0}
+                                  {subtreeFileCount} {subtreeFileCount === 1 ? 'file' : 'files'}
+                                {:else}
+                                  Empty
+                                {/if}
                               </p>
                             </div>
                             <i class="fas fa-chevron-right text-gray-300 group-hover:text-oxford-blue transition-colors"></i>
