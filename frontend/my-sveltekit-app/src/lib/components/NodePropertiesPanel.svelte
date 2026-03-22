@@ -2788,6 +2788,12 @@
                 nodeConfig.doc_tool_calling = e.target.checked;
                 if (!e.target.checked) {
                   nodeConfig.doc_tool_calling_documents = [];
+                  nodeConfig.doc_aware = false;
+                  nodeConfig.search_method = '';
+                  nodeConfig.web_search_enabled = false;
+                  nodeConfig.web_search_mode = '';
+                  nodeConfig.web_search_urls = [];
+                  nodeConfig.web_search_domains = [];
                 }
                 nodeConfig = { ...nodeConfig };
                 updateNodeData();
@@ -2870,13 +2876,16 @@
 
     <!-- DOCAWARE TOGGLE - For other applicable agents (excluding UserProxyAgent) -->
     {#if ['AssistantAgent', 'DelegateAgent'].includes(node.type)}
-      <div>
+      <div class:opacity-50={!nodeConfig.doc_tool_calling}>
         <div class="flex items-center justify-between">
           <label class="text-sm font-medium text-gray-700">DocAware</label>
-          <label class="relative inline-flex items-center cursor-pointer">
+          <label
+            class="relative inline-flex items-center {nodeConfig.doc_tool_calling ? 'cursor-pointer' : 'cursor-not-allowed'}"
+          >
             <input
               type="checkbox"
               checked={nodeConfig.doc_aware}
+              disabled={!nodeConfig.doc_tool_calling}
               on:change={(e) => {
                 nodeConfig.doc_aware = e.target.checked;
                 
@@ -2894,20 +2903,26 @@
               }}
               class="sr-only peer"
             />
-            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600 peer-disabled:opacity-60"></div>
           </label>
         </div>
         <p class="text-xs text-gray-500 mt-1">Enable document-aware RAG capabilities for this agent</p>
+        {#if !nodeConfig.doc_tool_calling}
+          <p class="text-xs text-gray-400 mt-1">Enable Document Tool Calling to use this.</p>
+        {/if}
       </div>
       
       <!-- WEBSEARCH TOGGLE - For AssistantAgent, DelegateAgent -->
-      <div>
+      <div class:opacity-50={!nodeConfig.doc_tool_calling}>
         <div class="flex items-center justify-between">
           <label class="text-sm font-medium text-gray-700">WebSearch</label>
-          <label class="relative inline-flex items-center cursor-pointer">
+          <label
+            class="relative inline-flex items-center {nodeConfig.doc_tool_calling ? 'cursor-pointer' : 'cursor-not-allowed'}"
+          >
             <input
               type="checkbox"
               checked={nodeConfig.web_search_enabled}
+              disabled={!nodeConfig.doc_tool_calling}
               on:change={(e) => {
                 nodeConfig.web_search_enabled = e.target.checked;
                 
@@ -2940,14 +2955,17 @@
               }}
               class="sr-only peer"
             />
-            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-green-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-600"></div>
+            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-green-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-600 peer-disabled:opacity-60"></div>
           </label>
         </div>
         <p class="text-xs text-gray-500 mt-1">Enable web search capabilities to retrieve real-time information from the internet</p>
+        {#if !nodeConfig.doc_tool_calling}
+          <p class="text-xs text-gray-400 mt-1">Enable Document Tool Calling to use this.</p>
+        {/if}
       </div>
       
       <!-- WEBSEARCH CONFIGURATION - Show when WebSearch is enabled -->
-      {#if nodeConfig.web_search_enabled}
+      {#if nodeConfig.doc_tool_calling && nodeConfig.web_search_enabled}
         <div class="border border-green-200 rounded-lg p-4 bg-green-50">
           <div class="flex items-center mb-3">
             <i class="fas fa-globe text-green-600 mr-2"></i>
