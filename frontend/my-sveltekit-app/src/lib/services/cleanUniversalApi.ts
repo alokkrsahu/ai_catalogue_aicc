@@ -331,11 +331,10 @@ export class CleanUniversalApiService {
       body: formData,
     });
 
+    const result = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(`Bulk upload failed: ${response.status}`);
+      throw new Error(result.message || result.error || `Bulk upload failed: ${response.status}`);
     }
-
-    const result = await response.json();
     console.log(`✅ UNIVERSAL: Bulk upload completed: ${result.total_successful} successful, ${result.total_failed} failed`);
     return result;
   }

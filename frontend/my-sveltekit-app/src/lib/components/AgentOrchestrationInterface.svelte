@@ -59,6 +59,7 @@
   let uploadedDocumentPathsError: string | null = null;
   let uploadedDocumentPollInterval: number | null = null;
   let uploadedDocumentPollInFlight = false;
+  let isMounted = false; // Guard against orphaned async continuations after onDestroy
   
   // Conversation history state
   let selectedRunId: string | null = null;
@@ -174,6 +175,7 @@
   console.log(`🤖 AGENT ORCHESTRATION: Initializing for project ${projectId}`);
   
   onMount(() => {
+    isMounted = true;
     console.log(`🤖 AGENT ORCHESTRATION: Component mounted`);
     initializeInterfaceWithPreloading();
     
@@ -185,6 +187,7 @@
   });
   
   onDestroy(() => {
+    isMounted = false;
     // Cleanup subscriptions and polling
     unsubscribeWorkflowStatus();
     workflowStatus.stopPolling();
@@ -259,8 +262,11 @@
       });
 
       // Poll for live updates to uploaded docs in the node attachment picker.
-      // This keeps the picker in sync with newly uploaded ProjectDocuments.
-      startUploadedDocumentPolling();
+      // Only start if still mounted — prevents orphaned interval if user navigated away
+      // during the async initialization above.
+      if (isMounted) {
+        startUploadedDocumentPolling();
+      }
       
     } catch (error) {
       console.error('❌ AGENT ORCHESTRATION: Initialization failed:', error);
