@@ -97,18 +97,16 @@
   let statusRequestInFlight = false;
 
   // Use vector_count (vectors/embeddings created) as the "processed" metric.
-  // Fall back to ready_documents for backward compatibility.
-  $: processedCount =
-    processingStatus?.vector_status?.vector_count ??
-    processingStatus?.vector_status?.ready_documents ??
-    0;
+  // Do NOT fall back to ready_documents — that counts upload-ready files, not vectorised ones.
+  $: processedCount = Number(processingStatus?.vector_status?.vector_count) || 0;
   $: totalDocumentsCount = processingStatus?.vector_status?.total_documents ?? 0;
   $: rawProcessingStatus = processingStatus?.vector_status?.processing_status || processingStatus?.vector_status?.collection_status || 'not_created';
   $: isTerminalProcessingStatus = ['completed', 'failed', 'error'].includes(rawProcessingStatus);
   $: isCountComplete = totalDocumentsCount > 0 && processedCount >= totalDocumentsCount;
+  $: serverIsProcessing = processingStatus?.vector_status?.is_processing === true;
   $: effectiveProcessingStatus = isTerminalProcessingStatus
     ? rawProcessingStatus
-    : (isCountComplete ? 'completed' : (processingStatus?.vector_status?.is_processing ? 'processing' : rawProcessingStatus));
+    : (serverIsProcessing ? 'processing' : rawProcessingStatus);
   
   // Deployment state for Activity Tracker
   let deployment: any = null;
@@ -722,33 +720,29 @@
     statusPollingInterval = setInterval(async () => {
       pollingAttempts++;
       await loadProcessingStatus();
-      const status = effectiveProcessingStatus;
-      const isProcessing = status === 'processing';
-      const vectorCount = processingStatus?.vector_status?.vector_count || 0;
-      
-      console.log(`🔄 POLLING: Attempt ${pollingAttempts} - status=${status}, isProcessing=${isProcessing}, vectors=${vectorCount}`);
-      
-      const isTerminal = ['completed', 'failed', 'error'].includes(status);
-      const isCompleteByCount = totalDocumentsCount > 0 && processedCount >= totalDocumentsCount;
 
-      // Continue polling if:
-      // 1. Not terminal and not complete-by-count, AND
-      // 2. It still looks active/pending OR we are in the first few startup attempts
-      const shouldContinuePolling = !isTerminal &&
-        !isCompleteByCount &&
-        (
-          isProcessing ||
-          ['processing', 'pending', 'not_created'].includes(status) ||
+      const raw = rawProcessingStatus;
+      const stillProcessing = serverIsProcessing;
+      const vectorCount = processingStatus?.vector_status?.vector_count || 0;
+      const isTerminalRaw = ['completed', 'failed', 'error'].includes(raw);
+
+      console.log(`🔄 POLLING: Attempt ${pollingAttempts} - raw=${raw}, serverIsProcessing=${stillProcessing}, vectors=${vectorCount}`);
+
+      // Continue polling while:
+      //  - server says still processing, OR
+      //  - raw status is not terminal AND we are in startup grace period or an active state
+      const shouldContinuePolling = stillProcessing ||
+        (!isTerminalRaw && (
+          ['processing', 'pending', 'not_created'].includes(raw) ||
           pollingAttempts <= 3
-        );
-      
-      // Stop polling when we have a definitive completed/failed status AND not processing
+        ));
+
       if (!shouldContinuePolling || pollingAttempts >= MAX_POLLING_ATTEMPTS) {
         stopStatusPolling();
         loadHierarchicalPaths();
-        if (status === 'completed') {
+        if (raw === 'completed') {
           toasts.success('Document processing completed!');
-        } else if (status === 'failed' || status === 'error') {
+        } else if (raw === 'failed' || raw === 'error') {
           toasts.error('Document processing failed. Check logs for details.');
         } else if (pollingAttempts >= MAX_POLLING_ATTEMPTS) {
           toasts.info('Processing is taking longer than expected. Check status manually.');
