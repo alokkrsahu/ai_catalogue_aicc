@@ -36,7 +36,7 @@ def validate_messages_format(messages: List[Dict[str, Any]]) -> Tuple[bool, Opti
     if len(messages) == 0:
         return False, "Messages array cannot be empty"
     
-    valid_roles = {'user', 'assistant', 'system'}
+    valid_roles = {'user', 'assistant', 'system', 'tool', 'function', 'model'}
     
     for i, msg in enumerate(messages):
         if not isinstance(msg, dict):
@@ -45,10 +45,13 @@ def validate_messages_format(messages: List[Dict[str, Any]]) -> Tuple[bool, Opti
         if 'role' not in msg:
             return False, f"Message at index {i} missing required 'role' field"
         
-        if 'content' not in msg:
-            return False, f"Message at index {i} missing required 'content' field"
-        
+        # tool/function result messages and assistant tool-call messages may
+        # use 'parts', 'tool_call_id', or 'tool_calls' instead of 'content'
         role = msg.get('role')
+        if 'content' not in msg and role not in ('tool', 'function', 'model'):
+            if 'parts' not in msg and 'tool_calls' not in msg:
+                return False, f"Message at index {i} missing required 'content' field"
+        
         if not isinstance(role, str):
             return False, f"Message at index {i} has invalid 'role' type (must be string)"
         
@@ -57,37 +60,39 @@ def validate_messages_format(messages: List[Dict[str, Any]]) -> Tuple[bool, Opti
         
         content = msg.get('content')
         
+        # Tool / function / model messages may carry data in 'parts',
+        # 'tool_call_id', or 'tool_calls' instead of standard content.
+        # Skip detailed content validation for these provider-specific roles.
+        if role in ('tool', 'function', 'model'):
+            continue
+        
+        # Assistant messages with tool_calls may have None content
+        if content is None and role == 'assistant' and 'tool_calls' in msg:
+            continue
+        
         # Support both string and array content formats
         if isinstance(content, str):
-            # Standard string content
             if len(content.strip()) == 0:
                 logger.warning(f"⚠️ MESSAGE CONVERTER: Message at index {i} has empty content")
         elif isinstance(content, list):
-            # Array content for file attachments (multi-modal format)
             if len(content) == 0:
                 return False, f"Message at index {i} has empty content array"
             
-            # Validate each content item
             for j, item in enumerate(content):
                 if not isinstance(item, dict):
                     return False, f"Message at index {i}, content item {j} must be a dictionary"
                 
-                # Check for 'type' field which is required for multi-modal content
                 if 'type' not in item:
                     return False, f"Message at index {i}, content item {j} missing 'type' field"
                 
                 item_type = item.get('type')
                 
-                # Validate based on type
                 if item_type == 'text':
                     if 'text' not in item:
                         return False, f"Message at index {i}, content item {j} of type 'text' missing 'text' field"
-                elif item_type in ('file', 'file_data', 'document', 'image', 'image_url'):
-                    # File/image attachments - provider-specific validation
-                    # These are handled by the LLM providers themselves
+                elif item_type in ('file', 'file_data', 'document', 'image', 'image_url', 'tool_use', 'tool_result'):
                     pass
                 else:
-                    # Unknown type - log warning but allow (provider-specific types)
                     logger.debug(f"ℹ️ MESSAGE CONVERTER: Unknown content type '{item_type}' at index {i}, item {j}")
         else:
             return False, f"Message at index {i} has invalid 'content' type (must be string or array)"

@@ -14,6 +14,8 @@ class LLMResponse:
     token_count: Optional[int] = None
     cost_estimate: Optional[float] = None
     error: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    finish_reason: Optional[str] = None
 
 class LLMProvider(ABC):
     """Abstract base class for all LLM providers"""

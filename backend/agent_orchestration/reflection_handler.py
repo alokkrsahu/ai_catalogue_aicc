@@ -17,6 +17,27 @@ from users.models import WorkflowExecutionMessage
 
 logger = logging.getLogger(__name__)
 
+
+def _latest_citations_for_agent(messages: Optional[List[Dict[str, Any]]], agent_name: str) -> List[Any]:
+    """
+    Walk messages newest-first; return the first non-empty metadata.citations list
+    for the given agent (e.g. pre-reflection chat message before reflection_revision).
+    """
+    if not messages or not agent_name:
+        return []
+    for m in reversed(messages):
+        if not isinstance(m, dict):
+            continue
+        if m.get("agent_name") != agent_name:
+            continue
+        meta = m.get("metadata")
+        if not isinstance(meta, dict):
+            continue
+        cites = meta.get("citations")
+        if isinstance(cites, list) and len(cites) > 0:
+            return list(cites)
+    return []
+
 class ReflectionHandler:
     """
     Handles reflection connections and cross-agent reflection for conversation orchestration.
@@ -430,6 +451,22 @@ Please revise your response based on this feedback:
                                 # Get source config for metadata
                                 source_data = source_node.get('data', {})
                                 
+                                _rev_meta: Dict[str, Any] = {
+                                    'is_reflection_revision': True,
+                                    'reflection_target': target_name,
+                                    'iteration': iteration + 1,
+                                    'max_iterations': max_iterations,
+                                    'llm_provider': source_data.get('llm_provider', 'unknown'),
+                                    'llm_model': source_data.get('llm_model', 'unknown'),
+                                    'temperature': source_data.get('temperature', 0.7),
+                                    'cost_estimate': getattr(revised_response, 'cost_estimate', None) if hasattr(revised_response, 'cost_estimate') else None,
+                                    'based_on_feedback': True,
+                                }
+                                inherited_cites = _latest_citations_for_agent(current_messages, source_name)
+                                if inherited_cites:
+                                    _rev_meta['citations'] = inherited_cites
+                                    _rev_meta['citations_inherited_from'] = 'pre_reflection_chat'
+
                                 revised_message = {
                                     'sequence': message_sequence,
                                     'agent_name': source_name,
@@ -439,17 +476,7 @@ Please revise your response based on this feedback:
                                     'timestamp': timezone.now().isoformat(),
                                     'response_time_ms': getattr(revised_response, 'response_time_ms', 0) if hasattr(revised_response, 'response_time_ms') else 0,
                                     'token_count': getattr(revised_response, 'token_count', None) if hasattr(revised_response, 'token_count') else None,
-                                    'metadata': {
-                                        'is_reflection_revision': True,
-                                        'reflection_target': target_name,
-                                        'iteration': iteration + 1,
-                                        'max_iterations': max_iterations,
-                                        'llm_provider': source_data.get('llm_provider', 'unknown'),
-                                        'llm_model': source_data.get('llm_model', 'unknown'),
-                                        'temperature': source_data.get('temperature', 0.7),
-                                        'cost_estimate': getattr(revised_response, 'cost_estimate', None) if hasattr(revised_response, 'cost_estimate') else None,
-                                        'based_on_feedback': True
-                                    }
+                                    'metadata': _rev_meta,
                                 }
                                 
                                 current_messages.append(revised_message)
@@ -630,7 +657,19 @@ Please provide your final response, taking this feedback into account:
         
         # Get the next sequence number
         next_sequence = len(messages)
-        
+
+        _final_meta: Dict[str, Any] = {
+            'input_method': 'reflection_completion',
+            'reflection_target': target_name,
+            'based_on_feedback': True,
+            'llm_provider': source_config.get('llm_provider'),
+            'llm_model': source_config.get('llm_model'),
+        }
+        inherited_final = _latest_citations_for_agent(messages, source_name)
+        if inherited_final:
+            _final_meta['citations'] = inherited_final
+            _final_meta['citations_inherited_from'] = 'pre_reflection_chat'
+
         # Add final reflection response message with proper metadata
         messages.append({
             'sequence': next_sequence,
@@ -641,13 +680,7 @@ Please provide your final response, taking this feedback into account:
             'timestamp': timezone.now().isoformat(),
             'response_time_ms': getattr(revised_response, 'response_time_ms', 0) if revised_response and hasattr(revised_response, 'response_time_ms') else 0,
             'token_count': getattr(revised_response, 'token_count', None) if revised_response and hasattr(revised_response, 'token_count') else None,
-            'metadata': {
-                'input_method': 'reflection_completion',
-                'reflection_target': target_name,
-                'based_on_feedback': True,
-                'llm_provider': source_config.get('llm_provider'),
-                'llm_model': source_config.get('llm_model')
-            }
+            'metadata': _final_meta,
         })
         
         # CRITICAL FIX: Save messages immediately with executed_nodes
@@ -793,7 +826,18 @@ Please provide your final response, taking this feedback into account:
                     
                     # Add iteration response to messages array (messages already has human feedback)
                     iteration_sequence = len(messages)
-                    
+
+                    _iter_meta: Dict[str, Any] = {
+                        'input_method': 'reflection_iteration',
+                        'iteration_feedback': True,
+                        'feedback_from': target_name,
+                        'responding_to_sequence': feedback_sequence,
+                    }
+                    inherited_iter = _latest_citations_for_agent(messages, source_name)
+                    if inherited_iter:
+                        _iter_meta['citations'] = inherited_iter
+                        _iter_meta['citations_inherited_from'] = 'pre_reflection_chat'
+
                     messages.append({
                         'sequence': iteration_sequence,
                         'agent_name': source_name,
@@ -802,12 +846,7 @@ Please provide your final response, taking this feedback into account:
                         'message_type': 'reflection_iteration',
                         'timestamp': timezone.now().isoformat(),
                         'response_time_ms': 0,
-                        'metadata': {
-                            'input_method': 'reflection_iteration',
-                            'iteration_feedback': True,
-                            'feedback_from': target_name,
-                            'responding_to_sequence': feedback_sequence
-                        }
+                        'metadata': _iter_meta,
                     })
                     
                     logger.info(f"📝 REFLECTION ITERATE: Added iteration response message to sequence {iteration_sequence}")

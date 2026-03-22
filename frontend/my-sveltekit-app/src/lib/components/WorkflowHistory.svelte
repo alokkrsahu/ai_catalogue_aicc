@@ -180,6 +180,8 @@
       case 'reflection_revision': return 'fa-edit';
       case 'reflection_final': return 'fa-check-double';
       case 'reflection_iteration': return 'fa-redo';
+      case 'tool_plan': return 'fa-clipboard-list';
+      case 'tool_notebook': return 'fa-book';
       default: return 'fa-comment';
     }
   }
@@ -196,6 +198,8 @@
       case 'reflection_revision': return 'bg-indigo-100 text-indigo-800';
       case 'reflection_final': return 'bg-emerald-100 text-emerald-800';
       case 'reflection_iteration': return 'bg-pink-100 text-pink-800';
+      case 'tool_plan': return 'bg-slate-100 text-slate-800';
+      case 'tool_notebook': return 'bg-teal-100 text-teal-800';
       default: return 'bg-oxford-blue text-white';
     }
   }
@@ -555,6 +559,68 @@
                         <div class="text-gray-700 whitespace-pre-wrap bg-pink-50 p-3 rounded-md border-l-4 border-pink-300">
                           {message.content}
                         </div>
+                      </div>
+                    {:else if message.message_type === 'tool_plan'}
+                      <div class="text-sm">
+                        <div class="font-medium text-slate-700 mb-2 flex items-center">
+                          <i class="fas fa-clipboard-list mr-2"></i>
+                          Agent Plan
+                        </div>
+                        <div class="text-gray-700 whitespace-pre-wrap bg-slate-50 p-3 rounded-md border-l-4 border-slate-400">
+                          {message.content}
+                        </div>
+                      </div>
+                    {:else if message.message_type === 'tool_notebook'}
+                      {@const entry = (() => { try { return JSON.parse(message.content); } catch { return null; } })()}
+                      <div class="text-sm">
+                        <div class="font-medium text-teal-700 mb-2 flex items-center">
+                          <i class="fas fa-book mr-2"></i>
+                          Notebook Entry
+                          {#if entry?.step}
+                            <span class="ml-2 text-xs bg-teal-100 text-teal-600 px-2 py-1 rounded">
+                              Step {entry.step}
+                            </span>
+                          {/if}
+                          {#if entry?.status === 'completed'}
+                            <i class="fas fa-check-circle ml-2 text-green-500"></i>
+                          {/if}
+                        </div>
+                        {#if entry}
+                          <div class="bg-teal-50 p-3 rounded-md border-l-4 border-teal-300 space-y-2">
+                            <div class="flex items-center text-xs text-teal-600">
+                              <i class="fas fa-file-alt mr-1"></i>
+                              <span class="font-medium">{entry.tool_name}</span>
+                            </div>
+                            <div class="text-xs text-gray-500">
+                              <span class="font-medium">Query:</span> {entry.query}
+                            </div>
+                            <div class="text-gray-700 whitespace-pre-wrap text-sm">
+                              {entry.result}
+                            </div>
+                            {#if entry.source_passages?.length}
+                              <div class="mt-2 pt-2 border-t border-teal-200">
+                                <div class="text-xs font-medium text-teal-700 mb-1.5 flex items-center">
+                                  <i class="fas fa-quote-left mr-1.5 text-teal-400" style="font-size: 0.6rem;"></i>
+                                  Citations ({entry.source_passages.length})
+                                </div>
+                                {#each entry.source_passages.slice(0, 3) as passage}
+                                  <div class="text-xs bg-white/60 rounded px-2 py-1.5 mb-1 border-l-2 border-teal-400">
+                                    <span class="text-gray-600 italic">"{passage.quoted_text?.slice(0, 200)}{passage.quoted_text?.length > 200 ? '...' : ''}"</span>
+                                    {#if passage.page || passage.section}
+                                      <span class="text-teal-500 ml-1 not-italic text-xs">
+                                        {#if passage.page}p.{passage.page}{/if}{#if passage.page && passage.section}, {/if}{#if passage.section}{passage.section}{/if}
+                                      </span>
+                                    {/if}
+                                  </div>
+                                {/each}
+                              </div>
+                            {/if}
+                          </div>
+                        {:else}
+                          <div class="text-gray-700 whitespace-pre-wrap bg-teal-50 p-3 rounded-md border-l-4 border-teal-300">
+                            {message.content}
+                          </div>
+                        {/if}
                       </div>
                     {:else}
                       <div class="text-sm text-gray-700 whitespace-pre-wrap">{message.content}</div>

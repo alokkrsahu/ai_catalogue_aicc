@@ -73,6 +73,7 @@ Navigate through different pages to access various features and capabilities.'''
                     'name': 'Project Documents',
                     'short_name': 'Documents',
                     'icon': 'fa-home',
+                    'description': 'Upload and manage documents',
                     'features': ['document_management', 'upload_interface', 'processing_status']
                 },
                 {
@@ -80,6 +81,7 @@ Navigate through different pages to access various features and capabilities.'''
                     'name': 'Agent Orchestration',
                     'short_name': 'Agents',
                     'icon': 'fa-sitemap',
+                    'description': 'Design and run AI workflows',
                     'features': ['visual_workflow_designer', 'agent_management', 'real_time_execution', 'workflow_history']
                 },
                 {
@@ -87,6 +89,7 @@ Navigate through different pages to access various features and capabilities.'''
                     'name': 'Evaluation',
                     'short_name': 'Evaluation',
                     'icon': 'fa-clipboard-check',
+                    'description': 'Test and compare results',
                     'features': ['workflow_evaluation', 'csv_upload', 'metrics_comparison', 'batch_testing']
                 },
                 {
@@ -94,6 +97,7 @@ Navigate through different pages to access various features and capabilities.'''
                     'name': 'Deploy',
                     'short_name': 'Deploy',
                     'icon': 'fa-rocket',
+                    'description': 'Publish your workflow endpoint',
                     'features': ['workflow_deployment', 'public_endpoint', 'origin_management', 'rate_limiting']
                 },
                 {
@@ -101,6 +105,7 @@ Navigate through different pages to access various features and capabilities.'''
                     'name': 'Activity Tracker',
                     'short_name': 'Activity',
                     'icon': 'fa-chart-line',
+                    'description': 'Monitor sessions and usage',
                     'features': ['deployment_activity', 'session_tracking', 'analytics']
                 },
                 {
@@ -108,6 +113,7 @@ Navigate through different pages to access various features and capabilities.'''
                     'name': 'System Performance Analysis',
                     'short_name': 'Performance',
                     'icon': 'fa-chart-bar',
+                    'description': 'Review experiment metrics',
                     'features': ['experiment_metrics', 'performance_analysis', 'system_evaluation']
                 },
                 {
@@ -115,6 +121,7 @@ Navigate through different pages to access various features and capabilities.'''
                     'name': 'Chatbot',
                     'short_name': 'Chatbot',
                     'icon': 'fa-comments',
+                    'description': 'Chat with your assistant',
                     'features': ['in_app_chatbot']
                 }
             ],

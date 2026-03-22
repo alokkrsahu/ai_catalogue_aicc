@@ -84,7 +84,8 @@ class LLMProviderManager:
             if provider_type == 'openai':
                 logger.info(f"✅ LLM PROVIDER: Creating OpenAI provider with project key, model {model}")
                 try:
-                    provider = OpenAIProvider(api_key=api_key, model=model)
+                    max_tokens = agent_config.get('max_tokens', 4000)
+                    provider = OpenAIProvider(api_key=api_key, model=model, max_tokens=max_tokens)
                     logger.info(f"✅ LLM PROVIDER: Successfully created OpenAI provider with project API key")
                     return provider
                 except Exception as openai_error:
@@ -93,7 +94,7 @@ class LLMProviderManager:
                 
             elif provider_type in ['anthropic', 'claude']:
                 # Claude requires max_tokens, use a reasonable default
-                max_tokens = 4096
+                max_tokens = agent_config.get('max_tokens', 4096)
                 logger.info(f"✅ LLM PROVIDER: Creating Anthropic provider with project key, model {model}, max_tokens: {max_tokens}")
                 return ClaudeProvider(api_key=api_key, model=model, max_tokens=max_tokens)
                 

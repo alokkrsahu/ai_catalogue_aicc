@@ -17,8 +17,10 @@
   export let modelsLoaded: boolean = false;
   export let hierarchicalPaths: any[] = []; // Hierarchical paths for Content Filter
   export let hierarchicalPathsLoaded: boolean = false; // Whether hierarchical paths are loaded
+  export let uploadedDocumentPaths: any[] = []; // Uploaded-file tree for node File Attachments picker
+  export let uploadedDocumentPathsLoaded: boolean = false;
   export let documentsInfo: any = null; // Document and processing status info
-  export let documentLlmStatus: Record<string, {openai: boolean, anthropic: boolean, google: boolean}> = {}; // Per-document LLM upload status
+  export let documentLlmStatus: Record<string, Record<string, { status: string; reason?: string }>> = {}; // Per-document LLM upload status
   export let designerMode: boolean = false; // Full-screen designer mode
   
   const dispatch = createEventDispatcher();
@@ -262,11 +264,11 @@
     },
     'DelegateAgent': {
       name: 'Delegate Agent',
-      description: 'Specialized agent that works exclusively with GroupChatManager in iterative conversation loops',
+      description: 'Specialized agent invoked by GroupChatManager via tool calls based on its description',
       icon: 'fa-handshake',
       color: '#f59e0b',
       category: 'Delegation',
-      functionality: 'Provides specialized capabilities to GroupChatManager with configurable iteration limits and termination conditions. Can only connect to GroupChatManager.',
+      functionality: 'Provides specialized capabilities to GroupChatManager. The manager dispatches tasks to delegates via tool calls. Delegates can use doc_tool_calling to access project documents. Can only connect to GroupChatManager.',
       useCases: ['Specialized task delegation', 'Iterative problem solving', 'Feedback loops', 'Expert consultation']
     },
     'EndNode': {
@@ -968,17 +970,16 @@
           name: `AI Assistant ${count}`,
           system_message: 'You are a helpful AI assistant.',
           description: 'AI assistant for task completion',
-          llm_config: 'gpt-4'
+          llm_config: 'gpt-4',
+          doc_tool_calling: false,
+          doc_tool_calling_documents: []
         };
       case 'GroupChatManager':
         return {
           name: `Chat Manager ${count}`,
           description: 'Manages group conversation flow with delegates',
           system_message: 'You are a Group Chat Manager responsible for coordinating multiple specialized agents and synthesizing their contributions into comprehensive solutions.',
-          speaker_selection: 'auto',
-          max_rounds: 10, // Default for Round Robin, Intelligent delegation will override to 1
           delegate_connections: [],
-          termination_strategy: 'all_delegates_complete' // Default termination strategy
         };
       case 'DelegateAgent':
         return {
@@ -986,7 +987,8 @@
           description: 'Specialized delegate for Chat Manager',
           system_message: 'You are a specialized delegate agent.',
           llm_config: 'gpt-4',
-          termination_condition: 'FINISH',
+          doc_tool_calling: false,
+          doc_tool_calling_documents: [],
           can_only_connect_to: 'GroupChatManager'
         };
       case 'EndNode':
@@ -2381,6 +2383,8 @@
             {modelsLoaded}
             {hierarchicalPaths}
             {hierarchicalPathsLoaded}
+            {uploadedDocumentPaths}
+            {uploadedDocumentPathsLoaded}
             documentsInfo={documentsInfo}
             {documentLlmStatus}
             isMaximized={true}
@@ -2430,6 +2434,8 @@
           {modelsLoaded}
           {hierarchicalPaths}
           {hierarchicalPathsLoaded}
+          {uploadedDocumentPaths}
+          {uploadedDocumentPathsLoaded}
           documentsInfo={documentsInfo}
           {documentLlmStatus}
           isMaximized={false}

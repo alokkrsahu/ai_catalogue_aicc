@@ -19,6 +19,12 @@ from users.models import WorkflowExecution, WorkflowExecutionMessage, WorkflowEx
 from llm_eval.providers.base import LLMResponse
 from mcp_servers.manager import get_mcp_server_manager
 
+from .executed_nodes_codec import (
+    pack_executed_output,
+    plain_executed_output,
+    format_upstream_citations_block,
+)
+
 logger = logging.getLogger('conversation_orchestrator')
 
 
@@ -70,7 +76,7 @@ class WorkflowExecutor:
         self.human_input_handler = human_input_handler
         self.reflection_handler = reflection_handler
     
-    async def execute_workflow(self, workflow: AgentWorkflow, executed_by, deployment_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def execute_workflow(self, workflow: AgentWorkflow, executed_by, deployment_context: Optional[Dict[str, Any]] = None, event_callback=None) -> Dict[str, Any]:
         """
         Execute the complete workflow with REAL LLM calls and conversation chaining
         Returns execution results as dictionary instead of database records
@@ -285,8 +291,9 @@ class WorkflowExecutor:
                         # Update state from parallel execution results
                         for result in parallel_results:
                             if result.get('executed'):
-                                executed_nodes[result['node_id']] = result['output']
-                                conversation_history += f"\n{result['node_name']}: {result['output']}"
+                                out_val = result['output']
+                                executed_nodes[result['node_id']] = out_val
+                                conversation_history += f"\n{result['node_name']}: {plain_executed_output(out_val)}"
                                 agents_involved.update(result.get('agents_involved', []))
                                 total_response_time += result.get('response_time_ms', 0)
                                 for provider in result.get('providers_used', []):
@@ -488,68 +495,41 @@ class WorkflowExecutor:
                         input_sources = self.workflow_parser.find_multiple_inputs_to_node(node_id, graph_json)
                         
                         try:
-                            # Get project for API keys
                             project = await sync_to_async(lambda: workflow.project)()
-                            
-                            # DIAGNOSTIC: Log node data to see delegation_mode
-                            node_data = node.get('data', {})
-                            delegation_mode = node_data.get('delegation_mode', 'round_robin')
-                            logger.info(f"🔍 DIAGNOSTIC: Node data keys: {list(node_data.keys())}")
-                            logger.info(f"🔍 DIAGNOSTIC: Node delegation_mode: {delegation_mode}")
-                            logger.info(f"🔍 DIAGNOSTIC: Node max_subqueries: {node_data.get('max_subqueries')}")
-                            logger.info(f"🔍 DIAGNOSTIC: Node max_iterations: {node_data.get('max_iterations')}")
-                            logger.info(f"🔍 DIAGNOSTIC: Node max_rounds: {node_data.get('max_rounds')}")
-                            
-                            # CRITICAL FIX: Always use multi-input version if intelligent delegation is enabled
-                            # OR if there are multiple inputs. The multi-input version can handle single inputs too.
-                            if len(input_sources) > 1 or delegation_mode == 'intelligent':
-                                # Use enhanced multi-input version (supports both round-robin and intelligent delegation)
-                                # This version can handle both single and multiple inputs
-                                if len(input_sources) > 1:
-                                    logger.info(f"📥 ORCHESTRATOR: GroupChatManager {node_name} has {len(input_sources)} input sources - using multi-input mode")
-                                else:
-                                    logger.info(f"📥 ORCHESTRATOR: GroupChatManager {node_name} has 1 input source but intelligent delegation is enabled - using multi-input mode (supports intelligent delegation)")
-                                
-                                chat_result = await self.chat_manager.execute_group_chat_manager_with_multiple_inputs(
-                                    node, llm_provider, input_sources, executed_nodes, execution_sequence, graph_json, str(project_id), project, execution_id
-                                )
+
+                            # Always use multi-input path (handles single input too)
+                            if len(input_sources) > 1:
+                                logger.info(f"📥 ORCHESTRATOR: GroupChatManager {node_name} has {len(input_sources)} input sources")
                             else:
-                                # Use traditional single-input version for backward compatibility (only when round-robin and single input)
-                                logger.info(f"📥 ORCHESTRATOR: GroupChatManager {node_name} has {len(input_sources)} input source - using single-input mode (round-robin)")
-                                chat_result = await self.chat_manager.execute_group_chat_manager(
-                                    node, llm_provider, conversation_history, execution_sequence, graph_json, str(project_id), project
-                                )
-                            
+                                logger.info(f"📥 ORCHESTRATOR: GroupChatManager {node_name} has 1 input source")
+
+                            chat_result = await self.chat_manager.execute_group_chat_manager_with_multiple_inputs(
+                                node, llm_provider, input_sources, executed_nodes, execution_sequence, graph_json, str(project_id), project, execution_id, event_callback=event_callback
+                            )
+
                             logger.info(f"✅ ORCHESTRATOR: GroupChatManager {node_name} completed successfully")
-                            
-                            # Extract final response and delegate details
+
                             agent_response_text = chat_result['final_response']
                             delegate_conversations = chat_result['delegate_conversations']
                             delegate_status = chat_result['delegate_status']
                             total_iterations = chat_result['total_iterations']
-                            
-                            # CRITICAL FIX: Validate and re-assert node_name for GroupChatManager before logging
-                            # This prevents any accidental modification during delegate message parsing
-                            if node_type == 'GroupChatManager':
-                                # Validate node_name is not a delegate name
-                                original_node_name = node_name
-                                if 'delegate' in node_name.lower() and node_name.lower() != 'group chat manager':
-                                    logger.warning(f"⚠️ ORCHESTRATOR: Suspicious node_name '{node_name}' for GroupChatManager, using node data")
-                                    node_name = node_data.get('name', node_data.get('label', 'Group Chat Manager'))
-                                
-                                # Final validation
-                                if not node_name or len(node_name.strip()) == 0:
-                                    node_name = node_data.get('label', 'Group Chat Manager')
-                                
-                                # Re-assert from node data to prevent any accidental modification
-                                node_name = node_data.get('name', node_data.get('label', 'Group Chat Manager'))
-                                
-                                if original_node_name != node_name:
-                                    logger.warning(f"⚠️ ORCHESTRATOR: GroupChatManager node_name changed from '{original_node_name}' to '{node_name}', corrected")
-                                
-                                logger.info(f"✅ ORCHESTRATOR: Logging GroupChatManager message with agent_name: '{node_name}'")
-                            
-                            # CRITICAL FIX: Log GroupChatManager message with delegate details in metadata
+
+                            node_name = node_data.get('name', node_data.get('label', 'Group Chat Manager'))
+
+                            gcm_metadata = {
+                                    'llm_provider': agent_config['llm_provider'],
+                                    'llm_model': agent_config['llm_model'],
+                                    'is_group_chat_manager': True,
+                                    'total_iterations': total_iterations,
+                                    'delegate_count': len(delegate_status),
+                                    'expandable': True,
+                                    'delegate_conversations': delegate_conversations,
+                                    'delegate_status': delegate_status,
+                                    'manager_plan': chat_result.get('manager_plan', ''),
+                            }
+                            if chat_result.get('citations'):
+                                gcm_metadata['citations'] = chat_result['citations']
+
                             messages.append({
                                 'sequence': message_sequence,
                                 'agent_name': node_name,
@@ -557,46 +537,19 @@ class WorkflowExecutor:
                                 'content': agent_response_text,
                                 'message_type': 'group_chat_summary',
                                 'timestamp': timezone.now().isoformat(),
-                                'response_time_ms': 0,  # GroupChatManager doesn't have direct response time
+                                'response_time_ms': 0,
                                 'token_count': None,
-                                'metadata': {
-                                    'llm_provider': agent_config['llm_provider'],
-                                    'llm_model': agent_config['llm_model'],
-                                    'is_group_chat_manager': True,
-                                    'total_iterations': total_iterations,
-                                    'delegate_count': len(delegate_status),
-                                    'expandable': True,
-                                    'delegate_conversations': delegate_conversations,  # Full delegate conversation log for expand
-                                    'delegate_status': delegate_status  # Delegate execution status for expand
-                                }
+                                'metadata': gcm_metadata,
                             })
-                            message_sequence += 1  # Increment for chronological ordering
-                            
-                            # Log individual delegate messages for better visibility in conversation history
-                            logger.info(f"📝 DELEGATE LOGGING: Logging individual delegate messages from {len(delegate_conversations)} conversation entries")
-                            
-                            # Get delegation mode from node config
-                            manager_data = node.get('data', {})
-                            delegation_mode = manager_data.get('delegation_mode', 'round_robin')
-                            
-                            # Check if this is intelligent delegation (has delegation_metrics or subquery_assignments)
-                            is_intelligent_delegation = 'delegation_metrics' in chat_result or 'subquery_assignments' in chat_result
-                            
-                            if is_intelligent_delegation:
-                                # Intelligent delegation: Use flat delegate_responses list if available
-                                delegate_responses_flat = chat_result.get('delegate_responses_flat', [])
-                                
-                                if delegate_responses_flat:
-                                    # Log from flat list (preferred method)
-                                    logger.info(f"📝 DELEGATE LOGGING (INTELLIGENT): Logging {len(delegate_responses_flat)} delegate responses from flat list")
-                                    for delegate_response in delegate_responses_flat:
-                                        delegate_name = delegate_response.get('delegate_name', 'Unknown Delegate')
-                                        response_text = delegate_response.get('response', '')
-                                        subquery_id = delegate_response.get('subquery_id', 'unknown')
-                                        # Timing/token metadata propagated from intelligent delegation engine
-                                        delegate_response_time_ms = delegate_response.get('response_time_ms', 0)
-                                        delegate_token_count = delegate_response.get('token_count')
-                                        
+                            message_sequence += 1
+
+                            # Log individual delegate messages from conversation log
+                            for conv_entry in delegate_conversations:
+                                if isinstance(conv_entry, str) and ':' in conv_entry:
+                                    parts = conv_entry.split(':', 1)
+                                    if len(parts) == 2:
+                                        delegate_name = parts[0].strip()
+                                        response_text = parts[1].strip()
                                         messages.append({
                                             'sequence': message_sequence,
                                             'agent_name': delegate_name,
@@ -604,141 +557,27 @@ class WorkflowExecutor:
                                             'content': response_text,
                                             'message_type': 'delegate_response',
                                             'timestamp': timezone.now().isoformat(),
-                                            'response_time_ms': delegate_response_time_ms,
-                                            'token_count': delegate_token_count,
+                                            'response_time_ms': 0,
+                                            'token_count': None,
                                             'metadata': {
                                                 'parent_manager': node_name,
-                                                'delegation_mode': 'intelligent',
-                                                'subquery_id': subquery_id,
-                                                'status': delegate_response.get('status', 'completed'),
+                                                'delegation_mode': 'tool_calling',
                                                 'llm_provider': agent_config.get('llm_provider', 'unknown'),
                                                 'llm_model': agent_config.get('llm_model', 'unknown')
                                             }
                                         })
                                         message_sequence += 1
-                                        logger.info(f"📝 DELEGATE LOGGING (INTELLIGENT): Logged message from {delegate_name} (Subquery: {subquery_id})")
-                                else:
-                                    # Fallback: Parse from delegate_conversations (may be truncated)
-                                    # Format: "[Subquery {sq_id[:8]}] {delegate_name}: {response[:200]}..."
-                                    logger.info(f"📝 DELEGATE LOGGING (INTELLIGENT): Parsing {len(delegate_conversations)} conversation entries (fallback - may be truncated)")
-                                    
-                                    subquery_assignments = chat_result.get('subquery_assignments', {})
-                                    import re
-                                    
-                                    for conv_entry in delegate_conversations:
-                                        if isinstance(conv_entry, str) and ':' in conv_entry:
-                                            # Extract subquery ID, delegate name, and response
-                                            subquery_match = re.search(r'\[Subquery ([^\]]+)\]', conv_entry)
-                                            if subquery_match:
-                                                sq_id_short = subquery_match.group(1)
-                                                # Find full subquery ID from assignments
-                                                full_sq_id = None
-                                                for sq_id in subquery_assignments.keys():
-                                                    if sq_id[:8] == sq_id_short:
-                                                        full_sq_id = sq_id
-                                                        break
-                                                
-                                                # Extract delegate name and response
-                                                parts = conv_entry.split(':', 1)
-                                                if len(parts) == 2:
-                                                    delegate_name = parts[0].replace(f'[Subquery {sq_id_short}]', '').strip()
-                                                    response_text = parts[1].strip()
-                                                    # Remove "..." if truncated
-                                                    if response_text.endswith('...'):
-                                                        response_text = response_text[:-3].strip()
-                                                    
-                                                    # Log individual delegate message
-                                                    messages.append({
-                                                        'sequence': message_sequence,
-                                                        'agent_name': delegate_name,
-                                                        'agent_type': 'DelegateAgent',
-                                                        'content': response_text,
-                                                        'message_type': 'delegate_response',
-                                                        'timestamp': timezone.now().isoformat(),
-                                                        'response_time_ms': 0,
-                                                        'token_count': None,
-                                                        'metadata': {
-                                                            'parent_manager': node_name,
-                                                            'delegation_mode': 'intelligent',
-                                                            'subquery_id': full_sq_id or sq_id_short,
-                                                            'truncated': response_text.endswith('...') if response_text else False,
-                                                            'llm_provider': agent_config.get('llm_provider', 'unknown'),
-                                                            'llm_model': agent_config.get('llm_model', 'unknown')
-                                                        }
-                                                    })
-                                                    message_sequence += 1
-                                                    logger.info(f"📝 DELEGATE LOGGING (INTELLIGENT): Logged message from {delegate_name} (Subquery: {full_sq_id or sq_id_short})")
-                            else:
-                                # Round Robin mode: Parse delegate_conversations array
-                                # Format: "[Round X] DelegateName: response text"
-                                for conv_entry in delegate_conversations:
-                                    if isinstance(conv_entry, str) and ':' in conv_entry:
-                                        # Extract delegate name and response
-                                        parts = conv_entry.split(':', 1)
-                                        if len(parts) == 2:
-                                            round_info = parts[0].strip()  # "[Round X] DelegateName"
-                                            response_text = parts[1].strip()
-                                            
-                                            # Extract delegate name from round info
-                                            delegate_name = round_info.replace('[Round', '').replace(']', '').strip()
-                                            # Remove round number if present
-                                            if delegate_name and delegate_name.split()[0].isdigit():
-                                                delegate_name = ' '.join(delegate_name.split()[1:])
-                                            
-                                            # Extract round number
-                                            round_number = 1
-                                            import re
-                                            round_match = re.search(r'Round (\d+)', round_info)
-                                            if round_match:
-                                                round_number = int(round_match.group(1))
-                                            
-                                            # Log individual delegate message
-                                            messages.append({
-                                                'sequence': message_sequence,
-                                                'agent_name': delegate_name,
-                                                'agent_type': 'DelegateAgent',
-                                                'content': response_text,
-                                                'message_type': 'delegate_response',
-                                                'timestamp': timezone.now().isoformat(),
-                                                'response_time_ms': 0,
-                                                'token_count': None,
-                                                'metadata': {
-                                                    'parent_manager': node_name,
-                                                    'round': round_number,
-                                                    'delegation_mode': 'round_robin',
-                                                    'llm_provider': agent_config.get('llm_provider', 'unknown'),
-                                                    'llm_model': agent_config.get('llm_model', 'unknown')
-                                                }
-                                            })
-                                            message_sequence += 1
-                                            logger.info(f"📝 DELEGATE LOGGING (ROUND ROBIN): Logged message from {delegate_name} (Round {round_number})")
-                            
-                            # After delegate message parsing, verify node_name hasn't changed for GroupChatManager
-                            if node_type == 'GroupChatManager':
-                                logger.info(f"🔍 DEBUG: GroupChatManager node_name after delegate parsing: {node_name}")
-                                # Re-assert node_name from node data to prevent any accidental modification
-                                validated_name = node_data.get('name', node_data.get('label', 'Group Chat Manager'))
-                                if validated_name != node_name:
-                                    logger.warning(f"⚠️ ORCHESTRATOR: GroupChatManager node_name was '{node_name}', correcting to '{validated_name}'")
-                                    node_name = validated_name
-                            
-                            # Save messages to execution record
+
                             execution_record.messages_data = messages
                             await sync_to_async(execution_record.save)()
-                            logger.info(f"💾 ORCHESTRATOR: Saved GroupChatManager {node_name} message with {len(delegate_conversations)} delegate conversations and {len([m for m in messages if m.get('agent_type') == 'DelegateAgent'])} individual delegate messages")
-                            
-                            # CRITICAL FIX: Update conversation history with agent response
+                            logger.info(f"💾 ORCHESTRATOR: Saved GroupChatManager {node_name} message with {len(delegate_conversations)} delegate conversations")
+
                             conversation_history += f"\n{node_name}: {agent_response_text}"
-                            
-                            # Store node output for multi-input support
                             executed_nodes[node_id] = agent_response_text
-                            
-                            # CRITICAL FIX: Track agent involvement for GroupChatManager
                             agents_involved.add(node_name)
                             if agent_config['llm_provider'] not in providers_used:
                                 providers_used.append(agent_config['llm_provider'])
-                            
-                            # CRITICAL FIX: Save updated conversation history to database
+
                             execution_record.conversation_history = conversation_history
                             await sync_to_async(execution_record.save)()
                         except Exception as gcm_error:
@@ -805,28 +644,59 @@ class WorkflowExecutor:
                                         prompt_result_single.get('provider', 'openai')
                                     )
                             
-                            # CRITICAL FIX: Use separate variable for LLM-formatted messages
-                            # These are for LLM API calls only, NOT for storage in messages_data
-                            # Execute the agent with structured messages
-                            agent_response = await llm_provider.generate_response(
-                                messages=llm_messages
-                            )
+                            # --- Tool Calling Mode (document tools, web search, and/or DocAware) ---
+                            _synthesis_citations = []
+                            _ws_handler = getattr(self.chat_manager, 'websearch_handler', None)
+                            _ws_enabled = _ws_handler and _ws_handler.is_websearch_enabled(node)
+                            _da_handler = getattr(self.chat_manager, 'docaware_handler', None)
+                            _da_enabled = _da_handler and _da_handler.is_docaware_enabled(node)
+                            if node_data.get('doc_tool_calling') or _ws_enabled or _da_enabled:
+                                agent_response_text, _synthesis_citations = await self._execute_doc_tool_calling(
+                                    node=node,
+                                    node_name=node_name,
+                                    node_type=node_type,
+                                    llm_messages=llm_messages,
+                                    llm_provider=llm_provider,
+                                    agent_config=agent_config,
+                                    project_id=str(project_id),
+                                    messages=messages,
+                                    message_sequence=message_sequence,
+                                    execution_record=execution_record,
+                                    event_callback=event_callback,
+                                )
+                                # Advance message_sequence past any intermediate messages saved
+                                message_sequence = max(
+                                    (m.get('sequence', 0) for m in messages),
+                                    default=message_sequence,
+                                ) + 1
+                                # Create a stub so downstream code can access agent_response attrs
+                                from llm_eval.providers.base import LLMResponse
+                                agent_response = LLMResponse(
+                                    text=agent_response_text,
+                                    model=agent_config.get('llm_model', 'unknown'),
+                                    provider=agent_config.get('llm_provider', 'unknown'),
+                                    response_time_ms=0,
+                                )
+                            else:
+                                # Standard single LLM call (existing path)
+                                agent_response = await llm_provider.generate_response(
+                                    messages=llm_messages
+                                )
                             
-                            if agent_response.error:
-                                raise Exception(f"Agent {node_name} error: {agent_response.error}")
+                                if agent_response.error:
+                                    raise Exception(f"Agent {node_name} error: {agent_response.error}")
                             
-                            agent_response_text = agent_response.text.strip()
+                                agent_response_text = agent_response.text.strip()
                             
-                            # Check for empty response - this is an error condition
-                            if not agent_response_text:
-                                provider_error = getattr(agent_response, "error", None)
-                                if provider_error == "":
-                                    logger.error("❌ ORCHESTRATOR: Provider returned empty error string; API may have signalled failure with no message.")
-                                error_msg = f"Agent {node_name} returned an empty response. This indicates an LLM error or configuration issue."
-                                logger.error(f"❌ ORCHESTRATOR: {error_msg}")
-                                logger.error(f"❌ ORCHESTRATOR: LLM Provider: {type(llm_provider).__name__}, Model: {agent_config.get('llm_model', 'unknown')}")
-                                logger.error(f"❌ ORCHESTRATOR: agent_response.error={provider_error!r}, agent_response.text (first 200 chars)={repr((agent_response.text or '')[:200])}")
-                                raise Exception(error_msg)
+                                if not agent_response_text:
+                                    provider_error = getattr(agent_response, "error", None)
+                                    if provider_error == "":
+                                        logger.error("❌ ORCHESTRATOR: Provider returned empty error string; API may have signalled failure with no message.")
+                                    error_msg = f"Agent {node_name} returned an empty response. This indicates an LLM error or configuration issue."
+                                    logger.error(f"❌ ORCHESTRATOR: {error_msg}")
+                                    logger.error(f"❌ ORCHESTRATOR: LLM Provider: {type(llm_provider).__name__}, Model: {agent_config.get('llm_model', 'unknown')}")
+                                    logger.error(f"❌ ORCHESTRATOR: agent_response.error={provider_error!r}, agent_response.text (first 200 chars)={repr((agent_response.text or '')[:200])}")
+                                    raise Exception(error_msg)
                             
                             logger.info(f"✅ ORCHESTRATOR: Agent {node_name} completed successfully - response length: {len(agent_response_text)} chars")
                             logger.info(f"🔍 DEBUG: Raw agent response for {node_name}: {agent_response_text[:200]}...")
@@ -834,6 +704,14 @@ class WorkflowExecutor:
                             # CRITICAL FIX: Save agent message BEFORE reflection processing
                             # This ensures the message is recorded even if workflow pauses for reflection
                             # NOTE: Use 'messages' array (structured messages for storage), NOT 'llm_messages' (LLM-formatted)
+                            _msg_metadata = {
+                                'llm_provider': agent_config['llm_provider'],
+                                'llm_model': agent_config['llm_model'],
+                                'cost_estimate': getattr(agent_response, 'cost_estimate', None) if hasattr(agent_response, 'cost_estimate') else None,
+                            }
+                            if node_data.get('doc_tool_calling') and _synthesis_citations:
+                                _msg_metadata['citations'] = _synthesis_citations
+
                             messages.append({
                                 'sequence': message_sequence,
                                 'agent_name': node_name,
@@ -843,11 +721,7 @@ class WorkflowExecutor:
                                 'timestamp': timezone.now().isoformat(),
                                 'response_time_ms': getattr(agent_response, 'response_time_ms', 0) if hasattr(agent_response, 'response_time_ms') else 0,
                                 'token_count': getattr(agent_response, 'token_count', None) if hasattr(agent_response, 'token_count') else None,
-                                'metadata': {
-                                    'llm_provider': agent_config['llm_provider'],
-                                    'llm_model': agent_config['llm_model'],
-                                    'cost_estimate': getattr(agent_response, 'cost_estimate', None) if hasattr(agent_response, 'cost_estimate') else None
-                                }
+                                'metadata': _msg_metadata,
                             })
                             message_sequence += 1  # Increment for chronological ordering
                             
@@ -965,11 +839,22 @@ class WorkflowExecutor:
                                 logger.error(f"❌ REFLECTION: Traceback: {traceback.format_exc()}")
                                 # Continue with original response if reflection fails
                             
-                            # CRITICAL FIX: Update conversation history with agent response
+                            # CRITICAL FIX: Update conversation history with agent response (plain text + optional citation appendix for downstream single-input prompts)
                             conversation_history += f"\n{node_name}: {agent_response_text}"
+                            if node_data.get('doc_tool_calling') and _synthesis_citations:
+                                conversation_history += format_upstream_citations_block(
+                                    node_name, _synthesis_citations
+                                )
                             
-                            # Store node output for multi-input support
-                            executed_nodes[node_id] = agent_response_text
+                            # Store node output for multi-input support (pack citations for aggregate_multiple_inputs)
+                            handoff_cites = (
+                                _synthesis_citations
+                                if node_data.get('doc_tool_calling') and _synthesis_citations
+                                else None
+                            )
+                            executed_nodes[node_id] = pack_executed_output(
+                                agent_response_text, handoff_cites
+                            )
                             
                             # CRITICAL FIX: Save executed_nodes immediately to prevent duplicate execution
                             execution_record.executed_nodes = executed_nodes
@@ -1010,8 +895,11 @@ class WorkflowExecutor:
                         # Note: json is already imported at module level
                         tool_request = None
                         
-                        # Get primary input from aggregated context
-                        primary_input = aggregated_context.get('primary_input', '') if isinstance(aggregated_context, dict) else str(aggregated_context)
+                        # Get primary input from aggregated context (prefer plain text for MCP tool args)
+                        if isinstance(aggregated_context, dict):
+                            primary_input = aggregated_context.get('primary_plain') or aggregated_context.get('primary_input', '')
+                        else:
+                            primary_input = str(aggregated_context)
                         
                         # Try to parse as JSON first (tool request format)
                         if isinstance(primary_input, str):
@@ -1872,9 +1760,9 @@ class WorkflowExecutor:
                         logger.error(f"❌ CONTINUE WORKFLOW REFLECTION: Traceback: {traceback.format_exc()}")
                         # Continue with original response if reflection fails
                     
-                    # Update conversation history and executed nodes
+                    # Update conversation history and executed nodes (continue path: plain handoff; doc-tool citations not re-parsed here)
                     conversation_history += f"\n{node_name}: {agent_response_text}"
-                    executed_nodes[node_id] = agent_response_text
+                    executed_nodes[node_id] = pack_executed_output(agent_response_text, None)
                     
                     # CRITICAL FIX: Save executed_nodes to database after each agent execution
                     # This ensures downstream agents can access the output immediately
@@ -1951,6 +1839,440 @@ class WorkflowExecutor:
                 'error': str(e)
             }
     
+    # ------------------------------------------------------------------
+    # Document Tool Calling — plan → tool loop → synthesise
+    # ------------------------------------------------------------------
+    MAX_TOOL_ITERATIONS = 20
+    MAX_TOOL_CALLS_PER_TURN = 10
+
+    async def _execute_doc_tool_calling(
+        self,
+        node: Dict[str, Any],
+        node_name: str,
+        node_type: str,
+        llm_messages: List[Dict[str, Any]],
+        llm_provider,
+        agent_config: Dict[str, Any],
+        project_id: str,
+        messages: list,
+        message_sequence: int,
+        execution_record,
+        event_callback=None,
+    ) -> str:
+        """
+        Run the three-phase document-tool-calling loop for an agent:
+        1. Planning — LLM produces a checklist
+        2. Tool loop — LLM selects documents via tool calls; results go to notebook
+        3. Synthesis — LLM reviews notebook and answers the original query
+        """
+        import json as _json
+        from . import document_tool_service
+        from .chat_manager import ChatManager
+
+        provider_name = agent_config.get("llm_provider", "openai")
+        model_name = agent_config.get("llm_model", "gpt-4")
+
+        # ---- Build document tools ----
+        node_data = node.get("data", {})
+        tools, tool_map, title_map = [], {}, {}
+        if node_data.get("doc_tool_calling"):
+            doc_tool_selected = node_data.get("doc_tool_calling_documents")
+            tools, tool_map, title_map = await document_tool_service.build_document_tools(
+                project_id, selected_filenames=doc_tool_selected
+            )
+
+        # ---- Build web search tool ----
+        _ws_handler = getattr(self.chat_manager, 'websearch_handler', None)
+        ws_tool = _ws_handler.build_websearch_tool(node) if _ws_handler else None
+        if ws_tool:
+            tools.append(ws_tool)
+            title_map[ws_tool["function"]["name"]] = "Web Search"
+
+        # ---- Build DocAware search tool ----
+        _da_handler = getattr(self.chat_manager, 'docaware_handler', None)
+        da_tool = _da_handler.build_docaware_tool(node) if _da_handler else None
+        if da_tool:
+            tools.append(da_tool)
+            title_map[da_tool["function"]["name"]] = "Document Search"
+
+        if not tools:
+            logger.warning(f"⚠️ TOOL CALLING: No tools available for project {project_id}; falling back to normal call")
+            resp = await llm_provider.generate_response(messages=llm_messages)
+            if resp.error:
+                raise Exception(f"Agent {node_name} error: {resp.error}")
+            return resp.text.strip(), []
+
+        tool_descriptions = "\n".join(
+            f"- {t['function']['name']}: {t['function']['description'][:200]}"
+            for t in tools
+        )
+
+        has_doc_tools = bool(tool_map)
+
+        memory_section = ""
+        if has_doc_tools:
+            memory_context_lines = []
+            try:
+                from users.models import ProjectDocumentSummary
+                summary_rows = await sync_to_async(list)(
+                    ProjectDocumentSummary.objects.filter(
+                        document__project__project_id=project_id,
+                    ).values_list("document__document_id", "memory", "citation")
+                )
+                for did, mem, cit in summary_rows:
+                    if not mem or not isinstance(mem, list) or len(mem) == 0:
+                        continue
+                    doc_label = str(did)[:8]
+                    if cit and isinstance(cit, dict) and cit.get("title"):
+                        doc_label = cit["title"][:60]
+                    topics = [e.get("query", "")[:50] for e in mem[-3:] if e.get("query")]
+                    memory_context_lines.append(
+                        f"  - {doc_label}: {len(mem)} prior insights on: {'; '.join(topics)}"
+                    )
+            except Exception as e:
+                logger.warning(f"⚠️ DOC TOOL CALLING: Could not fetch memory context: {e}")
+
+            if memory_context_lines:
+                memory_section = (
+                    "\n\nPRIOR KNOWLEDGE (from previous analyses):\n"
+                    + "\n".join(memory_context_lines)
+                    + "\n\nUse this prior knowledge to ask more targeted, "
+                    "non-redundant questions."
+                )
+
+        # ---- Phase 1: Planning ----
+        planning_messages = list(llm_messages)  # shallow copy
+        if has_doc_tools:
+            planning_content = (
+                "Before answering, create a numbered plan of which documents "
+                "you will consult and what information you need from each.\n\n"
+                "Available documents (as tools you can call):\n"
+                f"{tool_descriptions}"
+                f"{memory_section}\n\n"
+                "Output ONLY the plan as a numbered list."
+            )
+        else:
+            planning_content = (
+                "Before answering, create a numbered plan of what information "
+                "you need to find using the available tools.\n\n"
+                "Available tools:\n"
+                f"{tool_descriptions}\n\n"
+                "Output ONLY the plan as a numbered list."
+            )
+        planning_messages.append({
+            "role": "user",
+            "content": planning_content,
+        })
+        plan_response = await llm_provider.generate_response(messages=planning_messages)
+        if plan_response.error:
+            raise Exception(f"Agent {node_name} planning error: {plan_response.error}")
+
+        plan_text = plan_response.text.strip()
+        logger.info(f"📋 DOC TOOL CALLING [{node_name}]: Plan created ({len(plan_text)} chars)")
+
+        if event_callback:
+            event_callback("planning", {"agent": node_name, "content": plan_text})
+
+        messages.append({
+            "sequence": message_sequence,
+            "agent_name": node_name,
+            "agent_type": node_type,
+            "content": plan_text,
+            "message_type": "tool_plan",
+            "timestamp": timezone.now().isoformat(),
+            "response_time_ms": getattr(plan_response, "response_time_ms", 0),
+            "token_count": getattr(plan_response, "token_count", None),
+            "metadata": {
+                "llm_provider": provider_name,
+                "llm_model": model_name,
+                "phase": "planning",
+            },
+        })
+        message_sequence += 1
+        execution_record.messages_data = messages
+        await sync_to_async(execution_record.save)()
+
+        # ---- Phase 2: Tool calling loop ----
+        notebook: List[Dict[str, Any]] = []
+
+        # Build a document title reference for the synthesis prompt
+        title_ref_lines = []
+        for tname, ttitle in title_map.items():
+            if ttitle != tname:
+                title_ref_lines.append(f"  {tname} → {ttitle}")
+        title_ref_section = ""
+        if title_ref_lines:
+            title_ref_section = (
+                "\n\nDocument reference (use titles, not tool names):\n"
+                + "\n".join(title_ref_lines)
+            )
+
+        # Start the tool-calling conversation from the original messages
+        tool_conv = list(llm_messages)
+        tool_conv.append({
+            "role": "user",
+            "content": (
+                f"Here is your plan:\n{plan_text}\n\n"
+                "Now execute this plan step by step. Use the document tools "
+                "to retrieve information. When you have gathered all the "
+                "information you need, provide your final answer WITHOUT "
+                "calling any more tools.\n\n"
+                "IMPORTANT — grounded citations:\n"
+                "- Use numbered markers [1], [2], [3], … in the text. Each DISTINCT "
+                "claim or passage you rely on must use the NEXT number; do not label "
+                "every sentence with [1] unless they all cite the exact same quoted passage.\n"
+                "- For each marker [N], the citations JSON below must include ONE object "
+                "with \"ref\": N whose \"quoted_text\" is the VERBATIM excerpt from the "
+                "document that supports THAT specific sentence (not a generic quote reused "
+                "for all markers).\n"
+                "- You may reuse the same [N] only when the same passage supports multiple "
+                "nearby clauses; otherwise increment N.\n"
+                "- Reference documents by their title (not tool name or filename).\n"
+                + (
+                    "- For citations from web search results, include the source "
+                    "\"url\" field and set \"source\": \"web\". For citations from "
+                    "project documents, set \"source\": \"document\" (page/section "
+                    "are only relevant for document citations).\n"
+                    if ws_tool else ""
+                ) +
+                "\nAt the END of your response, include a structured citations block (valid JSON array):\n"
+                "---CITATIONS---\n"
+                + (
+                    '[{"ref": 1, "document_title": "Page Title", "quoted_text": "excerpt from web page…", "url": "https://example.com/article", "source": "web"}, '
+                    '{"ref": 2, "document_title": "Paper A", "quoted_text": "exact excerpt from document…", "page": 2, "section": "Intro", "source": "document"}]\n'
+                    if ws_tool else
+                    '[{"ref": 1, "document_title": "Paper A", "quoted_text": "first exact excerpt…", "page": 2, "section": "Intro"}, '
+                    '{"ref": 2, "document_title": "Paper A", "quoted_text": "different excerpt for claim two…", "page": 4, "section": "Methods"}]\n'
+                ) +
+                "---END_CITATIONS---"
+                f"{title_ref_section}"
+            ),
+        })
+
+        for iteration in range(self.MAX_TOOL_ITERATIONS):
+            response = await llm_provider.generate_response(
+                messages=tool_conv,
+                tools=tools,
+            )
+            if response.error:
+                raise Exception(f"Agent {node_name} tool-loop error (iter {iteration}): {response.error}")
+
+            if not response.tool_calls:
+                # LLM finished — this is the synthesis
+                if event_callback:
+                    event_callback("synthesizing", {"agent": node_name})
+                logger.info(f"✅ DOC TOOL CALLING [{node_name}]: Synthesis after {iteration} tool iterations")
+                from agent_orchestration.document_tool_service import _parse_citations_block
+                clean_text, citations = _parse_citations_block(response.text.strip())
+                title_to_docid = {title_map.get(tn, ""): did for tn, did in tool_map.items() if title_map.get(tn)}
+                for cit in citations:
+                    dt = cit.get("document_title", "")
+                    if dt and dt in title_to_docid and not cit.get("url"):
+                        cit["document_id"] = title_to_docid[dt]
+                return clean_text, citations
+
+            # Record the assistant's tool-call turn in the conversation
+            tool_conv.append(
+                ChatManager.format_assistant_tool_call_message(
+                    response.tool_calls, provider_name, response.text or ""
+                )
+            )
+
+            # Execute all tool calls concurrently
+            pending_calls = response.tool_calls[: self.MAX_TOOL_CALLS_PER_TURN]
+
+            async def _run_single_tool(tc: Dict[str, Any]):
+                """Execute one tool call; returns (tc, result_text, source_passages)."""
+                _query = tc["arguments"].get("query", "")
+
+                # --- Web search tool ---
+                from .websearch_handler import WebSearchHandler
+                if tc["name"] == WebSearchHandler.WEB_SEARCH_TOOL_NAME:
+                    _ws = getattr(self.chat_manager, 'websearch_handler', None)
+                    if not _ws:
+                        return tc, "[Web search handler not available]", []
+                    _result = await _ws.execute_websearch_tool(node, _query, project_id)
+                    return tc, _result, []
+
+                # --- DocAware search tool ---
+                from .docaware_handler import DocAwareHandler
+                if tc["name"] == DocAwareHandler.DOCAWARE_TOOL_NAME:
+                    _da = getattr(self.chat_manager, 'docaware_handler', None)
+                    if not _da:
+                        return tc, "[Document search handler not available]", []
+                    _limit = tc["arguments"].get("limit", 5)
+                    _result = await _da.execute_docaware_tool(node, _query, project_id, limit=_limit)
+                    return tc, _result, []
+
+                # --- Document tool ---
+                _doc_id = tool_map.get(tc["name"])
+                if not _doc_id:
+                    return tc, f"[Unknown tool: {tc['name']}]", []
+
+                _result = await document_tool_service.execute_document_tool(
+                    project_id=project_id,
+                    document_id=_doc_id,
+                    query=_query,
+                    provider=provider_name,
+                    model=model_name,
+                    agent_name=node_name,
+                )
+
+                _passages: List[Dict[str, Any]] = []
+                try:
+                    from users.models import ProjectDocumentSummary
+                    _summary = await sync_to_async(
+                        lambda did=_doc_id: ProjectDocumentSummary.objects.filter(
+                            document__document_id=did
+                        ).values_list("memory", flat=True).first()
+                    )()
+                    if _summary and isinstance(_summary, list) and _summary:
+                        _passages = _summary[-1].get("source_passages", [])
+                except Exception:
+                    pass
+
+                return tc, _result, _passages
+
+            gather_results = await asyncio.gather(
+                *[_run_single_tool(tc) for tc in pending_calls],
+                return_exceptions=True,
+            )
+
+            # Process results in original order
+            calls_with_results: List[Dict[str, Any]] = []
+            for raw_result in gather_results:
+                if isinstance(raw_result, BaseException):
+                    logger.error(f"Tool call failed: {raw_result}")
+                    continue
+
+                tc, result_text, source_passages = raw_result
+                query = tc["arguments"].get("query", "")
+
+                calls_with_results.append({**tc, "result": result_text})
+
+                doc_filename = tc["name"]
+                for t in tools:
+                    if t["function"]["name"] == tc["name"]:
+                        doc_filename = t["function"]["description"][:60]
+                        break
+
+                if event_callback:
+                    event_callback("tool_result", {
+                        "agent": node_name,
+                        "tool": title_map.get(tc["name"], tc["name"]),
+                        "chars": len(str(result_text)),
+                        "content": str(result_text)[:2000],
+                    })
+
+                notebook.append({
+                    "step": len(notebook) + 1,
+                    "tool_name": tc["name"],
+                    "document_name": doc_filename,
+                    "query": query,
+                    "result": result_text[:2000],
+                    "source_passages": source_passages[:5],
+                    "status": "completed",
+                })
+
+                messages.append({
+                    "sequence": message_sequence,
+                    "agent_name": node_name,
+                    "agent_type": node_type,
+                    "content": _json.dumps(notebook[-1]),
+                    "message_type": "tool_notebook",
+                    "timestamp": timezone.now().isoformat(),
+                    "response_time_ms": 0,
+                    "token_count": None,
+                    "metadata": {
+                        "llm_provider": provider_name,
+                        "llm_model": model_name,
+                        "phase": "tool_execution",
+                        "iteration": iteration,
+                    },
+                })
+                message_sequence += 1
+
+            execution_record.messages_data = messages
+            await sync_to_async(execution_record.save)()
+
+            # Append tool results to conversation so the LLM can continue
+            tool_result_msgs = ChatManager.format_tool_results(calls_with_results, provider_name)
+            tool_conv.extend(tool_result_msgs)
+
+        # If we exhausted iterations, do a final synthesis call without tools
+        logger.warning(f"⚠️ DOC TOOL CALLING [{node_name}]: Hit max iterations ({self.MAX_TOOL_ITERATIONS}), forcing synthesis")
+        if event_callback:
+            event_callback("synthesizing", {"agent": node_name})
+
+        def _format_notebook_entry(entry: Dict[str, Any]) -> str:
+            doc_title = title_map.get(entry["tool_name"], entry["tool_name"])
+            parts = [
+                f"### Document: {doc_title}",
+                f"**Query:** {entry['query']}",
+                f"**Finding:** {entry['result']}",
+            ]
+            passages = entry.get("source_passages", [])
+            if passages:
+                citation_lines = []
+                for p in passages[:3]:
+                    qt = p.get("quoted_text", "")[:150]
+                    loc_parts = []
+                    if p.get("page"):
+                        loc_parts.append(f"p.{p['page']}")
+                    if p.get("section"):
+                        loc_parts.append(p["section"])
+                    loc = f" ({', '.join(loc_parts)})" if loc_parts else ""
+                    citation_lines.append(f'  - "{qt}"{loc}')
+                parts.append("**Sources:**\n" + "\n".join(citation_lines))
+            return "\n".join(parts)
+
+        notebook_summary = "\n\n".join(
+            _format_notebook_entry(entry) for entry in notebook
+        )
+        synthesis_messages = list(llm_messages)
+        synthesis_messages.append({
+            "role": "user",
+            "content": (
+                "Based on your research notebook below, provide a comprehensive "
+                "answer to the original query.\n\n"
+                "IMPORTANT — grounded citations:\n"
+                "- Use [1], [2], [3], … in the text. Each DISTINCT claim needs its own "
+                "number unless the same verbatim passage supports it.\n"
+                "- In the JSON block, each ref N must pair with a quoted_text that is the "
+                "specific excerpt backing the sentence where [N] appears (not one generic "
+                "quote reused for every marker).\n"
+                "- Reference documents by their title (not filename).\n"
+                + (
+                    "- For citations from web search results, include the source "
+                    "\"url\" field and set \"source\": \"web\". For citations from "
+                    "project documents, set \"source\": \"document\".\n"
+                    if ws_tool else ""
+                ) +
+                "\nAt the END of your response, include a structured citations block (valid JSON array), e.g.:\n"
+                "---CITATIONS---\n"
+                + (
+                    '[{"ref": 1, "document_title": "Page Title", "quoted_text": "excerpt from web…", "url": "https://example.com/article", "source": "web"}, '
+                    '{"ref": 2, "document_title": "Title", "quoted_text": "excerpt from document…", "page": 1, "section": "1", "source": "document"}]\n'
+                    if ws_tool else
+                    '[{"ref": 1, "document_title": "Title", "quoted_text": "excerpt for first claim…", "page": 1, "section": "1"}, '
+                    '{"ref": 2, "document_title": "Title", "quoted_text": "different excerpt for second claim…", "page": 3, "section": "2"}]\n'
+                ) +
+                "---END_CITATIONS---\n\n"
+                f"=== RESEARCH NOTEBOOK ===\n{notebook_summary}\n=== END NOTEBOOK ==="
+            ),
+        })
+        synthesis_resp = await llm_provider.generate_response(messages=synthesis_messages)
+        if synthesis_resp.error:
+            raise Exception(f"Agent {node_name} synthesis error: {synthesis_resp.error}")
+        from agent_orchestration.document_tool_service import _parse_citations_block
+        clean_text, citations = _parse_citations_block(synthesis_resp.text.strip())
+        title_to_docid = {title_map.get(tn, ""): did for tn, did in tool_map.items() if title_map.get(tn)}
+        for cit in citations:
+            dt = cit.get("document_title", "")
+            if dt and dt in title_to_docid and not cit.get("url"):
+                cit["document_id"] = title_to_docid[dt]
+        return clean_text, citations
+
     async def _save_messages_to_database(self, messages, execution_record):
         """
         Save messages to database with proper error handling and duplicate prevention
@@ -2182,31 +2504,14 @@ class WorkflowExecutor:
                 # CRITICAL FIX: Special handling for GroupChatManager in parallel execution
                 # GroupChatManager must execute delegates, not act as a regular AssistantAgent
                 if node_type == 'GroupChatManager':
-                    logger.info(f"👥 PARALLEL: Executing GroupChatManager {node_name} with delegate support")
-                    
-                    # Get execution sequence for delegate discovery
-                    # Use the existing workflow_parser instance instead of creating a new one
+                    logger.info(f"👥 PARALLEL: Executing GroupChatManager {node_name} with tool-based delegation")
+
                     execution_sequence = self.workflow_parser.parse_workflow_graph(graph_json)
-                    
-                    # Check delegation mode to determine which version to use
-                    node_data = node.get('data', {})
-                    delegation_mode = node_data.get('delegation_mode', 'round_robin')
-                    
-                    # CRITICAL FIX: Always use multi-input version if intelligent delegation is enabled
-                    # OR if there are multiple inputs. The multi-input version can handle single inputs too.
-                    if len(input_sources) > 1 or delegation_mode == 'intelligent':
-                        if len(input_sources) > 1:
-                            logger.info(f"📥 PARALLEL: GroupChatManager {node_name} has {len(input_sources)} input sources - using multi-input mode")
-                        else:
-                            logger.info(f"📥 PARALLEL: GroupChatManager {node_name} has 1 input source but intelligent delegation is enabled - using multi-input mode")
-                        chat_result = await self.chat_manager.execute_group_chat_manager_with_multiple_inputs(
-                            node, llm_provider, input_sources, executed_nodes, execution_sequence, graph_json, str(project_id), project, execution_id
-                        )
-                    else:
-                        logger.info(f"📥 PARALLEL: GroupChatManager {node_name} has {len(input_sources)} input source - using single-input mode (round-robin)")
-                        chat_result = await self.chat_manager.execute_group_chat_manager(
-                            node, llm_provider, conversation_history, execution_sequence, graph_json, str(project_id), project
-                        )
+
+                    logger.info(f"📥 PARALLEL: GroupChatManager {node_name} has {len(input_sources)} input source(s)")
+                    chat_result = await self.chat_manager.execute_group_chat_manager_with_multiple_inputs(
+                        node, llm_provider, input_sources, executed_nodes, execution_sequence, graph_json, str(project_id), project, execution_id, event_callback=event_callback
+                    )
                     
                     agent_response_text = chat_result['final_response']
                     response_time_ms = 0  # GroupChatManager response time is complex (includes delegate execution)
@@ -2333,6 +2638,18 @@ class WorkflowExecutor:
                     total_iterations = chat_result.get('total_iterations', 0)
                     
                     # Create GroupChatManager message with delegate details
+                    par_gcm_metadata = {
+                        **result.get('metadata', {}),
+                        'is_group_chat_manager': True,
+                        'total_iterations': total_iterations,
+                        'delegate_count': len(delegate_status),
+                        'expandable': True,
+                        'delegate_conversations': delegate_conversations,
+                        'delegate_status': delegate_status,
+                    }
+                    if chat_result.get('citations'):
+                        par_gcm_metadata['citations'] = chat_result['citations']
+
                     new_messages.append({
                         'sequence': next_sequence,
                         'agent_name': result['node_name'],
@@ -2342,15 +2659,7 @@ class WorkflowExecutor:
                         'timestamp': timezone.now().isoformat(),
                         'response_time_ms': result.get('response_time_ms', 0),
                         'token_count': result.get('token_count'),
-                        'metadata': {
-                            **result.get('metadata', {}),
-                            'is_group_chat_manager': True,
-                            'total_iterations': total_iterations,
-                            'delegate_count': len(delegate_status),
-                            'expandable': True,
-                            'delegate_conversations': delegate_conversations,
-                            'delegate_status': delegate_status
-                        }
+                        'metadata': par_gcm_metadata,
                     })
                     next_sequence += 1
                     

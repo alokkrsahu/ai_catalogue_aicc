@@ -86,6 +86,12 @@ class GeminiProvider(LLMProvider):
                 if role == "system":
                     continue
                 
+                # Pass through function/model messages that already have
+                # Gemini-native 'parts' (e.g. functionCall / functionResponse)
+                if role in ("function", "model") and "parts" in msg:
+                    contents.append({"role": role, "parts": msg["parts"]})
+                    continue
+                
                 # Map standard roles to Gemini roles
                 # Gemini uses "user" and "model" (not "assistant")
                 gemini_role = "model" if role == "assistant" else role
@@ -152,9 +158,21 @@ class GeminiProvider(LLMProvider):
                     "parts": [{"text": system_prefix}]
                 })
             
-            return {
-                "contents": contents
-            }
+            body = {"contents": contents}
+            tools = kwargs.get("tools")
+            if tools:
+                func_decls = []
+                for tool in tools:
+                    fn = tool.get("function", {})
+                    params = fn.get("parameters", {})
+                    gemini_params = self._convert_params_to_gemini(params)
+                    func_decls.append({
+                        "name": fn.get("name", ""),
+                        "description": fn.get("description", ""),
+                        "parameters": gemini_params,
+                    })
+                body["tools"] = [{"functionDeclarations": func_decls}]
+            return body
         elif prompt:
             # Fallback to prompt string (backward compatibility)
             return {
@@ -165,8 +183,27 @@ class GeminiProvider(LLMProvider):
         else:
             raise ValueError("Either 'prompt' or 'messages' must be provided")
     
+    @staticmethod
+    def _convert_params_to_gemini(params: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert JSON Schema types to Gemini uppercase type names."""
+        type_map = {
+            "string": "STRING", "number": "NUMBER", "integer": "INTEGER",
+            "boolean": "BOOLEAN", "array": "ARRAY", "object": "OBJECT",
+        }
+        result = dict(params)
+        if "type" in result:
+            result["type"] = type_map.get(result["type"], result["type"])
+        props = result.get("properties")
+        if isinstance(props, dict):
+            result["properties"] = {
+                k: GeminiProvider._convert_params_to_gemini(v) for k, v in props.items()
+            }
+        items = result.get("items")
+        if isinstance(items, dict):
+            result["items"] = GeminiProvider._convert_params_to_gemini(items)
+        return result
+
     def parse_response(self, response_data: Dict[str, Any]) -> tuple[str, Optional[int]]:
-        # Safely extract text content with proper error handling
         try:
             candidates = response_data.get("candidates", [])
             if not candidates:
@@ -175,10 +212,29 @@ class GeminiProvider(LLMProvider):
             first_candidate = candidates[0]
             content = first_candidate.get("content", {})
             parts = content.get("parts", [])
+            finish_reason = first_candidate.get("finishReason")
+            
+            # Detect functionCall parts
+            fc_parts = [p for p in parts if isinstance(p, dict) and "functionCall" in p]
+            if fc_parts:
+                normalized = []
+                for i, fc_part in enumerate(fc_parts):
+                    fc = fc_part["functionCall"]
+                    normalized.append({
+                        "id": f"gemini_call_{i}",
+                        "name": fc.get("name", ""),
+                        "arguments": fc.get("args", {}),
+                    })
+                self._last_tool_calls = normalized
+                self._last_finish_reason = finish_reason or "tool_calls"
+                text_parts = [p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p and "functionCall" not in p]
+                token_count = None
+                return "".join(text_parts), token_count
+            
+            self._last_tool_calls = None
+            self._last_finish_reason = finish_reason
             
             if not parts:
-                # Check finish_reason to understand why there's no content
-                finish_reason = first_candidate.get("finishReason")
                 if finish_reason == "MAX_TOKENS":
                     raise ValueError("Response was truncated due to max_tokens limit")
                 elif finish_reason == "SAFETY":
@@ -190,17 +246,14 @@ class GeminiProvider(LLMProvider):
             
             text = parts[0].get("text")
             
-            # Handle None or empty content
             if text is None:
                 raise ValueError("Response text is None")
             
-            # Ensure text is a string
             text = str(text) if text is not None else ""
             
         except (KeyError, IndexError, ValueError) as e:
             raise ValueError(f"Failed to parse Gemini response: {e}. Response data: {response_data}")
         
-        # Gemini doesn't return token count in the same way
         token_count = None
         return text, token_count
     
@@ -228,6 +281,8 @@ class GeminiProvider(LLMProvider):
             )
         
         try:
+            self._last_tool_calls = None
+            self._last_finish_reason = None
             url = f"{self.base_url}?key={self.api_key}"
             
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
@@ -243,7 +298,21 @@ class GeminiProvider(LLMProvider):
                         try:
                             text, token_count = self.parse_response(data)
                             
-                            # Double-check that text is not empty after parsing
+                            parsed_tool_calls = getattr(self, '_last_tool_calls', None)
+                            parsed_finish_reason = getattr(self, '_last_finish_reason', None)
+                            
+                            if parsed_tool_calls:
+                                return LLMResponse(
+                                    text=text or "",
+                                    model=self.model,
+                                    provider="gemini",
+                                    response_time_ms=response_time_ms,
+                                    token_count=token_count,
+                                    cost_estimate=self.estimate_cost(token_count),
+                                    tool_calls=parsed_tool_calls,
+                                    finish_reason=parsed_finish_reason,
+                                )
+                            
                             if not text or not text.strip():
                                 error_msg = "Gemini API returned empty response content"
                                 logger.warning(f"⚠️ GEMINI: {error_msg}. Response data: {data}")
@@ -261,10 +330,10 @@ class GeminiProvider(LLMProvider):
                                 provider="gemini",
                                 response_time_ms=response_time_ms,
                                 token_count=token_count,
-                                cost_estimate=self.estimate_cost(token_count)
+                                cost_estimate=self.estimate_cost(token_count),
+                                finish_reason=parsed_finish_reason,
                             )
                         except ValueError as parse_error:
-                            # parse_response raised an error - return it as error
                             return LLMResponse(
                                 text="",
                                 model=self.model,

@@ -137,13 +137,18 @@ class OpenAIProvider(LLMProvider):
                 logger.error(f"❌ OPENAI: Invalid messages format: {error_msg}")
                 raise ValueError(f"Invalid messages format: {error_msg}")
             
-            # Use structured messages array (preferred)
             body = {
                 "model": self.model,
                 "messages": messages
             }
             if stream:
                 body["stream"] = True
+            tools = kwargs.get("tools")
+            if tools:
+                body["tools"] = tools
+                tool_choice = kwargs.get("tool_choice")
+                if tool_choice:
+                    body["tool_choice"] = tool_choice
             return body
         elif prompt:
             # Fallback to prompt string (backward compatibility)
@@ -158,8 +163,6 @@ class OpenAIProvider(LLMProvider):
             raise ValueError("Either 'prompt' or 'messages' must be provided")
     
     def parse_response(self, response_data: Dict[str, Any]) -> tuple[str, Optional[int]]:
-        # Safely extract text content with proper error handling.
-        # Handles content as string or as list of parts (e.g. output_text / text for reasoning models).
         try:
             choices = response_data.get("choices", [])
             if not choices:
@@ -167,13 +170,35 @@ class OpenAIProvider(LLMProvider):
                 raise ValueError("No choices in response")
             
             message = choices[0].get("message", {})
+            finish_reason = choices[0].get("finish_reason")
             raw_content = message.get("content")
+            
+            # Tool calls: LLM wants to invoke tools — content may be None
+            raw_tool_calls = message.get("tool_calls")
+            if raw_tool_calls and finish_reason in ("tool_calls", "stop"):
+                normalized = []
+                for tc in raw_tool_calls:
+                    fn = tc.get("function", {})
+                    try:
+                        args = json.loads(fn.get("arguments", "{}"))
+                    except (json.JSONDecodeError, TypeError):
+                        args = {"raw": fn.get("arguments", "")}
+                    normalized.append({
+                        "id": tc.get("id", ""),
+                        "name": fn.get("name", ""),
+                        "arguments": args,
+                    })
+                self._last_tool_calls = normalized
+                self._last_finish_reason = finish_reason
+                token_count = response_data.get("usage", {}).get("total_tokens")
+                return raw_content or "", token_count
+            
+            self._last_tool_calls = None
+            self._last_finish_reason = finish_reason
             
             logger.info(f"🔍 OPENAI: Extracted content from response - type: {type(raw_content)}, value: {repr(raw_content)[:100] if raw_content else 'None'}")
             
-            # Handle None
             if raw_content is None:
-                finish_reason = choices[0].get("finish_reason")
                 error_msg = f"Response content is None (finish_reason: {finish_reason})"
                 logger.error(f"❌ OPENAI: {error_msg}")
                 if finish_reason == "length":
@@ -253,8 +278,11 @@ class OpenAIProvider(LLMProvider):
             )
         
         try:
+            # When tools are provided, always use Chat Completions (Responses API
+            # does not support tool calling in the same way).
+            has_tools = bool(kwargs.get("tools"))
             use_responses_api = bool(
-                messages and self._messages_contain_file_refs(messages)
+                messages and self._messages_contain_file_refs(messages) and not has_tools
             )
             if use_responses_api:
                 instructions, input_items = self._build_responses_api_input(messages)
@@ -272,6 +300,10 @@ class OpenAIProvider(LLMProvider):
                     "input": input_items,
                     "store": False,
                 }
+                # Ensure long-form outputs (like document summaries) can fit.
+                # Responses API uses `max_output_tokens` for output length.
+                if self.max_tokens:
+                    body["max_output_tokens"] = int(self.max_tokens)
                 if instructions:
                     body["instructions"] = instructions
                 url = RESPONSES_API_BASE_URL
@@ -364,6 +396,8 @@ class OpenAIProvider(LLMProvider):
                         text, token_count = self._parse_responses_api_response(data)
                     else:
                         try:
+                            self._last_tool_calls = None
+                            self._last_finish_reason = None
                             logger.info(f"🔍 OPENAI: About to parse response for model {self.model}")
                             text, token_count = self.parse_response(data)
                             logger.info(f"🔍 OPENAI: Parsed response - text length: {len(text) if text else 0}, token_count: {token_count}, text type: {type(text)}")
@@ -378,6 +412,22 @@ class OpenAIProvider(LLMProvider):
                                 response_time_ms=response_time_ms,
                                 error=error_msg
                             )
+                    
+                    # If tool_calls were returned, that's a valid response even with empty text
+                    parsed_tool_calls = getattr(self, '_last_tool_calls', None)
+                    parsed_finish_reason = getattr(self, '_last_finish_reason', None)
+                    
+                    if parsed_tool_calls:
+                        return LLMResponse(
+                            text=text or "",
+                            model=self.model,
+                            provider="openai",
+                            response_time_ms=response_time_ms,
+                            token_count=token_count,
+                            cost_estimate=self.estimate_cost(token_count),
+                            tool_calls=parsed_tool_calls,
+                            finish_reason=parsed_finish_reason,
+                        )
                     
                     if not text or not text.strip():
                         usage = data.get("usage", {})
@@ -398,7 +448,6 @@ class OpenAIProvider(LLMProvider):
                             error=error_msg
                         )
                     
-                    # Defensive: never return success with empty text
                     if not (text and text.strip()):
                         error_msg = "OpenAI API returned empty response content"
                         logger.error(f"❌ OPENAI: {error_msg}")
@@ -415,7 +464,8 @@ class OpenAIProvider(LLMProvider):
                         provider="openai",
                         response_time_ms=response_time_ms,
                         token_count=token_count,
-                        cost_estimate=self.estimate_cost(token_count)
+                        cost_estimate=self.estimate_cost(token_count),
+                        finish_reason=parsed_finish_reason,
                     )
                         
         except Exception as e:

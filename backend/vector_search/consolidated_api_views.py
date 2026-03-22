@@ -8,7 +8,7 @@ from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from users.models import IntelliDocProject
-from .services_enhanced import EnhancedVectorSearchManager, PROCESSING_CONTROL
+from .services_enhanced import EnhancedVectorSearchManager, PROCESSING_CONTROL, PROCESSING_THREADS
 from .unified_services_fixed import UnifiedVectorSearchManager, fix_existing_documents
 from .detailed_logger import DocumentProcessingTracker, doc_logger
 import logging
@@ -16,9 +16,6 @@ import threading
 import time
 
 logger = logging.getLogger(__name__)
-
-# Global processing threads (shared across views for this module)
-PROCESSING_THREADS = {}
 
 def run_processing_in_background(project_id: str, processing_mode: str = 'enhanced', llm_config=None):
     """Run enhanced document processing in background thread (project-isolated)."""
@@ -142,7 +139,7 @@ def process_unified_consolidated(request, project_id, llm_config=None, processin
         if not llm_config:
             llm_config = {
                 'llm_provider': 'openai',
-                'llm_model': 'gpt-3.5-turbo',
+                'llm_model': 'gpt-5.3-chat-latest',
                 'enable_summary': True
             }
             logger.info(f"📋 CONSOLIDATED: Using default LLM config")
@@ -373,76 +370,8 @@ def get_vector_status_consolidated(request, project_id):
             )
         logger.debug(f"📊 CONSOLIDATED: Getting status for project {project_id} ({project.name})")
         
-        # Get status from enhanced manager
-        try:
-            logger.debug(f"📊 CONSOLIDATED: Attempting to get status via EnhancedVectorSearchManager")
-            status_data = EnhancedVectorSearchManager.get_project_processing_status(project_id)
-            logger.debug(f"📊 CONSOLIDATED: Successfully retrieved status: collection_status={status_data.get('collection_status')}, is_processing={status_data.get('is_processing')}")
-        except Exception as e:
-            logger.warning(f"⚠️ CONSOLIDATED: Could not get enhanced status, querying database directly: {e}")
-            logger.exception(e)  # Log full exception for debugging
-            
-            # Fallback: Query database directly instead of returning UNKNOWN
-            from users.models import ProjectVectorCollection, DocumentVectorStatus, VectorProcessingStatus
-            try:
-                collection = ProjectVectorCollection.objects.get(project=project)
-                total_docs = project.documents.count()
-                ready_docs = project.documents.filter(upload_status='ready').count()
-                
-                # Count document statuses
-                doc_statuses = DocumentVectorStatus.objects.filter(collection=collection)
-                completed_count = doc_statuses.filter(status=VectorProcessingStatus.COMPLETED).count()
-                failed_count = doc_statuses.filter(status=VectorProcessingStatus.FAILED).count()
-                processing_count = doc_statuses.filter(status=VectorProcessingStatus.PROCESSING).count()
-                
-                # Determine if processing is active
-                is_processing = (processing_count > 0) or (project_id in PROCESSING_THREADS and PROCESSING_THREADS[project_id].is_alive())
-                
-                # Normalize status to lowercase for frontend
-                collection_status = collection.status.lower() if collection.status else 'not_created'
-                
-                logger.info(f"📊 CONSOLIDATED FALLBACK: Collection status={collection.status}, completed={completed_count}, total={total_docs}")
-                
-                status_data = {
-                    'collection_status': collection_status,
-                    'processing_progress': {
-                        'completed': completed_count,
-                        'total': total_docs,
-                        'percentage': (completed_count / total_docs * 100) if total_docs > 0 else 0
-                    },
-                    'total_documents': total_docs,
-                    'ready_documents': ready_docs,
-                    'is_processing': is_processing,
-                    'last_processed_at': collection.last_processed_at.isoformat() if collection.last_processed_at else None
-                }
-            except ProjectVectorCollection.DoesNotExist:
-                logger.info(f"📊 CONSOLIDATED FALLBACK: No collection found for project {project_id}")
-                total_docs = project.documents.count()
-                # CRITICAL: Check for active background thread even if no collection exists yet
-                thread_active = project_id in PROCESSING_THREADS and PROCESSING_THREADS[project_id].is_alive()
-                if thread_active:
-                    logger.info(f"📊 CONSOLIDATED FALLBACK: Background processing thread IS active for project {project_id}")
-                status_data = {
-                    'collection_status': 'processing' if thread_active else 'not_created',
-                    'processing_progress': {'completed': 0, 'total': total_docs, 'percentage': 0},
-                    'total_documents': total_docs,
-                    'ready_documents': project.documents.filter(upload_status='ready').count(),
-                    'is_processing': thread_active,
-                    'last_processed_at': None
-                }
-            except Exception as db_error:
-                logger.error(f"❌ CONSOLIDATED FALLBACK: Database query also failed: {db_error}")
-                logger.exception(db_error)
-                # Last resort fallback
-                total_docs = project.documents.count()
-                status_data = {
-                    'collection_status': 'error',
-                    'processing_progress': {'completed': 0, 'total': total_docs, 'percentage': 0},
-                    'total_documents': total_docs,
-                    'ready_documents': project.documents.filter(upload_status='ready').count(),
-                    'is_processing': False,
-                    'last_processed_at': None
-                }
+        # Use lightweight ORM-only status (no processor / Milvus init on every poll)
+        status_data = EnhancedVectorSearchManager.get_processing_status_lightweight(project_id)
         
         # Format comprehensive status response
         vector_count = status_data.get('processing_progress', {}).get('completed', 0)
@@ -467,9 +396,19 @@ def get_vector_status_consolidated(request, project_id):
             'unknown': 'unknown'
         }
         normalized_status = status_mapping.get(normalized_status, normalized_status)
+
+        # Defensive guardrail: avoid contradictory "completed" when progress is incomplete.
+        if normalized_status == 'completed' and total_documents > 0 and vector_count < total_documents:
+            normalized_status = 'processing' if bool(status_data.get('is_processing', False)) else 'pending'
         
         logger.debug(f"📊 CONSOLIDATED: Normalized status '{raw_status}' -> '{normalized_status}' for project {project_id}")
         
+        terminal_statuses = {'completed', 'failed', 'error'}
+        raw_is_processing = bool(status_data.get('is_processing', False))
+        is_terminal_status = normalized_status in terminal_statuses
+        is_count_complete = total_documents > 0 and vector_count >= total_documents
+        effective_is_processing = raw_is_processing and not is_terminal_status and not is_count_complete
+
         consolidated_status = {
             'project_id': project_id,
             'project_name': project.name,
@@ -480,7 +419,7 @@ def get_vector_status_consolidated(request, project_id):
                 'ready_documents': ready_documents,
                 'collection_status': normalized_status,
                 'processing_status': normalized_status,  # Use normalized status for processing_status too
-                'is_processing': status_data.get('is_processing', False)
+                'is_processing': effective_is_processing
             },
             'processing_capabilities': project.processing_capabilities or {},
             'template_info': {
@@ -531,12 +470,21 @@ def start_processing_consolidated(request, project_id):
         processing_capabilities = project.processing_capabilities or {}
         processing_mode = 'enhanced_hierarchical' if processing_capabilities.get('supports_hierarchical_processing') else 'enhanced'
         
+        # Extract LLM config from request (same pattern as process_unified_consolidated)
+        llm_config = {
+            'llm_provider': request.data.get('llm_provider', 'openai'),
+            'llm_model': request.data.get('llm_model', 'gpt-5.3-chat-latest'),
+            'enable_summary': request.data.get('enable_summary', True),
+        }
+        
         logger.info(f"🚀 CONSOLIDATED: Starting background processing for project {project_id} with mode {processing_mode}")
+        logger.info(f"📋 CONSOLIDATED: LLM Config - Provider: {llm_config['llm_provider']}, Model: {llm_config['llm_model']}")
         
         # Start processing in background thread
         processing_thread = threading.Thread(
             target=run_processing_in_background,
             args=(project_id, processing_mode),
+            kwargs={'llm_config': llm_config},
             daemon=True
         )
         processing_thread.start()
@@ -554,6 +502,7 @@ def start_processing_consolidated(request, project_id):
                 'project_name': project.name,
                 'status': 'started',
                 'processing_mode': processing_mode,
+                'llm_model': llm_config['llm_model'],
                 'message': f"Consolidated processing started in background with {processing_mode} mode"
             },
             'message': 'Consolidated processing started successfully'

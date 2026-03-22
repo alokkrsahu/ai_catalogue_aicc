@@ -43,7 +43,7 @@
     searchResults = [];
     
     // 4. Clear LLM configuration (reset to defaults)
-    llmConfig = { provider: 'openai', model: 'gpt-3.5-turbo', enableSummary: true };
+    llmConfig = { provider: 'openai', model: 'gpt-5.3-chat-latest', enableSummary: true };
     bulkModelData = null;
     availableProviders = [];
     providerModels = [];
@@ -57,6 +57,7 @@
     // 6. Reset processing state
     processing = false;
     pollingAttempts = 0;
+    statusRequestInFlight = false;
     
     // 7. Clear workflow store so stale workflow list from previous project is not retained
     frontendWorkflowStore.initialize();
@@ -88,6 +89,21 @@
   let processing = false;
   let processingStatus: any = null;
   let statusPollingInterval: ReturnType<typeof setInterval> | null = null;
+  let statusRequestInFlight = false;
+
+  // Use vector_count (vectors/embeddings created) as the "processed" metric.
+  // Fall back to ready_documents for backward compatibility.
+  $: processedCount =
+    processingStatus?.vector_status?.vector_count ??
+    processingStatus?.vector_status?.ready_documents ??
+    0;
+  $: totalDocumentsCount = processingStatus?.vector_status?.total_documents ?? 0;
+  $: rawProcessingStatus = processingStatus?.vector_status?.processing_status || processingStatus?.vector_status?.collection_status || 'not_created';
+  $: isTerminalProcessingStatus = ['completed', 'failed', 'error'].includes(rawProcessingStatus);
+  $: isCountComplete = totalDocumentsCount > 0 && processedCount >= totalDocumentsCount;
+  $: effectiveProcessingStatus = isTerminalProcessingStatus
+    ? rawProcessingStatus
+    : (isCountComplete ? 'completed' : (processingStatus?.vector_status?.is_processing ? 'processing' : rawProcessingStatus));
   
   // Deployment state for Activity Tracker
   let deployment: any = null;
@@ -98,6 +114,14 @@
   let hasNavigation = false;
   let navigationPages: any[] = [];
   let sidebarCollapsed = false;
+
+  /** 1-based index of the nav page that hosts the in-app chatbot, or null */
+  $: chatbotPageNumber = (() => {
+    const idx = navigationPages.findIndex(
+      (p: any) => Array.isArray(p.features) && p.features.includes('in_app_chatbot')
+    );
+    return idx >= 0 ? idx + 1 : null;
+  })();
   
   // Capability-based UI state
   let projectCapabilities: any = {};
@@ -119,7 +143,7 @@
   // LLM Configuration state for document processing
   let llmConfig = {
     provider: 'openai',
-    model: 'gpt-3.5-turbo',
+    model: 'gpt-5.3-chat-latest',
     enableSummary: true
   };
   let bulkModelData: BulkModelData | null = null;
@@ -132,11 +156,50 @@
   let updatingFolderStructureSetting = false;
 
   // In-app chatbot session management
-  type ChatbotSessionMeta = { id: string; label: string; createdAt: string };
+  type ChatbotSessionMeta = { id: string; label: string; createdAt: string; preview?: string; updatedAt?: string };
   let chatbotSessions: ChatbotSessionMeta[] = [];
   let activeChatbotSessionId: string | null = null;
   let chatbotFullscreen = false;
+  /** Avoid re-running session init on every deployment object reference change */
+  let lastChatbotStorageKey = '';
+  /** Collapse project header on chatbot page for more vertical space */
+  let chatbotHeaderExpanded = false;
   
+  const featureKeyToLabel: Record<string, string> = {
+    document_management: 'Manage documents',
+    upload_interface: 'Upload files',
+    processing_status: 'Track processing',
+    visual_workflow_designer: 'Workflow designer',
+    agent_management: 'Agent management',
+    real_time_execution: 'Live execution',
+    workflow_history: 'Execution history',
+    workflow_evaluation: 'Run evaluations',
+    csv_upload: 'CSV datasets',
+    metrics_comparison: 'Compare metrics',
+    batch_testing: 'Batch testing',
+    workflow_deployment: 'Deploy workflows',
+    public_endpoint: 'Public API',
+    origin_management: 'Manage origins',
+    rate_limiting: 'Rate limits',
+    deployment_activity: 'View sessions',
+    session_tracking: 'Session tracking',
+    analytics: 'Analytics',
+    experiment_metrics: 'Experiment metrics',
+    performance_analysis: 'Performance data',
+    system_evaluation: 'System evaluation',
+    in_app_chatbot: 'Chat with your assistant',
+  };
+
+  function navSubLabel(navPage: any): string {
+    if (navPage.description) return navPage.description;
+    if (!navPage.features?.length) return '';
+    const mapped = navPage.features
+      .slice(0, 2)
+      .map((k: string) => featureKeyToLabel[k])
+      .filter(Boolean);
+    return mapped.length > 0 ? mapped.join(' · ') : '';
+  }
+
   console.log(`🎯 UNIVERSAL: Initializing universal project interface for project ${projectId}`);
   
   // Helper function to format processing status
@@ -155,6 +218,9 @@
     // NOTE: loadProject() and loadLLMModels() are now called reactively when projectId changes
     // This ensures they run on both initial load AND when navigating between projects
     // See the reactive statement above: $: if (projectId && projectId !== previousProjectId)
+
+    // Listen for Escape forwarded from the chatbot iframe
+    window.addEventListener('message', handleChatbotIframeMessage);
     
     // Return cleanup function for onDestroy behavior
     return () => {
@@ -166,13 +232,18 @@
       // Cleanup fullscreen key handler
       if (typeof window !== 'undefined') {
         window.removeEventListener('keydown', handleChatbotFullscreenKeydown);
+        window.removeEventListener('message', handleChatbotIframeMessage);
       }
     };
   });
 
-  // Initialize chatbot sessions when project or deployment changes
-  $: if (projectId && deployment) {
-    initializeChatbotSessions();
+  // Initialize chatbot sessions once per project+deployment storage key (not on every deployment poll)
+  $: if (projectId && deployment && typeof window !== 'undefined') {
+    const storageKey = makeChatbotStorageKey();
+    if (storageKey !== lastChatbotStorageKey) {
+      lastChatbotStorageKey = storageKey;
+      initializeChatbotSessionsForStorageKey(storageKey);
+    }
   }
 
   function makeChatbotStorageKey() {
@@ -180,16 +251,20 @@
     return `chatbot_sessions_${projectId}_${deploymentKey}`;
   }
 
-  function initializeChatbotSessions() {
+  function initializeChatbotSessionsForStorageKey(storageKey: string) {
     if (typeof window === 'undefined') return;
-    const storageKey = makeChatbotStorageKey();
     try {
       const raw = window.localStorage.getItem(storageKey);
       if (raw) {
-        const parsed = JSON.parse(raw);
+        const parsed = JSON.parse(raw) as ChatbotSessionMeta[];
         if (Array.isArray(parsed) && parsed.length > 0) {
           chatbotSessions = parsed;
-          activeChatbotSessionId = parsed[0].id;
+          const current = activeChatbotSessionId;
+          const stillValid =
+            current !== null && parsed.some((s) => s.id === current);
+          if (!stillValid) {
+            activeChatbotSessionId = parsed[0].id;
+          }
           return;
         }
       }
@@ -227,19 +302,115 @@
     persistChatbotSessions();
   }
 
-  function handleChatbotSessionChange(event: Event) {
-    const target = event.target as HTMLSelectElement;
-    const value = target.value || null;
-    activeChatbotSessionId = value;
+  function selectChatbotSession(sessionId: string) {
+    activeChatbotSessionId = sessionId;
+  }
+
+  let renamingSessionId: string | null = null;
+  let renameInputValue = '';
+
+  function startRenameSession(sessionId: string) {
+    const s = chatbotSessions.find(x => x.id === sessionId);
+    if (!s) return;
+    renamingSessionId = sessionId;
+    renameInputValue = s.label;
+  }
+
+  function commitRenameSession() {
+    if (!renamingSessionId) return;
+    const trimmed = renameInputValue.trim();
+    if (!trimmed) { renamingSessionId = null; return; }
+    const s = chatbotSessions.find(x => x.id === renamingSessionId);
+    if (s) {
+      s.label = trimmed;
+      chatbotSessions = [...chatbotSessions];
+      persistChatbotSessions();
+    }
+    renamingSessionId = null;
+  }
+
+  function cancelRenameSession() {
+    renamingSessionId = null;
+  }
+
+  function deleteChatbotSession(sessionId: string) {
+    chatbotSessions = chatbotSessions.filter(s => s.id !== sessionId);
+    if (activeChatbotSessionId === sessionId) {
+      activeChatbotSessionId = chatbotSessions.length > 0 ? chatbotSessions[0].id : null;
+      if (!activeChatbotSessionId) {
+        handleNewChatbotConversation();
+        return;
+      }
+    }
+    persistChatbotSessions();
+  }
+
+  function formatChatbotSessionDate(iso: string): string {
+    try {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return '';
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    } catch {
+      return '';
+    }
+  }
+
+  function toggleChatbotFullscreenWithPref() {
+    chatbotFullscreen = !chatbotFullscreen;
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.setItem(`chatbot_fs_pref_${projectId}`, chatbotFullscreen ? 'fullscreen' : 'inline');
+    }
+  }
+
+  let chatbotPreviewsLoaded = false;
+  async function loadChatbotPreviews() {
+    if (chatbotPreviewsLoaded || !deployment || chatbotSessions.length === 0) return;
+    chatbotPreviewsLoaded = true;
+    try {
+      const data = await cleanUniversalApi.getDeploymentActivity(projectId, { limit: 50 });
+      if (!data?.sessions?.length) return;
+      let changed = false;
+      for (const dbSession of data.sessions) {
+        const match = chatbotSessions.find(s => s.id === dbSession.session_id);
+        if (!match) continue;
+        const history = Array.isArray(dbSession.conversation_history) ? dbSession.conversation_history : [];
+        const lastUserMsg = [...history].reverse().find((m: any) => m.role === 'user');
+        if (lastUserMsg && typeof lastUserMsg.content === 'string') {
+          match.preview = lastUserMsg.content.slice(0, 80);
+          changed = true;
+        }
+        if (dbSession.last_activity) {
+          match.updatedAt = dbSession.last_activity;
+          changed = true;
+        }
+      }
+      if (changed) {
+        chatbotSessions = [...chatbotSessions];
+        persistChatbotSessions();
+      }
+    } catch (e) {
+      console.warn('CHATBOT: Failed to load previews', e);
+    }
+  }
+
+  $: if (chatbotPageNumber != null && currentPage === chatbotPageNumber && deployment && chatbotSessions.length > 0) {
+    loadChatbotPreviews();
   }
 
   function toggleChatbotFullscreen() {
-    chatbotFullscreen = !chatbotFullscreen;
+    toggleChatbotFullscreenWithPref();
   }
 
   function handleChatbotFullscreenKeydown(event: KeyboardEvent) {
     if (event.key === 'Escape' && chatbotFullscreen) {
-      chatbotFullscreen = false;
+      toggleChatbotFullscreenWithPref();
+    }
+  }
+
+  // Listen for Escape forwarded from the chatbot iframe via postMessage
+  function handleChatbotIframeMessage(event: MessageEvent) {
+    if (event.data?.type === 'chatbot_escape' && chatbotFullscreen) {
+      toggleChatbotFullscreenWithPref();
     }
   }
 
@@ -480,10 +651,24 @@
   }
   
   async function loadProcessingStatus() {
+    if (statusRequestInFlight) {
+      return;
+    }
+
+    const requestProjectId = projectId;
+
     try {
+      statusRequestInFlight = true;
       console.log(`📊 UNIVERSAL: Loading processing status for project ${projectId}`);
-      processingStatus = await cleanUniversalApi.getProcessingStatus(projectId);
-      
+      const nextStatus = await cleanUniversalApi.getProcessingStatus(projectId);
+
+      // Ignore stale responses from previous project context
+      if (requestProjectId !== projectId) {
+        console.log('⏭️ UNIVERSAL: Ignoring stale processing status response');
+        return;
+      }
+
+      processingStatus = nextStatus;
       console.log('✅ UNIVERSAL: Processing status loaded', processingStatus?.vector_status);
       
       // Auto-start polling if processing is already in progress (e.g., page refresh during processing)
@@ -494,6 +679,8 @@
       }
     } catch (error) {
       console.error('❌ UNIVERSAL: Failed to load processing status:', error);
+    } finally {
+      statusRequestInFlight = false;
     }
   }
   
@@ -508,19 +695,25 @@
     statusPollingInterval = setInterval(async () => {
       pollingAttempts++;
       await loadProcessingStatus();
-      const status = processingStatus?.vector_status?.processing_status || processingStatus?.vector_status?.collection_status;
-      const isProcessing = processingStatus?.vector_status?.is_processing;
+      const status = effectiveProcessingStatus;
+      const isProcessing = status === 'processing';
       const vectorCount = processingStatus?.vector_status?.vector_count || 0;
       
       console.log(`🔄 POLLING: Attempt ${pollingAttempts} - status=${status}, isProcessing=${isProcessing}, vectors=${vectorCount}`);
       
+      const isTerminal = ['completed', 'failed', 'error'].includes(status);
+      const isCompleteByCount = totalDocumentsCount > 0 && processedCount >= totalDocumentsCount;
+
       // Continue polling if:
-      // 1. isProcessing flag is true, OR
-      // 2. Status indicates processing/pending/not_created (collection being built), OR
-      // 3. We just started (first few attempts) to allow backend time to update status
-      const shouldContinuePolling = isProcessing || 
-        ['processing', 'pending', 'not_created'].includes(status) ||
-        pollingAttempts <= 3;
+      // 1. Not terminal and not complete-by-count, AND
+      // 2. It still looks active/pending OR we are in the first few startup attempts
+      const shouldContinuePolling = !isTerminal &&
+        !isCompleteByCount &&
+        (
+          isProcessing ||
+          ['processing', 'pending', 'not_created'].includes(status) ||
+          pollingAttempts <= 3
+        );
       
       // Stop polling when we have a definitive completed/failed status AND not processing
       if (!shouldContinuePolling || pollingAttempts >= MAX_POLLING_ATTEMPTS) {
@@ -682,10 +875,6 @@
   }
   
   async function deleteDocument(documentId: string, documentName: string) {
-    if (!confirm(`Are you sure you want to delete "${documentName}"?`)) {
-      return;
-    }
-    
     try {
       console.log(`🗑️ UNIVERSAL: Deleting document ${documentId} from project ${projectId}`);
       await cleanUniversalApi.deleteDocument(projectId, documentId);
@@ -702,38 +891,65 @@
     }
   }
   
-  function viewDocument(doc: any) {
-    // Construct download URL - opens in new tab for preview
+  function getDocAuthHeaders(): Record<string, string> {
+    try {
+      const raw = localStorage.getItem('auth');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed?.token) return { 'Authorization': `Bearer ${parsed.token}` };
+      }
+    } catch (_e) { /* ignore */ }
+    return {};
+  }
+
+  async function viewDocument(doc: any) {
     const downloadUrl = doc.download_url || `/api/projects/${projectId}/documents/${doc.document_id || doc.id}/download/`;
-    
-    // For PDFs and images, open in new tab for preview
     const previewableExtensions = ['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.txt'];
     const extension = (doc.file_extension || '').toLowerCase();
-    
-    if (previewableExtensions.includes(extension)) {
-      window.open(downloadUrl, '_blank');
-      console.log(`👁️ UNIVERSAL: Opening document preview: ${doc.original_filename || doc.filename}`);
-    } else {
-      // For other files, trigger download
+
+    if (!previewableExtensions.includes(extension)) {
       downloadDocument(doc);
+      return;
+    }
+
+    try {
+      const resp = await fetch(downloadUrl, { headers: getDocAuthHeaders() });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      window.open(blobUrl, '_blank');
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+      console.log(`👁️ UNIVERSAL: Opening document preview: ${doc.original_filename || doc.filename}`);
+    } catch (err: any) {
+      console.error('❌ UNIVERSAL: Failed to preview document:', err);
+      toasts.error(`Failed to preview document: ${err.message}`);
     }
   }
-  
-  function downloadDocument(doc: any) {
+
+  async function downloadDocument(doc: any) {
     const downloadUrl = doc.download_url || `/api/projects/${projectId}/documents/${doc.document_id || doc.id}/download/`;
     const filename = doc.original_filename || doc.filename || 'document';
-    
-    // Create a temporary link and trigger download
-    const link = document.createElement('a');
-    link.href = downloadUrl;
-    link.download = filename;
-    link.target = '_blank';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    
-    console.log(`📥 UNIVERSAL: Downloading document: ${filename}`);
-    toasts.success(`Downloading "${filename}"`);
+
+    try {
+      const resp = await fetch(downloadUrl, { headers: getDocAuthHeaders() });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const blobUrl = URL.createObjectURL(blob);
+
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 10_000);
+
+      console.log(`📥 UNIVERSAL: Downloading document: ${filename}`);
+      toasts.success(`Downloading "${filename}"`);
+    } catch (err: any) {
+      console.error('❌ UNIVERSAL: Failed to download document:', err);
+      toasts.error(`Failed to download document: ${err.message}`);
+    }
   }
   
   async function processDocuments() {
@@ -816,26 +1032,39 @@
     }
   }
   
+  /** Enter immersive chatbot layout when navigating to the chatbot page (nav, next/prev). */
+  function applyChatbotFullscreenOnNavigateToPage(page: number) {
+    if (chatbotPageNumber == null || page !== chatbotPageNumber) return;
+    chatbotFullscreen = true;
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.setItem(`chatbot_fs_pref_${projectId}`, 'fullscreen');
+    }
+  }
+
   // Navigation functions (capability-based)
   function goToNextPage() {
     if (hasNavigation && currentPage < project.total_pages) {
       currentPage++;
+      applyChatbotFullscreenOnNavigateToPage(currentPage);
     }
   }
   
   function goToPreviousPage() {
     if (hasNavigation && currentPage > 1) {
       currentPage--;
+      applyChatbotFullscreenOnNavigateToPage(currentPage);
     }
   }
   
   function goToPage(page: number) {
     if (hasNavigation && page >= 1 && page <= project.total_pages) {
       currentPage = page;
+      applyChatbotFullscreenOnNavigateToPage(page);
 
-      // Load deployment when navigating to Activity Tracker page (page 5)
-      // or Chatbot page (page 7)
-      if ((page === 5 || page === 7) && !deployment && !loadingDeployment) {
+      // Always refresh deployment for Activity Tracker (5) and Chatbot.
+      // Deploy tab uses its own fetch; parent `deployment` can stay stale (e.g. first visit
+      // returned get_or_create row with workflow_id null — after saving on Deploy, we must refetch).
+      if ((page === 5 || (chatbotPageNumber != null && page === chatbotPageNumber)) && !loadingDeployment) {
         loadDeployment();
       }
     }
@@ -875,7 +1104,7 @@
         </div>
         
         <!-- Navigation Items -->
-        <nav class="flex-1 p-4">
+        <nav class="flex-1 p-4" aria-label="Project pages">
           <div class="space-y-2">
             {#each navigationPages as navPage, index}
               <button
@@ -884,6 +1113,7 @@
                   : 'text-gray-600 hover:text-oxford-blue hover:bg-blue-50 hover:shadow-md'}"
                 on:click={() => goToPage(index + 1)}
                 title={sidebarCollapsed ? navPage.name : ''}
+                aria-current={currentPage === index + 1 ? 'page' : undefined}
               >
                 <div class="flex-shrink-0">
                   <i class="fas {navPage.icon} text-lg {currentPage === index + 1 ? '!text-white' : 'text-gray-600'}"></i>
@@ -893,7 +1123,7 @@
                     <div class="font-semibold text-sm {currentPage === index + 1 ? '!text-white' : 'text-gray-600'}">{navPage.name}</div>
                     {#if navPage.features && navPage.features.length > 0}
                       <div class="text-xs opacity-75 mt-1 {currentPage === index + 1 ? '!text-white' : 'text-gray-500'}">
-                        {navPage.features.slice(0, 2).join(' • ')}
+                        {navPage.features.slice(0, 2).join(' · ')}
                       </div>
                     {/if}
                   </div>
@@ -951,80 +1181,123 @@
         </div>
       {/if}
       
-      <!-- Project Header -->
-      <div class="bg-white border-b border-gray-200 sticky top-0 z-10">
-        <div class="w-full px-6">
-          <div class="flex items-center justify-between py-6">
-            <div class="flex items-center space-x-4">
-              <div class="w-12 h-12 bg-oxford-blue text-white rounded-xl flex items-center justify-center shadow-lg">
-                <i class="fas {project.icon_class} text-lg"></i>
-              </div>
-              <div>
-                <h1 class="text-3xl font-bold text-gray-900">{project.name}</h1>
-                <p class="text-lg text-gray-600">{project.description}</p>
-                <div class="flex items-center space-x-6 mt-2 text-sm text-gray-500">
-                  <span class="flex items-center">
-                    <i class="fas fa-layer-group mr-2"></i>
-                    Template: {project.template_name}
-                  </span>
-                  <span class="flex items-center">
-                    <i class="fas fa-calendar mr-2"></i>
-                    Created: {new Date(project.created_at).toLocaleDateString()}
-                  </span>
-                  {#if uploadedDocuments.length > 0}
-                    <span class="flex items-center">
-                      <i class="fas fa-files mr-2"></i>
-                      {uploadedDocuments.length} documents
-                    </span>
-                  {/if}
+      <!-- Project Header: compact on Chatbot page, full on other pages -->
+      {#if chatbotPageNumber != null && currentPage === chatbotPageNumber && !chatbotHeaderExpanded}
+        <div class="bg-white border-b border-gray-200 sticky top-0 z-10">
+          <div class="w-full px-4">
+            <div class="flex items-center justify-between py-2">
+              <div class="flex items-center space-x-3 min-w-0">
+                <div class="w-8 h-8 bg-oxford-blue text-white rounded-lg flex items-center justify-center shrink-0">
+                  <i class="fas {project.icon_class} text-sm"></i>
                 </div>
+                <h1 class="text-lg font-bold text-gray-900 truncate">{project.name}</h1>
+                <span class="text-sm text-gray-400 hidden md:inline shrink-0">
+                  {project.template_name} &middot; {uploadedDocuments.length} docs
+                </span>
               </div>
-            </div>
-            
-            <!-- Header Actions -->
-            <div class="flex items-center space-x-4">
-              <!-- API Management Button -->
-              <button
-                class="inline-flex items-center px-4 py-2 bg-white border-2 border-oxford-blue text-oxford-blue rounded-lg hover:bg-oxford-blue hover:text-white transition-all duration-200 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"
-                on:click={() => showApiManagement = true}
-                title="Manage project-specific API keys"
-              >
-                <i class="fas fa-key mr-2"></i>
-                API Management
-              </button>
-              <div class="text-right">
-                <div class="inline-flex items-center px-3 py-2 rounded-full text-sm font-medium bg-green-100 text-green-800 border border-green-200">
-                  <i class="fas fa-check-circle mr-2"></i>
-                  Template Independent
-                </div>
-                <div class="text-xs text-gray-500 mt-1 text-right">Universal Interface v1.0</div>
+              <div class="flex items-center gap-2 shrink-0">
+                {#if processingStatus && totalDocumentsCount > 0}
+                  <span class="text-xs text-gray-500">{processedCount}/{totalDocumentsCount} processed</span>
+                {/if}
+                <button
+                  class="text-xs text-gray-500 hover:text-oxford-blue px-2 py-1 rounded hover:bg-gray-100 transition-colors"
+                  on:click={() => chatbotHeaderExpanded = true}
+                  title="Show full project header"
+                >
+                  <i class="fas fa-chevron-down mr-1"></i>Details
+                </button>
               </div>
-              
-              {#if processingStatus}
-                <div class="bg-white border border-gray-200 rounded-lg p-3 min-w-[200px]">
-                  <div class="flex items-center justify-between text-sm mb-2">
-                    <span class="font-medium text-gray-700">Processing Status:</span>
-                    <span class="text-oxford-blue font-semibold">
-                      {formatProcessingStatus(processingStatus.vector_status?.processing_status)}
-                    </span>
-                  </div>
-                  {#if processingStatus.vector_status?.total_documents > 0}
-                    <div class="w-full bg-gray-200 rounded-full h-2">
-                      <div 
-                        class="bg-oxford-blue h-2 rounded-full transition-all duration-300"
-                        style="width: {Math.min(100, (processingStatus.vector_status.ready_documents / processingStatus.vector_status.total_documents) * 100)}%"
-                      ></div>
-                    </div>
-                    <div class="text-xs text-gray-500 mt-1">
-                      {processingStatus.vector_status.ready_documents}/{processingStatus.vector_status.total_documents} processed
-                    </div>
-                  {/if}
-                </div>
-              {/if}
             </div>
           </div>
         </div>
-      </div>
+      {:else}
+        <div class="bg-white border-b border-gray-200 sticky top-0 z-10">
+          <div class="w-full px-6">
+            <div class="flex items-center justify-between py-6">
+              <div class="flex items-center space-x-4">
+                <div class="w-12 h-12 bg-oxford-blue text-white rounded-xl flex items-center justify-center shadow-lg">
+                  <i class="fas {project.icon_class} text-lg"></i>
+                </div>
+                <div>
+                  <h1 class="text-3xl font-bold text-gray-900">{project.name}</h1>
+                  <p class="text-lg text-gray-600">{project.description}</p>
+                  <div class="flex items-center space-x-6 mt-2 text-sm text-gray-500">
+                    <span class="flex items-center">
+                      <i class="fas fa-layer-group mr-2"></i>
+                      Template: {project.template_name}
+                    </span>
+                    <span class="flex items-center">
+                      <i class="fas fa-calendar mr-2"></i>
+                      Created: {new Date(project.created_at).toLocaleDateString()}
+                    </span>
+                    {#if uploadedDocuments.length > 0}
+                      <span class="flex items-center">
+                        <i class="fas fa-files mr-2"></i>
+                        {uploadedDocuments.length} documents
+                      </span>
+                    {/if}
+                  </div>
+                </div>
+              </div>
+              
+              <div class="flex items-center space-x-4">
+                <button
+                  class="inline-flex items-center px-4 py-2 bg-white border-2 border-oxford-blue text-oxford-blue rounded-lg hover:bg-oxford-blue hover:text-white transition-all duration-200 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"
+                  on:click={() => showApiManagement = true}
+                  title="Manage project-specific API keys"
+                >
+                  <i class="fas fa-key mr-2"></i>
+                  API Management
+                </button>
+                {#if processingStatus}
+                  <details class="relative">
+                    <summary class="cursor-pointer inline-flex items-center px-3 py-2 rounded-lg text-sm font-medium bg-gray-50 text-gray-700 border border-gray-200 hover:bg-gray-100 transition-colors">
+                      <i class="fas fa-tasks mr-2 text-oxford-blue"></i>
+                      {formatProcessingStatus(effectiveProcessingStatus)}
+                      {#if totalDocumentsCount > 0}
+                        <span class="ml-2 text-xs text-gray-400">{processedCount}/{totalDocumentsCount}</span>
+                      {/if}
+                    </summary>
+                    <div class="absolute right-0 top-full mt-2 bg-white border border-gray-200 rounded-lg p-3 min-w-[220px] shadow-lg z-20">
+                      <div class="flex items-center justify-between text-sm mb-2">
+                        <span class="font-medium text-gray-700">Processing Status:</span>
+                        <span class="text-oxford-blue font-semibold">
+                          {formatProcessingStatus(effectiveProcessingStatus)}
+                        </span>
+                      </div>
+                      {#if totalDocumentsCount > 0}
+                        <div class="w-full bg-gray-200 rounded-full h-2">
+                          <div
+                            class="bg-oxford-blue h-2 rounded-full transition-all duration-300"
+                            style="width: {Math.min(100, (processedCount / totalDocumentsCount) * 100)}%"
+                          ></div>
+                        </div>
+                        <div class="text-xs text-gray-500 mt-1">
+                          {processedCount}/{totalDocumentsCount} processed
+                        </div>
+                        {#if processingStatus.status_timestamp}
+                          <div class="text-[11px] text-gray-500 mt-1">
+                            Updated at {new Date(processingStatus.status_timestamp).toLocaleTimeString()}
+                          </div>
+                        {/if}
+                      {/if}
+                    </div>
+                  </details>
+                {/if}
+                {#if chatbotPageNumber != null && currentPage === chatbotPageNumber}
+                  <button
+                    class="text-xs text-gray-500 hover:text-oxford-blue px-2 py-1 rounded hover:bg-gray-100 transition-colors"
+                    on:click={() => chatbotHeaderExpanded = false}
+                    title="Collapse header for more chat space"
+                  >
+                    <i class="fas fa-chevron-up mr-1"></i>Compact
+                  </button>
+                {/if}
+              </div>
+            </div>
+          </div>
+        </div>
+      {/if}
     
     <!-- Page Content (Capability-Based) - Full Width Layout -->
     <div class="flex-1 w-full px-6 py-8">
@@ -1214,7 +1487,7 @@
                   <div class="text-sm !text-white opacity-80">Documents</div>
                 </div>
                 <div class="text-center">
-                  <div class="text-2xl font-bold !text-white">{processingStatus?.vector_status?.ready_documents || 0}</div>
+                  <div class="text-2xl font-bold !text-white">{processedCount}</div>
                   <div class="text-sm !text-white opacity-80">Processed</div>
                 </div>
                 <div class="text-center">
@@ -1243,20 +1516,20 @@
                     <div class="flex items-center justify-between text-sm mb-3">
                       <span class="font-medium text-gray-700">Status:</span>
                       <span class="font-semibold text-oxford-blue">
-                        {formatProcessingStatus(processingStatus.vector_status?.processing_status)}
+                        {formatProcessingStatus(effectiveProcessingStatus)}
                       </span>
                     </div>
                     
-                    {#if processingStatus.vector_status?.total_documents > 0}
+                    {#if totalDocumentsCount > 0}
                       <div class="w-full bg-gray-200 rounded-full h-3 mb-2">
                         <div 
                           class="bg-oxford-blue h-3 rounded-full transition-all duration-500"
-                          style="width: {Math.min(100, (processingStatus.vector_status.ready_documents / processingStatus.vector_status.total_documents) * 100)}%"
+                          style="width: {Math.min(100, (processedCount / totalDocumentsCount) * 100)}%"
                         ></div>
                       </div>
                       <div class="flex justify-between text-xs text-gray-500">
-                        <span>{processingStatus.vector_status.ready_documents} processed</span>
-                        <span>{processingStatus.vector_status.total_documents} total</span>
+                        <span>{processedCount} processed</span>
+                        <span>{totalDocumentsCount} total</span>
                       </div>
                     {/if}
                   </div>
@@ -1352,31 +1625,17 @@
                       </label>
                     </div>
                     
-                    <!-- Preserve Original Folder Structure Toggle -->
+                    <!-- Auto Folder Classification (LLM paths when on; upload paths when off) -->
                     <div class="flex items-center justify-between p-3 bg-white rounded-lg border border-gray-200 mt-3">
                       <div class="flex-1">
-                        <label class="text-sm font-medium text-gray-900 cursor-pointer" for="preserve-folder-structure-toggle">
-                          Preserve Original Folder Structure
+                        <label class="text-sm font-medium text-gray-900 cursor-pointer" for="auto-folder-classification-toggle">
+                          Auto Folder Classification
                         </label>
-                        <p class="text-xs text-gray-500 mt-1">
-                          Keep your uploaded folder hierarchy instead of auto-classifying documents
-                        </p>
-                        {#if preserveOriginalFolderStructure}
-                          <p class="text-xs text-green-600 mt-1">
-                            <i class="fas fa-folder-tree mr-1"></i>
-                            Your folder structure will be preserved as uploaded
-                          </p>
-                        {:else}
-                          <p class="text-xs text-blue-600 mt-1">
-                            <i class="fas fa-magic mr-1"></i>
-                            Documents will be auto-classified into categories
-                          </p>
-                        {/if}
                       </div>
                       <label class="relative inline-flex items-center cursor-pointer">
                         <input 
                           type="checkbox" 
-                          id="preserve-folder-structure-toggle"
+                          id="auto-folder-classification-toggle"
                           checked={preserveOriginalFolderStructure}
                           on:change={(e) => updateFolderStructureSetting((e.target as HTMLInputElement).checked)}
                           disabled={updatingFolderStructureSetting}
@@ -1690,160 +1949,88 @@
       </div>
     {/if}
 
-    {#if hasNavigation && currentPage === 7}
-      <!-- Page 7: Chatbot (In-App) -->
-      {#if chatbotFullscreen}
-        <!-- Fullscreen Chatbot - mirrors Designer Mode structure -->
-        <div
-          class="fixed inset-0 z-[9999] flex flex-col chatbot-fullscreen-active bg-slate-900/40"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Chatbot Fullscreen Mode"
-        >
-          <!-- Fullscreen header bar -->
-          <div class="flex items-center justify-between px-4 py-2 shadow-lg bg-[#002147]">
-            <div class="flex items-center space-x-3">
-              <div class="w-8 h-8 rounded-lg flex items-center justify-center" style="background-color: rgba(255,255,255,0.2);">
-                <i class="fas fa-comments" style="color: white;"></i>
-              </div>
-              <div>
-                <h2 class="font-semibold" style="color: white;">Chatbot</h2>
-                <p class="text-xs" style="color: rgba(255,255,255,0.8);">
-                  {project?.name || 'Project'} • Press ESC to exit
-                </p>
-              </div>
+    {#if hasNavigation && chatbotPageNumber != null && currentPage === chatbotPageNumber}
+      <!-- Chatbot (In-App) -->
+      {#if loadingDeployment}
+        <div class="chatbot-page h-full flex-1 w-full px-6 py-8">
+          <div class="flex items-center justify-center min-h-96">
+            <div class="text-center">
+              <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
+              <p class="text-oxford-blue">Loading deployment information...</p>
             </div>
-
-            {#if deployment}
-              <div class="flex items-center gap-3 flex-wrap">
-                <!-- Session selector -->
-                <div class="flex items-center gap-2">
-                  <label class="text-xs font-medium text-white opacity-80">
-                    Session
-                  </label>
-                  <select
-                    class="text-xs border border-transparent rounded-lg px-3 py-1.5 bg-white/10 text-white focus:outline-none focus:ring-2 focus:ring-white/80 focus:border-white/80"
-                    on:change={handleChatbotSessionChange}
-                    bind:value={activeChatbotSessionId}
-                  >
-                    {#each chatbotSessions as session}
-                      <option value={session.id}>
-                        {session.label}
-                      </option>
-                    {/each}
-                  </select>
+          </div>
+        </div>
+      {:else if !deployment || !deployment.workflow_id}
+        <div class="chatbot-page h-full flex-1 w-full px-6 py-8">
+          <div class="flex items-center justify-center min-h-96">
+            <div class="text-center max-w-md">
+              <div class="w-16 h-16 bg-gray-100 text-gray-400 rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
+                <i class="fas fa-robot text-2xl"></i>
+              </div>
+              <h3 class="text-xl font-bold text-gray-900 mb-2">No Deployment Found</h3>
+              <p class="text-gray-600 mb-4">
+                Chatbot requires an active deployment. Please deploy a workflow from the Deploy page first.
+              </p>
+              <button
+                class="px-4 py-2 bg-oxford-blue text-white rounded-lg hover:bg-blue-700 transition-colors"
+                on:click={() => { chatbotFullscreen = false; goToPage(4); }}
+              >
+                <i class="fas fa-rocket mr-2"></i>
+                Go to Deploy
+              </button>
+            </div>
+          </div>
+        </div>
+      {:else}
+        <!-- Single container: CSS switches between fullscreen and inline -->
+        <div
+          class="{chatbotFullscreen
+            ? 'fixed inset-0 z-[9999] flex flex-col bg-neutral-100 chatbot-fullscreen-active'
+            : 'chatbot-page h-full flex-1 w-full px-6 py-8'}"
+          role={chatbotFullscreen ? 'dialog' : undefined}
+          aria-modal={chatbotFullscreen ? 'true' : undefined}
+          aria-label={chatbotFullscreen ? 'Chatbot Fullscreen Mode' : undefined}
+        >
+          <!-- Header: switches between fullscreen bar and inline title -->
+          {#if chatbotFullscreen}
+            <div class="flex items-center justify-between px-4 py-2 shadow-lg bg-[#002147] shrink-0">
+              <div class="flex items-center space-x-3 min-w-0">
+                <div class="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style="background-color: rgba(255,255,255,0.2);">
+                  <i class="fas fa-comments" style="color: white;"></i>
                 </div>
-
-                <!-- New conversation button -->
-                <button
-                  class="inline-flex items-center px-3 py-1.5 text-xs bg-white text-[#002147] rounded-lg hover:bg-gray-100 transition-colors shadow-sm"
-                  on:click={handleNewChatbotConversation}
-                  title="Start a new conversation"
-                >
-                  <i class="fas fa-plus mr-2"></i>
-                  New Conversation
-                </button>
-
-                <!-- Exit fullscreen button -->
+                <div class="min-w-0">
+                  <h2 class="font-semibold text-white text-sm leading-tight truncate">
+                    {project?.name || 'Project'} <span class="font-normal text-white/60">/</span> Chatbot
+                  </h2>
+                </div>
+              </div>
+              <div class="flex items-center gap-3 shrink-0">
+                <span class="hidden sm:inline-flex items-center gap-1.5 text-xs text-white/50">
+                  <kbd class="px-1.5 py-0.5 rounded bg-white/10 text-white/70 text-[11px] font-mono border border-white/10">Esc</kbd>
+                  to exit
+                </span>
                 <button
                   class="inline-flex items-center px-3 py-1.5 text-xs bg-white rounded-lg hover:bg-gray-100 transition-colors shadow-sm text-[#002147]"
                   on:click={toggleChatbotFullscreen}
                   title="Exit Chatbot Fullscreen (ESC)"
                 >
-                  <i class="fas fa-compress-arrows-alt mr-2"></i>
-                  Exit Fullscreen
+                  <i class="fas fa-compress-arrows-alt mr-1.5"></i>
+                  Exit
                 </button>
               </div>
-            {/if}
-          </div>
-
-          <!-- Fullscreen content area -->
-          <div class="flex-1 pt-12 px-6 pb-6 flex items-stretch justify-center">
-            {#if loadingDeployment}
-              <div class="flex items-center justify-center w-full">
-                <div class="text-center">
-                  <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-white mx-auto mb-4"></div>
-                  <p class="text-white">Loading deployment information...</p>
-                </div>
-              </div>
-            {:else if !deployment || !deployment.workflow_id}
-              <div class="flex items-center justify-center w-full">
-                <div class="text-center max-w-md bg-white rounded-2xl shadow-lg p-6">
-                  <div class="w-16 h-16 bg-gray-100 text-gray-400 rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
-                    <i class="fas fa-robot text-2xl"></i>
-                  </div>
-                  <h3 class="text-xl font-bold text-gray-900 mb-2">No Deployment Found</h3>
-                  <p class="text-gray-600 mb-4">
-                    Chatbot requires an active deployment. Please deploy a workflow from the Deploy page first.
-                  </p>
-                  <button
-                    class="px-4 py-2 bg-oxford-blue text-white rounded-lg hover:bg-blue-700 transition-colors"
-                    on:click={() => { chatbotFullscreen = false; goToPage(4); }}
-                  >
-                    <i class="fas fa-rocket mr-2"></i>
-                    Go to Deploy
-                  </button>
-                </div>
-              </div>
-            {:else}
-              <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden w-full max-w-6xl">
-                <iframe
-                  title="In-App Chatbot"
-                  src={`/api/workflow-deploy/${projectId}/embed/${activeChatbotSessionId ? `?session_id=${activeChatbotSessionId}` : ''}`}
-                  class="w-full h-full border-0"
-                  loading="lazy"
-                  referrerpolicy="no-referrer-when-downgrade"
-                >
-                </iframe>
-              </div>
-            {/if}
-          </div>
-        </div>
-      {:else}
-        <!-- Normal in-page Chatbot -->
-        <div class="chatbot-page h-full flex-1 w-full px-6 py-8">
-          <div class="mb-4 flex items-center justify-between flex-wrap gap-4">
-            <div>
-              <h2 class="text-2xl font-bold text-gray-900 flex items-center">
-                <i class="fas fa-comments mr-3 text-oxford-blue"></i>
-                Chatbot
-              </h2>
-              <p class="text-gray-600 mt-2">
-                Chat with this workflow using the same assistant your end-users see.
-              </p>
             </div>
-
-            {#if deployment}
+          {:else}
+            <div class="mb-4 flex items-center justify-between flex-wrap gap-4">
+              <div>
+                <h2 class="text-2xl font-bold text-gray-900 flex items-center">
+                  <i class="fas fa-comments mr-3 text-oxford-blue"></i>
+                  Chatbot
+                </h2>
+                <p class="text-gray-600 mt-2">
+                  Chat with this workflow using the same assistant your end-users see.
+                </p>
+              </div>
               <div class="flex items-center gap-3 flex-wrap">
-                <!-- Session selector -->
-                <div class="flex items-center gap-2">
-                  <label class="text-sm text-gray-700 font-medium">
-                    Session
-                  </label>
-                  <select
-                    class="text-sm border border-gray-300 rounded-lg px-3 py-1.5 bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-oxford-blue focus:border-oxford-blue"
-                    on:change={handleChatbotSessionChange}
-                    bind:value={activeChatbotSessionId}
-                  >
-                    {#each chatbotSessions as session}
-                      <option value={session.id}>
-                        {session.label}
-                      </option>
-                    {/each}
-                  </select>
-                </div>
-
-                <!-- New conversation button -->
-                <button
-                  class="inline-flex items-center px-3 py-1.5 text-sm bg-oxford-blue text-white rounded-lg hover:bg-blue-900 transition-colors shadow-sm"
-                  on:click={handleNewChatbotConversation}
-                  title="Start a new conversation"
-                >
-                  <i class="fas fa-plus mr-2"></i>
-                  New Conversation
-                </button>
-
-                <!-- Fullscreen toggle -->
                 <button
                   class="inline-flex items-center px-3 py-1.5 text-sm border border-gray-300 rounded-lg bg-white hover:bg-gray-100 text-gray-700 shadow-sm"
                   on:click={toggleChatbotFullscreen}
@@ -1853,47 +2040,96 @@
                   Fullscreen
                 </button>
               </div>
-            {/if}
-          </div>
-
-          {#if loadingDeployment}
-            <div class="flex items-center justify-center min-h-96">
-              <div class="text-center">
-                <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
-                <p class="text-oxford-blue">Loading deployment information...</p>
-              </div>
-            </div>
-          {:else if !deployment || !deployment.workflow_id}
-            <div class="flex items-center justify-center min-h-96">
-              <div class="text-center max-w-md">
-                <div class="w-16 h-16 bg-gray-100 text-gray-400 rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
-                  <i class="fas fa-robot text-2xl"></i>
-                </div>
-                <h3 class="text-xl font-bold text-gray-900 mb-2">No Deployment Found</h3>
-                <p class="text-gray-600 mb-4">
-                  Chatbot requires an active deployment. Please deploy a workflow from the Deploy page first.
-                </p>
-                <button
-                  class="px-4 py-2 bg-oxford-blue text-white rounded-lg hover:bg-blue-700 transition-colors"
-                  on:click={() => goToPage(4)}
-                >
-                  <i class="fas fa-rocket mr-2"></i>
-                  Go to Deploy
-                </button>
-              </div>
-            </div>
-          {:else}
-            <div class="bg-white rounded-2xl shadow-md border border-slate-200 h-[600px] md:h-[700px] xl:h-[780px] flex flex-col overflow-hidden">
-              <iframe
-                title="In-App Chatbot"
-                src={`/api/workflow-deploy/${projectId}/embed/${activeChatbotSessionId ? `?session_id=${activeChatbotSessionId}` : ''}`}
-                class="w-full h-full border-0"
-                loading="lazy"
-                referrerpolicy="no-referrer-when-downgrade"
-              >
-              </iframe>
             </div>
           {/if}
+
+          <!-- Shared body: conversation rail + iframe (ALWAYS MOUNTED, never destroyed by toggle) -->
+          <div class="{chatbotFullscreen
+            ? 'flex-1 min-h-0 flex flex-row w-full'
+            : 'flex flex-col md:flex-row gap-4 min-h-[600px] md:min-h-[700px] xl:min-h-[780px]'}">
+            <aside
+              class="{chatbotFullscreen
+                ? 'w-64 shrink-0 border-r border-slate-200 bg-white flex flex-col min-h-0'
+                : 'w-full md:w-56 shrink-0 bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col min-h-[200px] md:min-h-0 md:max-h-[780px] overflow-hidden'}"
+              aria-label="Conversations"
+            >
+              <div class="p-3 border-b border-slate-200 shrink-0">
+                <button
+                  type="button"
+                  class="w-full inline-flex items-center justify-center px-3 py-2 text-sm font-medium bg-[#002147] text-white rounded-lg hover:bg-blue-900 transition-colors shadow-sm"
+                  on:click={handleNewChatbotConversation}
+                  title="Start a new conversation"
+                >
+                  <i class="fas fa-plus mr-2"></i>
+                  New conversation
+                </button>
+              </div>
+              <nav class="flex-1 min-h-0 overflow-y-auto p-2 space-y-0.5">
+                {#each chatbotSessions as session (session.id)}
+                  {#if renamingSessionId === session.id}
+                    <div class="px-2 py-1.5">
+                      <input
+                        type="text"
+                        class="w-full text-sm rounded-md border border-slate-300 px-2 py-1 focus:outline-none focus:ring-2 focus:ring-[#002147] focus:border-transparent"
+                        bind:value={renameInputValue}
+                        on:keydown={(e) => { if (e.key === 'Enter') commitRenameSession(); if (e.key === 'Escape') cancelRenameSession(); }}
+                        on:blur={commitRenameSession}
+                        autofocus
+                      />
+                    </div>
+                  {:else}
+                    <div class="relative group">
+                      <button
+                        type="button"
+                        class="w-full text-left rounded-lg px-3 py-2 pr-8 text-sm transition-colors
+                          {activeChatbotSessionId === session.id
+                          ? 'bg-slate-100 text-[#002147] font-medium'
+                          : 'text-gray-700 hover:bg-slate-50'}"
+                        on:click={() => selectChatbotSession(session.id)}
+                      >
+                        <span class="block truncate">{session.label}</span>
+                        {#if session.preview}
+                          <span class="block text-xs text-gray-400 mt-0.5 truncate">{session.preview}</span>
+                        {:else if session.createdAt}
+                          <span class="block text-xs text-gray-400 mt-0.5">{formatChatbotSessionDate(session.createdAt)}</span>
+                        {/if}
+                      </button>
+                      <div class="absolute right-1 top-1/2 -translate-y-1/2 hidden group-hover:flex items-center gap-0.5">
+                        <button
+                          type="button"
+                          class="p-1 rounded text-gray-400 hover:text-oxford-blue hover:bg-slate-200 transition-colors"
+                          on:click|stopPropagation={() => startRenameSession(session.id)}
+                          title="Rename"
+                        ><i class="fas fa-pen text-[10px]"></i></button>
+                        <button
+                          type="button"
+                          class="p-1 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                          on:click|stopPropagation={() => deleteChatbotSession(session.id)}
+                          title="Delete"
+                        ><i class="fas fa-trash text-[10px]"></i></button>
+                      </div>
+                    </div>
+                  {/if}
+                {/each}
+              </nav>
+            </aside>
+            <div
+              class="{chatbotFullscreen
+                ? 'flex-1 min-h-0 min-w-0 flex flex-col bg-white'
+                : 'flex-1 min-w-0 bg-white rounded-2xl shadow-md border border-slate-200 min-h-[400px] md:min-h-0 h-[480px] md:h-[700px] xl:h-[780px] flex flex-col overflow-hidden'}"
+            >
+              {#key activeChatbotSessionId}
+                <iframe
+                  title="In-App Chatbot"
+                  src={`/api/workflow-deploy/${projectId}/embed/${activeChatbotSessionId ? `?session_id=${activeChatbotSessionId}` : ''}`}
+                  class="w-full h-full flex-1 min-h-0 border-0"
+                  loading="lazy"
+                  referrerpolicy="no-referrer-when-downgrade"
+                >
+                </iframe>
+              {/key}
+            </div>
+          </div>
         </div>
       {/if}
     {/if}

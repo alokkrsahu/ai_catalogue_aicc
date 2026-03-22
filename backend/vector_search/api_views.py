@@ -5,7 +5,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from users.models import IntelliDocProject
-from .services_enhanced import EnhancedVectorSearchManager
+from .services_enhanced import EnhancedVectorSearchManager, PROCESSING_THREADS
 from .unified_services_fixed import UnifiedVectorSearchManager, fix_existing_documents
 from .detailed_logger import DocumentProcessingTracker, doc_logger
 import logging
@@ -13,9 +13,6 @@ import threading
 import time
 
 logger = logging.getLogger(__name__)
-
-# Global processing threads
-PROCESSING_THREADS = {}
 
 def run_processing_in_background(project_id: str, processing_mode: str = 'enhanced', llm_provider: str = None, llm_model: str = None, enable_summary: bool = True):
     """Run enhanced document processing in background thread - no fallbacks"""

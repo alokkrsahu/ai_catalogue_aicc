@@ -510,3 +510,187 @@ class DocAwareConfigViewSet(viewsets.ViewSet):
                 {'error': f'Failed to retrieve hierarchical paths: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    @action(detail=False, methods=['get'], url_path='uploaded_hierarchical_paths')
+    def uploaded_hierarchical_paths(self, request):
+        """
+        Get hierarchical paths for *uploaded* (ready) project documents so the
+        node-level "File Attachments" picker works immediately, even before
+        Start Processing / Milvus vectorization completes.
+        """
+        try:
+            project_id = request.query_params.get('project_id')
+            include_files = request.query_params.get('include_files', 'true').lower() == 'true'
+            include_llm_status = request.query_params.get('include_llm_status', 'true').lower() == 'true'
+
+            if not project_id:
+                return Response(
+                    {'error': 'Project ID is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Verify project access
+            project = get_object_or_404(IntelliDocProject, project_id=project_id)
+            if not project.has_user_access(request.user):
+                return Response(
+                    {'error': 'You do not have access to this project'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            # Only consider documents whose file content is ready for upload-to-provider
+            docs = project.documents.filter(upload_status='ready')
+
+            # When `preserve_original_folder_structure=True`, folder grouping is driven by
+            # ProjectDocumentFolderOrganization (LLM-based decisions) instead of upload paths.
+            folder_org_map = {}
+            if getattr(project, 'preserve_original_folder_structure', False):
+                try:
+                    from users.models import ProjectDocumentFolderOrganization
+
+                    qs = (
+                        ProjectDocumentFolderOrganization.objects
+                        .filter(document__in=docs)
+                        .values_list('document__document_id', 'folder_path')
+                    )
+                    folder_org_map = {str(doc_id): folder_path for doc_id, folder_path in qs}
+                except Exception as e:
+                    logger.debug(f"Could not load LLM folder organization mapping: {e}")
+
+            # Build folder paths + file entries from original_filename (preserves upload hierarchy)
+            folder_paths = set()
+            file_entries = []
+
+            for doc in docs:
+                # Normalize path separators and strip leading/trailing slashes
+                original_filename = (doc.original_filename or '').replace('\\', '/').strip('/')
+                if not original_filename:
+                    continue
+
+                parts = [p for p in original_filename.split('/') if p]
+                if not parts:
+                    continue
+
+                file_name = parts[-1]
+                # When preserve_original_folder_structure=True, rely only on LLM mapping.
+                # Do NOT fall back to uploaded folder paths.
+                if getattr(project, 'preserve_original_folder_structure', False):
+                    folder_path = folder_org_map.get(str(doc.document_id), '')
+                else:
+                    fallback_folder_path = '/'.join(parts[:-1])  # can be '' for root-level files
+                    folder_path = fallback_folder_path
+
+                # Track folder itself and all parents for recursive folder checkbox UX
+                if folder_path:
+                    folder_paths.add(folder_path)
+                    path_parts = folder_path.split('/')
+                    for i in range(1, len(path_parts)):
+                        folder_paths.add('/'.join(path_parts[:i]))
+
+                file_entries.append({
+                    'id': f"file_uploaded_{doc.document_id}",
+                    'name': doc.original_filename,   # IMPORTANT: stored value for UI selection
+                    'path': folder_path,             # folder path ('' for root)
+                    'type': 'file',
+                    'displayName': original_filename,
+                    'isFolder': False,
+                    'document_id': str(doc.document_id),
+                })
+
+            # Build folder entries (skips root "")
+            folder_entries = []
+            for folder_path in sorted(folder_paths):
+                folder_entries.append({
+                    'id': f"folder_uploaded_{folder_path}",
+                    'name': folder_path.split('/')[-1],
+                    'path': folder_path,
+                    'type': 'folder',
+                    'displayName': folder_path,
+                    'isFolder': True,
+                })
+
+            hierarchical_data = folder_entries
+            if include_files:
+                hierarchical_data = folder_entries + file_entries
+
+            folders_count = len(folder_entries)
+            files_count = len(file_entries) if include_files else 0
+
+            # Build per-document LLM upload status map (keyed by original_filename)
+            # This matches the shape expected by NodePropertiesPanel.
+            document_llm_status = {}
+            if include_llm_status:
+                try:
+                    from agent_orchestration.llm_file_service import LLMFileUploadService
+                    from project_api_keys.services import get_project_api_key_service
+
+                    llm_service = LLMFileUploadService(project)
+                    api_key_service = get_project_api_key_service()
+
+                    provider_key_available = {}
+                    for provider_type in ['openai', 'anthropic', 'google']:
+                        try:
+                            key = api_key_service.get_project_api_key(project, provider_type)
+                            provider_key_available[provider_type] = bool(key)
+                        except Exception as key_err:
+                            logger.debug(f"Could not check API key for {provider_type}: {key_err}")
+                            provider_key_available[provider_type] = False
+
+                    for doc in docs:
+                        status_entry = {}
+                        for provider, field_name in [
+                            ('openai', 'llm_file_id_openai'),
+                            ('anthropic', 'llm_file_id_anthropic'),
+                            ('google', 'llm_file_id_google'),
+                        ]:
+                            file_id = getattr(doc, field_name, None)
+                            if file_id:
+                                status_entry[provider] = {'status': 'ready'}
+                                continue
+
+                            supported, support_reason = llm_service.check_provider_support(doc, provider)
+                            if not supported:
+                                reason_code = 'unsupported'
+                                reason_text = support_reason or 'Not supported'
+                                lower_reason = reason_text.lower()
+                                if 'exceeds' in lower_reason and 'limit' in lower_reason:
+                                    reason_code = 'file_too_large'
+                                elif 'not supported' in lower_reason:
+                                    reason_code = 'unsupported_type'
+
+                                status_entry[provider] = {
+                                    'status': reason_code,
+                                    'reason': reason_text,
+                                }
+                                continue
+
+                            provider_key = 'google' if provider == 'google' else provider
+                            if not provider_key_available.get(provider_key, False):
+                                status_entry[provider] = {
+                                    'status': 'missing_api_key',
+                                    'reason': f'No API key configured for {provider}',
+                                }
+                            else:
+                                status_entry[provider] = {'status': 'not_uploaded'}
+
+                        document_llm_status[doc.original_filename] = status_entry
+                except Exception as llm_status_error:
+                    logger.debug(f"Could not build LLM upload status: {llm_status_error}")
+
+            return Response({
+                'project_id': project_id,
+                'hierarchical_paths': hierarchical_data,
+                'folders_count': folders_count,
+                'files_count': files_count,
+                'total_count': len(hierarchical_data),
+                'documents_info': {
+                    'total_documents': project.documents.count(),
+                    'ready_documents': docs.count(),
+                },
+                'document_llm_status': document_llm_status
+            })
+        except Exception as e:
+            logger.error(f"❌ DOCAWARE API: Failed to get uploaded hierarchical paths: {e}", exc_info=True)
+            return Response(
+                {'error': f'Failed to retrieve uploaded hierarchical paths: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

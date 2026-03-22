@@ -60,7 +60,9 @@ class HumanInputHandler:
             source_id = input_source.get('source_id')
             source_name = input_source.get('name', source_id)
             if source_id in merged_executed_nodes:
-                logger.info(f"✅ HUMAN INPUT: Input from {source_name} available ({len(str(merged_executed_nodes[source_id]))} chars)")
+                from agent_orchestration.executed_nodes_codec import plain_executed_output
+                _plain = plain_executed_output(merged_executed_nodes[source_id])
+                logger.info(f"✅ HUMAN INPUT: Input from {source_name} available ({len(_plain)} chars)")
             else:
                 logger.warning(f"⚠️ HUMAN INPUT: Input from {source_name} (node_id: {source_id}) NOT available in executed_nodes")
                 logger.warning(f"⚠️ HUMAN INPUT: Available node_ids in executed_nodes: {list(merged_executed_nodes.keys())}")

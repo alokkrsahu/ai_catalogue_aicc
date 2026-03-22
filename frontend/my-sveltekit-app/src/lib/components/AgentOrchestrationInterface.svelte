@@ -50,6 +50,15 @@
   //   }
   // }
   let documentLlmStatus: Record<string, Record<string, { status: string; reason?: string }>> = {};
+
+  // Uploaded-document tree for node-level File Attachments picker.
+  // Unlike `hierarchicalPaths`, this does NOT depend on Start Processing / Milvus.
+  let uploadedDocumentPaths: any[] = [];
+  let uploadedDocumentPathsLoading = false;
+  let uploadedDocumentPathsLoaded = false;
+  let uploadedDocumentPathsError: string | null = null;
+  let uploadedDocumentPollInterval: number | null = null;
+  let uploadedDocumentPollInFlight = false;
   
   // Conversation history state
   let selectedRunId: string | null = null;
@@ -59,6 +68,64 @@
   // Agent capabilities (from project)
   let agentCapabilities: any = {};
   
+  // ============================================================================
+  // CITATION CHIP RENDERING
+  // ============================================================================
+  let activeCitationRef: number | null = null;
+  let citationTooltipEl: HTMLElement | null = null;
+
+  function renderContentWithCitations(content: string, citations?: any[]): string {
+    if (!content) return '';
+    const escaped = content
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\n/g, '<br>');
+    if (!citations || citations.length === 0) return escaped;
+    return escaped.replace(/\[(\d+)\]/g, (match, num) => {
+      const ref = parseInt(num, 10);
+      const cit = citations.find((c: any) => Number(c.ref) === ref);
+      if (!cit) return match;
+      const title = (cit.document_title || '').replace(/"/g, '&quot;');
+      const quote = (cit.quoted_text || '').slice(0, 200).replace(/"/g, '&quot;');
+      let loc = '';
+      if (cit.page) loc += `p.${cit.page}`;
+      if (cit.section) loc += (loc ? ', ' : '') + cit.section;
+      return `<span class="cite-chip" data-ref="${ref}" title="${title}${loc ? ' — ' + loc : ''}">${ref}</span>`;
+    });
+  }
+
+  function handleCitationClick(event: MouseEvent, citations?: any[]) {
+    const target = event.target as HTMLElement;
+    if (!target.classList.contains('cite-chip')) {
+      if (citationTooltipEl) { citationTooltipEl.remove(); citationTooltipEl = null; activeCitationRef = null; }
+      return;
+    }
+    const ref = parseInt(target.dataset.ref || '0', 10);
+    if (!citations || !ref) return;
+    if (activeCitationRef === ref && citationTooltipEl) {
+      citationTooltipEl.remove(); citationTooltipEl = null; activeCitationRef = null;
+      return;
+    }
+    if (citationTooltipEl) { citationTooltipEl.remove(); citationTooltipEl = null; }
+    const cit = citations.find((c: any) => Number(c.ref) === ref);
+    if (!cit) return;
+    activeCitationRef = ref;
+    const tooltip = document.createElement('div');
+    tooltip.className = 'cite-tooltip';
+    let loc = '';
+    if (cit.page) loc += `p.${cit.page}`;
+    if (cit.section) loc += (loc ? ', ' : '') + cit.section;
+    tooltip.innerHTML = `<div class="cite-tooltip-title">${cit.document_title || 'Document'}${loc ? ' — ' + loc : ''}</div><div class="cite-tooltip-quote">"${(cit.quoted_text || '').slice(0, 300)}"</div>`;
+    const rect = target.getBoundingClientRect();
+    tooltip.style.position = 'fixed';
+    tooltip.style.left = `${rect.left}px`;
+    tooltip.style.top = `${rect.bottom + 6}px`;
+    tooltip.style.zIndex = '9999';
+    document.body.appendChild(tooltip);
+    citationTooltipEl = tooltip;
+  }
+
   // ============================================================================
   // PHASE 3: HUMAN INPUT STATE MANAGEMENT
   // ============================================================================
@@ -127,7 +194,13 @@
       clearInterval(executionMonitoringInterval);
       executionMonitoringInterval = null;
     }
+
+    if (uploadedDocumentPollInterval) {
+      clearInterval(uploadedDocumentPollInterval);
+      uploadedDocumentPollInterval = null;
+    }
     
+    if (citationTooltipEl) { citationTooltipEl.remove(); citationTooltipEl = null; }
     console.log('🛑 AGENT ORCHESTRATION: Cleaned up human input polling, execution monitoring, and subscriptions');
   });
   
@@ -138,10 +211,11 @@
       console.log('🚀 AGENT ORCHESTRATION: Starting initialization');
       
       // Start all initialization tasks in parallel
-      const [workflowsResult, modelsResult, pathsResult] = await Promise.allSettled([
+      const [workflowsResult, modelsResult, pathsResult, uploadedPathsResult] = await Promise.allSettled([
         loadWorkflowsFromDatabase(),
         preLoadLLMModels(),
-        loadHierarchicalPaths()
+        loadHierarchicalPaths(),
+        loadUploadedDocumentPaths(true, true)
       ]);
       
       // Handle results
@@ -158,6 +232,13 @@
       if (pathsResult.status === 'rejected') {
         console.error('❌ AGENT ORCHESTRATION: Hierarchical paths loading failed:', pathsResult.reason);
         hierarchicalPathsError = pathsResult.reason?.message || 'Failed to load content filter data';
+      }
+
+      if (uploadedPathsResult.status === 'rejected') {
+        console.error('❌ AGENT ORCHESTRATION: Uploaded document paths loading failed:', uploadedPathsResult.reason);
+        uploadedDocumentPathsError = uploadedPathsResult.reason?.message || 'Failed to load uploaded file attachment data';
+        uploadedDocumentPaths = [];
+        uploadedDocumentPathsLoaded = true;
       }
       
       // Set agent capabilities
@@ -176,6 +257,10 @@
         models: bulkModelData?.statistics.total_models || 0,
         contentFilterPaths: hierarchicalPaths.length
       });
+
+      // Poll for live updates to uploaded docs in the node attachment picker.
+      // This keeps the picker in sync with newly uploaded ProjectDocuments.
+      startUploadedDocumentPolling();
       
     } catch (error) {
       console.error('❌ AGENT ORCHESTRATION: Initialization failed:', error);
@@ -298,6 +383,75 @@
     } finally {
       hierarchicalPathsLoading = false;
     }
+  }
+
+  async function loadUploadedDocumentPaths(include_llm_status: boolean = true, resetLoadedState: boolean = true) {
+    try {
+      // For polling, avoid flicker: keep `uploadedDocumentPathsLoaded` as-is
+      uploadedDocumentPathsLoading = resetLoadedState;
+      if (resetLoadedState) uploadedDocumentPathsLoaded = false;
+      uploadedDocumentPathsError = null;
+
+      console.log('📎 AGENT ORCHESTRATION: Loading uploaded document paths for node file attachments');
+
+      const response = await api.get(
+        `/agent-orchestration/docaware/uploaded_hierarchical_paths/?project_id=${projectId}&include_files=true&include_llm_status=${include_llm_status}`
+      );
+
+      const pathsData = response.data || response;
+      const rawPaths = pathsData.hierarchical_paths || [];
+
+      // Keep only folders + files (no chunked entries exist here, but keep defensive filter)
+      uploadedDocumentPaths = rawPaths.filter((p) => {
+        if (!p?.id || !p?.displayName) return false;
+        return !p.path?.includes('#chunk_');
+      });
+
+      console.log(
+        `✅ AGENT ORCHESTRATION: Loaded ${uploadedDocumentPaths.length} uploaded attachment options`,
+        `(${pathsData.folders_count || 0} folders, ${pathsData.files_count || 0} files)`
+      );
+
+      // Also refresh per-document provider upload status map if backend returns it.
+      // For polling, we typically call with `include_llm_status=false` to keep it lightweight.
+      if (include_llm_status && pathsData.document_llm_status) {
+        documentLlmStatus = pathsData.document_llm_status;
+      }
+
+      uploadedDocumentPathsLoaded = true;
+    } catch (error) {
+      console.error('❌ AGENT ORCHESTRATION: Failed to load uploaded document paths:', error);
+      uploadedDocumentPathsError = error.message || 'Failed to load uploaded file attachment data';
+      uploadedDocumentPaths = [];
+      uploadedDocumentPathsLoaded = true; // allow UI to stop showing spinner
+    } finally {
+      uploadedDocumentPathsLoading = false;
+    }
+  }
+
+  function startUploadedDocumentPolling() {
+    if (uploadedDocumentPollInterval) {
+      clearInterval(uploadedDocumentPollInterval);
+      uploadedDocumentPollInterval = null;
+    }
+
+    // Polling is only meaningful in designer mode where node configuration is edited.
+    if (!projectId) return;
+
+    const intervalMs = 8000; // lightweight refresh interval
+    uploadedDocumentPollInterval = window.setInterval(async () => {
+      if (uploadedDocumentPollInFlight) return;
+      if (activeTab !== 'designer') return;
+
+      uploadedDocumentPollInFlight = true;
+      try {
+        // Lightweight polling: refresh the folder/file tree only.
+        // We keep existing `documentLlmStatus` to avoid repeatedly checking provider support.
+        await loadUploadedDocumentPaths(false, false);
+      } finally {
+        uploadedDocumentPollInFlight = false;
+      }
+    }, intervalMs);
   }
   
   async function loadWorkflowHistory(workflowId: string) {
@@ -1042,6 +1196,8 @@
               modelsLoaded={modelsLoaded}
               hierarchicalPaths={hierarchicalPaths}
               hierarchicalPathsLoaded={hierarchicalPathsLoaded}
+              uploadedDocumentPaths={uploadedDocumentPaths}
+              uploadedDocumentPathsLoaded={uploadedDocumentPathsLoaded}
               documentsInfo={documentsInfo}
               documentLlmStatus={documentLlmStatus}
               {designerMode}
@@ -1205,7 +1361,66 @@
                                             {/if}
                                           </div>
                                         </div>
-                                        <div class="mt-1 text-sm text-gray-700 whitespace-pre-wrap">{message.content}</div>
+                                        {#if message.message_type === 'tool_plan'}
+                                          <div class="mt-1 text-sm">
+                                            <div class="font-medium text-slate-600 mb-1 flex items-center">
+                                              <i class="fas fa-clipboard-list mr-1.5 text-xs"></i>
+                                              Agent Plan
+                                            </div>
+                                            <div class="text-gray-700 whitespace-pre-wrap bg-slate-50 p-2.5 rounded-md border-l-4 border-slate-400 text-sm">{message.content}</div>
+                                          </div>
+                                        {:else if message.message_type === 'tool_notebook'}
+                                          {@const entry = (() => { try { return JSON.parse(message.content); } catch { return null; } })()}
+                                          <div class="mt-1 text-sm">
+                                            <div class="font-medium text-teal-600 mb-1 flex items-center">
+                                              <i class="fas fa-book mr-1.5 text-xs"></i>
+                                              Notebook
+                                              {#if entry?.step}
+                                                <span class="ml-1.5 text-xs bg-teal-100 text-teal-600 px-1.5 py-0.5 rounded">Step {entry.step}</span>
+                                              {/if}
+                                              {#if entry?.status === 'completed'}
+                                                <i class="fas fa-check-circle ml-1.5 text-green-500 text-xs"></i>
+                                              {/if}
+                                            </div>
+                                            {#if entry}
+                                              <div class="bg-teal-50 p-2.5 rounded-md border-l-4 border-teal-300 space-y-1.5">
+                                                <div class="text-xs text-teal-600 font-medium">{entry.tool_name}</div>
+                                                <div class="text-xs text-gray-500"><span class="font-medium">Query:</span> {entry.query}</div>
+                                                <div class="text-gray-700 whitespace-pre-wrap text-sm">{entry.result}</div>
+                                                {#if entry.source_passages?.length}
+                                                  <div class="mt-1.5 pt-1.5 border-t border-teal-200">
+                                                    <div class="text-xs font-medium text-teal-700 mb-1 flex items-center">
+                                                      <i class="fas fa-quote-left mr-1 text-teal-400" style="font-size: 0.6rem;"></i>
+                                                      Citations ({entry.source_passages.length})
+                                                    </div>
+                                                    {#each entry.source_passages.slice(0, 3) as passage}
+                                                      <div class="text-xs bg-white/60 rounded px-2 py-1 mb-1 border-l-2 border-teal-400">
+                                                        <span class="text-gray-600 italic">"{passage.quoted_text?.slice(0, 150)}{passage.quoted_text?.length > 150 ? '...' : ''}"</span>
+                                                        {#if passage.page || passage.section}
+                                                          <span class="text-teal-500 ml-1 not-italic">
+                                                            {#if passage.page}p.{passage.page}{/if}{#if passage.page && passage.section}, {/if}{#if passage.section}{passage.section}{/if}
+                                                          </span>
+                                                        {/if}
+                                                      </div>
+                                                    {/each}
+                                                  </div>
+                                                {/if}
+                                              </div>
+                                            {:else}
+                                              <div class="text-gray-700 whitespace-pre-wrap bg-teal-50 p-2.5 rounded-md border-l-4 border-teal-300">{message.content}</div>
+                                            {/if}
+                                          </div>
+                                        {:else}
+                                          {#if message.metadata?.citations?.length}
+                                            <!-- svelte-ignore a11y-click-events-have-key-events -->
+                                            <!-- svelte-ignore a11y-no-static-element-interactions -->
+                                            <div class="mt-1 text-sm text-gray-700 citation-content" on:click={(e) => handleCitationClick(e, message.metadata.citations)}>
+                                              {@html renderContentWithCitations(message.content, message.metadata.citations)}
+                                            </div>
+                                          {:else}
+                                            <div class="mt-1 text-sm text-gray-700 whitespace-pre-wrap">{message.content}</div>
+                                          {/if}
+                                        {/if}
                                         {#if message.metadata && message.metadata.llm_provider}
                                           <div class="mt-2 flex items-center space-x-2 text-xs text-gray-500">
                                             <span class="px-2 py-1 bg-gray-200 rounded">{message.metadata.llm_provider}</span>
@@ -1339,5 +1554,59 @@
   
   :global(.focus\:ring-oxford-blue:focus) {
     --tw-ring-color: #002147;
+  }
+
+  :global(.cite-chip) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 4px;
+    border-radius: 4px;
+    background: #0ea5e9;
+    color: white;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    vertical-align: super;
+    margin: 0 1px;
+    line-height: 1;
+    transition: background 0.15s;
+  }
+  :global(.cite-chip:hover) {
+    background: #0284c7;
+  }
+
+  .citation-content {
+    line-height: 1.7;
+  }
+
+  :global(.cite-tooltip) {
+    max-width: 380px;
+    background: #1e293b;
+    color: #e2e8f0;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 13px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+    animation: citeTooltipIn 0.15s ease-out;
+  }
+  :global(.cite-tooltip-title) {
+    font-weight: 600;
+    color: #38bdf8;
+    margin-bottom: 6px;
+    font-size: 12px;
+  }
+  :global(.cite-tooltip-quote) {
+    font-style: italic;
+    color: #cbd5e1;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  @keyframes citeTooltipIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
   }
 </style>

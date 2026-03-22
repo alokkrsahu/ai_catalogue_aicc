@@ -5,7 +5,7 @@ Optimized execution engine for public-facing workflow deployments
 import logging
 import copy
 import time
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 from asgiref.sync import sync_to_async
 
 from .conversation_orchestrator import ConversationOrchestrator
@@ -32,7 +32,8 @@ class WorkflowDeploymentExecutor:
         conversation_history: str,
         session_id: Optional[str] = None,
         execution_id: Optional[str] = None,
-        current_user_query: Optional[str] = None
+        current_user_query: Optional[str] = None,
+        event_callback=None,
     ) -> Dict[str, Any]:
         """
         Execute a deployed workflow with full conversation history
@@ -100,7 +101,8 @@ class WorkflowDeploymentExecutor:
                 execution_result = await self.orchestrator.execute_workflow(
                     workflow, 
                     executed_by,
-                    deployment_context=deployment_context
+                    deployment_context=deployment_context,
+                    event_callback=event_callback,
                 )
                 
                 # Log execution result status for debugging
@@ -114,8 +116,10 @@ class WorkflowDeploymentExecutor:
                     # Return the awaiting_human_input status directly - deployment views will handle it
                     return execution_result
                 
-                # Extract End node messages as response
-                end_node_output = self._extract_end_node_output(execution_result, graph_json)
+                # Extract End node messages as response (and optional synthesis citations)
+                end_node_output, response_citations = self._extract_end_node_output(
+                    execution_result, graph_json
+                )
                 
                 execution_time_ms = int((time.time() - start_time) * 1000)
                 
@@ -132,10 +136,12 @@ class WorkflowDeploymentExecutor:
                     if conv_history:
                         # Extract last assistant response from conversation history
                         end_node_output = self._extract_last_assistant_from_history(conv_history)
+                        response_citations = []
                 
                 return {
                     'status': 'success',
                     'response': end_node_output or '',
+                    'citations': response_citations or [],
                     'execution_time_ms': execution_time_ms,
                     'workflow_name': await sync_to_async(lambda: workflow.name)(),
                     'execution_id': result_execution_id,
@@ -167,20 +173,31 @@ class WorkflowDeploymentExecutor:
                 'execution_time_ms': execution_time_ms
             }
     
+    @staticmethod
+    def _citations_from_message(msg: Optional[Dict[str, Any]]) -> List[Any]:
+        """Return structured citations from message metadata (synthesis / doc-aware)."""
+        if not msg or not isinstance(msg, dict):
+            return []
+        meta = msg.get('metadata')
+        if not isinstance(meta, dict):
+            return []
+        cit = meta.get('citations')
+        return list(cit) if isinstance(cit, list) else []
+
     def _extract_end_node_output(
         self,
         execution_result: Dict[str, Any],
         workflow_graph: Dict[str, Any]
-    ) -> str:
+    ) -> Tuple[str, List[Any]]:
         """
-        Extract aggregated output from End nodes
-        
+        Extract aggregated output from End nodes and citations from the source message metadata.
+
         Args:
             execution_result: Result from workflow execution
             workflow_graph: Original workflow graph
-            
+
         Returns:
-            Aggregated End node output as string
+            (aggregated text, citations list)
         """
         try:
             # Use the same approach as evaluation: take the single predecessor of the End node
@@ -191,8 +208,8 @@ class WorkflowDeploymentExecutor:
                 conv_history = execution_result.get('conversation_history', '')
                 if conv_history:
                     logger.info("✅ DEPLOYMENT: Using conversation_history as fallback")
-                    return conv_history
-                return ''
+                    return conv_history, []
+                return '', []
 
             logger.debug(f"🔍 DEPLOYMENT: Processing {len(messages)} messages from execution result")
 
@@ -201,14 +218,14 @@ class WorkflowDeploymentExecutor:
             if not end_nodes:
                 logger.warning("⚠️ DEPLOYMENT: No End node found in workflow graph")
                 # Fallback: last chat message (preferred over result_summary)
-                fallback = self._get_last_chat_message(execution_result)
-                if fallback:
-                    return fallback
+                fallback_text, fallback_cites = self._get_last_chat_message(execution_result)
+                if fallback_text:
+                    return fallback_text, fallback_cites
                 # Last resort: conversation_history
                 conv_history = execution_result.get('conversation_history', '')
                 if conv_history:
-                    return conv_history
-                return ''
+                    return conv_history, []
+                return '', []
 
             # For now we assume a single End node is used for deployment
             end_node = end_nodes[0]
@@ -224,14 +241,14 @@ class WorkflowDeploymentExecutor:
             # If multiple predecessors, log a warning (UI should prevent this)
             if len(predecessor_node_ids) != 1:
                 logger.warning(f"⚠️ DEPLOYMENT: Expected exactly 1 input to End node, found {len(predecessor_node_ids)}. Falling back to last chat message.")
-                fallback = self._get_last_chat_message(execution_result)
-                if fallback:
-                    return fallback
+                fallback_text, fallback_cites = self._get_last_chat_message(execution_result)
+                if fallback_text:
+                    return fallback_text, fallback_cites
                 # Last resort: conversation_history
                 conv_history = execution_result.get('conversation_history', '')
                 if conv_history:
-                    return conv_history
-                return ''
+                    return conv_history, []
+                return '', []
 
             predecessor_id = predecessor_node_ids[0]
 
@@ -242,8 +259,8 @@ class WorkflowDeploymentExecutor:
             }
             predecessor_name = node_id_to_name.get(predecessor_id, predecessor_id)
 
-            # Find the last message from the predecessor agent
-            end_node_messages = []
+            # Find the last message from the predecessor agent (keep message dict for citations)
+            end_node_messages: List[Tuple[str, Dict[str, Any]]] = []
             logger.info(f"🔍 DEPLOYMENT: Looking for messages from predecessor '{predecessor_name}' (ID: {predecessor_id})")
             logger.info(f"🔍 DEPLOYMENT: Total messages to check: {len(messages)}")
             
@@ -262,26 +279,37 @@ class WorkflowDeploymentExecutor:
                 if not isinstance(msg, dict):
                     continue
                 agent_name = msg.get('agent_name', '')
-                agent_type = msg.get('agent_type', '')
                 content = msg.get('content', '') or msg.get('message', '')
                 
                 # Match by agent name (exact match first)
                 if agent_name == predecessor_name:
                     if content and content.strip():  # Ensure content is not empty
-                        end_node_messages.append(content)
+                        end_node_messages.append((content, msg))
                         logger.info(f"✅ DEPLOYMENT: Found message from '{agent_name}': {content[:100]}...")
                 
                 # Also try case-insensitive matching
                 elif agent_name.lower() == predecessor_name.lower():
                     if content and content.strip():
-                        end_node_messages.append(content)
+                        end_node_messages.append((content, msg))
                         logger.info(f"✅ DEPLOYMENT: Found message from '{agent_name}' (case-insensitive match): {content[:100]}...")
 
             if end_node_messages:
-                chosen = end_node_messages[-1].strip()
+                chosen_content, chosen_msg = end_node_messages[-1]
+                chosen = chosen_content.strip()
                 if chosen:
+                    cites = self._citations_from_message(chosen_msg)
+                    # Revision rows may lack citations; reuse from earlier same-agent message
+                    if not cites and len(end_node_messages) > 1:
+                        for _prev_text, prev_msg in reversed(end_node_messages[:-1]):
+                            alt = self._citations_from_message(prev_msg)
+                            if alt:
+                                cites = alt
+                                logger.info(
+                                    f"✅ DEPLOYMENT: Merged citations from earlier message from '{predecessor_name}'"
+                                )
+                                break
                     logger.info(f"✅ DEPLOYMENT: Using End node input from predecessor '{predecessor_name}': {chosen[:100]}...")
-                    return chosen
+                    return chosen, cites
                 else:
                     logger.warning(f"⚠️ DEPLOYMENT: Found messages but content is empty")
 
@@ -305,41 +333,44 @@ class WorkflowDeploymentExecutor:
                     fallback_content = msg.get('content') or msg.get('message', '')
                     if fallback_content and fallback_content.strip():
                         logger.info(f"✅ DEPLOYMENT: Using agent message from '{msg.get('agent_name', 'unknown')}' as fallback: {fallback_content[:100]}...")
-                        return fallback_content.strip()
+                        return fallback_content.strip(), self._citations_from_message(msg)
                 
                 logger.warning(f"⚠️ DEPLOYMENT: Agent messages found but all have empty content")
             
             # Final fallback: use last chat message
-            fallback = self._get_last_chat_message(execution_result)
-            if fallback:
-                logger.info(f"✅ DEPLOYMENT: Using _get_last_chat_message fallback: {fallback[:100]}...")
-                return fallback
+            fallback_text, fallback_cites = self._get_last_chat_message(execution_result)
+            if fallback_text:
+                logger.info(f"✅ DEPLOYMENT: Using _get_last_chat_message fallback: {fallback_text[:100]}...")
+                return fallback_text, fallback_cites
             
             # No valid response found - return error instead of fallback to conversation_history
             logger.error(f"❌ DEPLOYMENT: No valid agent response found. All messages have empty content.")
             logger.error(f"❌ DEPLOYMENT: This indicates the agent returned an empty response, which is an error condition.")
-            return "Error: The agent returned an empty response. Please check the agent configuration and LLM API keys."
+            return "Error: The agent returned an empty response. Please check the agent configuration and LLM API keys.", []
 
         except Exception as e:
             logger.error(f"❌ DEPLOYMENT: Error extracting End node output: {e}", exc_info=True)
             # Try to get last chat message as fallback
-            fallback = self._get_last_chat_message(execution_result)
-            if fallback and fallback.strip():
+            fallback_text, fallback_cites = self._get_last_chat_message(execution_result)
+            if fallback_text and fallback_text.strip():
                 logger.warning(f"⚠️ DEPLOYMENT: Using last chat message as fallback after exception")
-                return fallback
+                return fallback_text, fallback_cites
             # Return proper error message instead of conversation_history
-            return f"Error: Failed to extract agent response. {str(e)}"
+            return f"Error: Failed to extract agent response. {str(e)}", []
 
-    def _get_last_chat_message(self, execution_result: Dict[str, Any]) -> str:
+    def _get_last_chat_message(self, execution_result: Dict[str, Any]) -> Tuple[str, List[Any]]:
         """
         Extract the last assistant/chat message from execution_result.messages.
         This is used as a robust fallback when End node outputs are not available.
+
+        Returns:
+            (content, citations from message metadata)
         """
         try:
             messages = execution_result.get('messages') or []
             if not isinstance(messages, list) or not messages:
                 logger.warning(f"⚠️ DEPLOYMENT: No messages array or empty in execution_result")
-                return ''
+                return '', []
 
             logger.debug(f"🔍 DEPLOYMENT: Checking {len(messages)} messages for chat content")
             
@@ -365,7 +396,7 @@ class WorkflowDeploymentExecutor:
             
             if not candidates:
                 logger.warning(f"⚠️ DEPLOYMENT: No candidate messages found")
-                return ''
+                return '', []
 
             # Get the last candidate message
             last = candidates[-1]
@@ -376,10 +407,10 @@ class WorkflowDeploymentExecutor:
             else:
                 logger.warning(f"⚠️ DEPLOYMENT: Last candidate message has no content: {last}")
             
-            return content
+            return content, self._citations_from_message(last)
         except Exception as e:
             logger.error(f"❌ DEPLOYMENT: Error extracting last chat message: {e}", exc_info=True)
-            return ''
+            return '', []
     
     def _extract_last_assistant_from_history(self, conversation_history: str) -> str:
         """

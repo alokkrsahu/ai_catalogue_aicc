@@ -14,8 +14,8 @@ from asgiref.sync import sync_to_async
 # Import DocAware services
 from .docaware import EnhancedDocAwareAgentService, SearchMethod
 
-# Import models for full document mode
-from users.models import ProjectDocument, IntelliDocProject
+# Import models for doc-aware context and full document mode
+from users.models import ProjectDocument, IntelliDocProject, ProjectDocumentSummary
 
 logger = logging.getLogger('conversation_orchestrator')
 
@@ -432,6 +432,33 @@ class DocAwareHandler:
             
             # Use configured search_limit, but don't exceed available results
             limit = min(len(valid_results), search_limit)
+
+            # Fetch document-level short summaries (project-isolated) for context injection.
+            doc_summary_cache: Dict[str, str] = {}
+            included_doc_ids = set()
+            try:
+                limit_results = valid_results[:limit]
+                doc_ids = []
+                for r in limit_results:
+                    meta = r.get('metadata') or {}
+                    doc_id = meta.get('document_id')
+                    if doc_id:
+                        doc_ids.append(str(doc_id))
+
+                doc_ids = list(dict.fromkeys(doc_ids))  # de-dupe while preserving order
+                if doc_ids:
+                    def fetch_summaries():
+                        qs = ProjectDocumentSummary.objects.filter(
+                            document__document_id__in=doc_ids,
+                            document__project__project_id=project_id,
+                        ).values_list('document__document_id', 'short_summary')
+                        return [(str(doc_id), short_summary) for (doc_id, short_summary) in qs]
+
+                    summaries = await sync_to_async(fetch_summaries)()
+                    doc_summary_cache = {doc_id: short for (doc_id, short) in summaries if short and short.strip()}
+            except Exception as summary_err:
+                logger.warning(f"⚠️ DOCAWARE: Failed fetching doc-level summaries: {summary_err}")
+
             for i, result in enumerate(valid_results[:limit], 1):
                 content = result['content']  # Use full content without truncation
                 metadata = result['metadata']
@@ -453,6 +480,15 @@ class DocAwareHandler:
                 
                 if metadata.get('page'):
                     context_parts.append(f"   Page: {metadata['page']}")
+
+                # Inject document-level summary only once per document_id.
+                doc_id_str = str(metadata.get('document_id') or '').strip()
+                if doc_id_str and doc_id_str not in included_doc_ids:
+                    short_summary = doc_summary_cache.get(doc_id_str)
+                    if short_summary:
+                        context_parts.append("   === Document Short Summary ===")
+                        context_parts.append(short_summary)
+                    included_doc_ids.add(doc_id_str)
                     
                 context_parts.append(f"   Content: {content}")
                 context_parts.append("")  # Empty line separator
@@ -630,6 +666,29 @@ class DocAwareHandler:
             
             # Use configured search_limit, but don't exceed available results
             limit = min(len(valid_results), search_limit)
+
+            # Fetch document-level short summaries (project-isolated) for context injection.
+            doc_summary_cache: Dict[str, str] = {}
+            included_doc_ids = set()
+            try:
+                limit_results = valid_results[:limit]
+                doc_ids = []
+                for r in limit_results:
+                    meta = r.get('metadata') or {}
+                    doc_id = meta.get('document_id')
+                    if doc_id:
+                        doc_ids.append(str(doc_id))
+
+                doc_ids = list(dict.fromkeys(doc_ids))
+                if doc_ids:
+                    qs = ProjectDocumentSummary.objects.filter(
+                        document__document_id__in=doc_ids,
+                        document__project__project_id=project_id,
+                    ).values_list('document__document_id', 'short_summary')
+                    doc_summary_cache = {str(doc_id): short_summary for (doc_id, short_summary) in qs if short_summary and short_summary.strip()}
+            except Exception as summary_err:
+                logger.warning(f"⚠️ DOCAWARE: Failed fetching doc-level summaries: {summary_err}")
+
             for i, result in enumerate(valid_results[:limit], 1):
                 content = result['content']  # Use full content without truncation
                 metadata = result['metadata']
@@ -650,6 +709,16 @@ class DocAwareHandler:
                 context_parts.append(f"Source: {metadata.get('source', 'Unknown')}")
                 if metadata.get('page'):
                     context_parts.append(f"Page: {metadata['page']}")
+
+                # Inject document-level summary only once per document_id.
+                doc_id_str = str(metadata.get('document_id') or '').strip()
+                if doc_id_str and doc_id_str not in included_doc_ids:
+                    short_summary = doc_summary_cache.get(doc_id_str)
+                    if short_summary:
+                        context_parts.append("   === Document Short Summary ===")
+                        context_parts.append(short_summary)
+                    included_doc_ids.add(doc_id_str)
+
                 context_parts.append(f"Content: {content}")
                 context_parts.append("")  # Empty line separator
             
@@ -883,15 +952,23 @@ class DocAwareHandler:
         # Combine all input content for search query
         query_parts = []
         
-        # Add primary input
-        if aggregated_context['primary_input']:
+        # Add primary input (prefer plain text without upstream citation appendix for embedding)
+        primary_plain = aggregated_context.get('primary_plain')
+        if primary_plain:
+            query_parts.append(str(primary_plain))
+            logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Added primary_plain: '{str(primary_plain)[:100]}...'")
+        elif aggregated_context['primary_input']:
             primary_input = str(aggregated_context['primary_input'])
             query_parts.append(primary_input)
             logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Added primary input: '{primary_input[:100]}...'")
         
         # Add secondary inputs
         for i, secondary in enumerate(aggregated_context['secondary_inputs']):
-            if secondary.get('content'):
+            sec_plain = secondary.get('content_plain')
+            if sec_plain:
+                query_parts.append(str(sec_plain))
+                logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Added secondary plain {i+1}: '{str(sec_plain)[:100]}...'")
+            elif secondary.get('content'):
                 secondary_content = str(secondary['content'])
                 query_parts.append(secondary_content)
                 logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Added secondary input {i+1}: '{secondary_content[:100]}...'")
@@ -1133,6 +1210,34 @@ Refined search query:"""
             
             # Use configured search_limit, but don't exceed available results
             limit = min(len(valid_results), search_limit)
+
+            # Fetch document-level short summaries (project-isolated) for context injection.
+            doc_summary_cache: Dict[str, str] = {}
+            included_doc_ids = set()
+            try:
+                limit_results = valid_results[:limit]
+                doc_ids = []
+                for r in limit_results:
+                    meta = r.get('metadata') or {}
+                    doc_id = meta.get('document_id')
+                    if doc_id:
+                        doc_ids.append(str(doc_id))
+                doc_ids = list(dict.fromkeys(doc_ids))
+                if doc_ids:
+                    def fetch_summaries():
+                        qs = ProjectDocumentSummary.objects.filter(
+                            document__document_id__in=doc_ids,
+                            document__project__project_id=project_id,
+                        ).values_list('document__document_id', 'short_summary')
+                        return [(str(doc_id), short_summary) for (doc_id, short_summary) in qs]
+
+                    summaries = await sync_to_async(fetch_summaries)()
+                    doc_summary_cache = {
+                        doc_id: short for (doc_id, short) in summaries if short and short.strip()
+                    }
+            except Exception as summary_err:
+                logger.warning(f"⚠️ DOCAWARE: Failed fetching doc-level summaries: {summary_err}")
+
             for i, result in enumerate(valid_results[:limit], 1):
                 content = result['content']  # Use full content without truncation
                 metadata = result['metadata']
@@ -1154,6 +1259,15 @@ Refined search query:"""
                 
                 if metadata.get('page'):
                     context_parts.append(f"   Page: {metadata['page']}")
+
+                # Inject document-level summary only once per document_id.
+                doc_id_str = str(metadata.get('document_id') or '').strip()
+                if doc_id_str and doc_id_str not in included_doc_ids:
+                    short_summary = doc_summary_cache.get(doc_id_str)
+                    if short_summary:
+                        context_parts.append("   === Document Short Summary ===")
+                        context_parts.append(short_summary)
+                    included_doc_ids.add(doc_id_str)
                     
                 context_parts.append(f"   Content: {content}")
                 context_parts.append("")  # Empty line separator
@@ -1196,3 +1310,134 @@ Refined search query:"""
         
         logger.debug(f"📚 DOCAWARE: Extracted {len(context_list)} context items from aggregated input")
         return context_list
+
+    # =========================================================================
+    # Tool-based DocAware (LLM-callable document search)
+    # =========================================================================
+
+    DOCAWARE_TOOL_NAME = "document_search"
+
+    def build_docaware_tool(self, agent_node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Build an OpenAI-format tool schema for document vector search.
+
+        Returns None if DocAware is not enabled for this agent.
+        """
+        if not self.is_docaware_enabled(agent_node):
+            return None
+
+        return {
+            "type": "function",
+            "function": {
+                "name": self.DOCAWARE_TOOL_NAME,
+                "description": (
+                    "Search project documents for relevant passages using "
+                    "vector similarity search. Use this to find specific "
+                    "information, facts, or excerpts from the project's "
+                    "document collection."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query to find relevant document passages",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of results to return (default: 5)",
+                            "minimum": 1,
+                            "maximum": 20,
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+        }
+
+    async def execute_docaware_tool(
+        self,
+        agent_node: Dict[str, Any],
+        query: str,
+        project_id: str,
+        limit: int = 5,
+    ) -> str:
+        """
+        Execute a DocAware search tool call and return formatted results.
+
+        Uses hybrid search by default with no query refinement --
+        the LLM formulates the query directly.
+        """
+        agent_data = agent_node.get('data', {})
+        limit = max(1, min(limit, 20))
+
+        logger.info(
+            f"📚 DOCAWARE TOOL: query='{(query or '')[:60]}', limit={limit}"
+        )
+        start_time = time.time()
+
+        try:
+            def create_service():
+                return EnhancedDocAwareAgentService(project_id)
+
+            docaware_service = await sync_to_async(create_service)()
+
+            content_filters = agent_data.get('content_filters', [])
+            search_params = {"search_limit": limit}
+
+            def perform_search():
+                return docaware_service.search_documents(
+                    query=query,
+                    search_method=SearchMethod.HYBRID_SEARCH,
+                    method_parameters=search_params,
+                    conversation_context=None,
+                    content_filters=content_filters if content_filters else None,
+                )
+
+            search_results = await sync_to_async(perform_search)()
+
+            duration_ms = (time.time() - start_time) * 1000
+
+            if not search_results:
+                logger.info(
+                    f"📚 DOCAWARE TOOL: no results in {duration_ms:.0f}ms"
+                )
+                return "No relevant passages found for the query."
+
+            valid_results = [
+                r for r in search_results
+                if r.get('content') and r['content'].strip()
+            ]
+            if not valid_results:
+                return "No relevant passages found for the query."
+
+            parts: List[str] = []
+            parts.append(f"Found {len(valid_results)} relevant passages:\n")
+
+            for i, result in enumerate(valid_results[:limit], 1):
+                content = result['content']
+                meta = result.get('metadata', {})
+                source = meta.get('source', 'Unknown')
+                page = meta.get('page')
+                score = meta.get('score', 0)
+
+                header = f"[{i}] Source: {source}"
+                if page:
+                    header += f", Page: {page}"
+                header += f", Relevance: {score:.3f}"
+
+                parts.append(header)
+                parts.append(f"Content: {content}")
+                parts.append("")
+
+            context = "\n".join(parts)
+
+            logger.info(
+                f"📚 DOCAWARE TOOL: {len(valid_results)} results in "
+                f"{duration_ms:.0f}ms, {len(context)} chars"
+            )
+            return context
+
+        except Exception as e:
+            logger.error(f"❌ DOCAWARE TOOL: Error: {e}")
+            return f"Document search failed: {str(e)}"

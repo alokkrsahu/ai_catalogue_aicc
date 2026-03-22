@@ -6,6 +6,7 @@ import time
 from typing import Dict, Any, List, Optional
 from django.utils import timezone
 from django.db import transaction
+from asgiref.sync import async_to_sync
 
 from users.models import IntelliDocProject, ProjectDocument, ProjectVectorCollection, VectorProcessingStatus
 from .embeddings import get_embedder_instance
@@ -174,6 +175,52 @@ class UnifiedVectorSearchManager:
             }
 
         logger.info(f"🚀 Starting enhanced processing for {documents.count()} documents in project {project.name}")
+        documents_list = list(documents)
+
+        # "Preserve Original Folder Structure" now means: use LLM-based folder organization
+        # based on ProjectDocumentSummary.short_summary.
+        folder_org_enabled = bool(getattr(project, 'preserve_original_folder_structure', False))
+        llm_folder_org_enabled = bool(folder_org_enabled and llm_provider and llm_model)
+        doc_summaries_will_generate = bool((enable_summary or folder_org_enabled) and llm_provider and llm_model)
+
+        # Generate per-document summaries first (needed for short_summary-based folder decisions).
+        if doc_summaries_will_generate:
+            try:
+                from .document_summarization.file_based_document_summarizer import upsert_document_summary
+
+                for original_doc in documents_list:
+                    try:
+                        async_to_sync(upsert_document_summary)(
+                            project=project,
+                            document=original_doc,
+                            llm_provider=llm_provider,
+                            llm_model=llm_model,
+                        )
+                    except Exception as summary_err:
+                        logger.error(
+                            "❌ Failed generating document summary for %s: %s",
+                            getattr(original_doc, "original_filename", "unknown"),
+                            summary_err,
+                        )
+                        # Do not fail the whole vectorization run.
+            except Exception as e:
+                logger.error("❌ Failed generating document summaries batch: %s", e)
+
+        folder_organization_map: Dict[str, str] = {}
+        if llm_folder_org_enabled:
+            try:
+                from .document_summarization.document_folder_organizer import (
+                    generate_and_persist_document_folder_organization,
+                )
+
+                folder_organization_map = generate_and_persist_document_folder_organization(
+                    project=project,
+                    documents=documents_list,
+                    llm_provider=llm_provider,
+                    llm_model=llm_model,
+                )
+            except Exception as e:
+                logger.error("❌ Failed generating LLM folder organization: %s", e)
         
         processed_count = 0
         failed_count = 0
@@ -181,7 +228,8 @@ class UnifiedVectorSearchManager:
         processing_details = []
 
         # Process documents using the enhanced hierarchical processor
-        doc_infos = processor.process_project_documents_enhanced(list(documents))
+        processor.folder_organization_map = folder_organization_map or {}
+        doc_infos = processor.process_project_documents_enhanced(documents_list)
         
         for doc_info in doc_infos:
             try:
@@ -201,7 +249,13 @@ class UnifiedVectorSearchManager:
                 logger.info(f"📦 Collecting {len(doc_info.chunks)} enhanced chunks for batch insertion: {doc_info.document_metadata.get('file_name')}")
                 
                 # Mark document as processing
-                self._update_document_status(str(project.project_id), str(original_doc.document_id), 'processing', f'Enhanced batch inserting {len(doc_info.chunks)} chunks')
+                self._update_document_status(
+                    str(project.project_id),
+                    str(original_doc.document_id),
+                    'processing',
+                    f'Enhanced batch inserting {len(doc_info.chunks)} chunks',
+                    enable_summary=doc_summaries_will_generate,
+                )
                 
                 # 🚀 ATOMIC BATCH INSERTION FOR ENTIRE DOCUMENT using Enhanced Database
                 logger.info(f"🚀 Starting enhanced atomic batch insertion for {doc_info.document_metadata.get('file_name')} - {len(doc_info.chunks)} chunks")
@@ -216,7 +270,8 @@ class UnifiedVectorSearchManager:
                             str(project.project_id),
                             str(original_doc.document_id), 
                             'completed', 
-                            f'Enhanced processing: {len(doc_info.chunks)} chunks with AI summaries and topics'
+                            f'Enhanced processing: {len(doc_info.chunks)} chunks (chunk summaries removed); doc summaries generated={bool(doc_summaries_will_generate)}',
+                            enable_summary=doc_summaries_will_generate,
                         )
                         
                         processed_count += 1
@@ -224,8 +279,7 @@ class UnifiedVectorSearchManager:
                         processing_details.append({
                             'file_name': doc_info.document_metadata.get('file_name'),
                             'chunks_created': len(doc_info.chunks),
-                            'ai_summaries_generated': sum(1 for c in doc_info.chunks if c.metadata.get('summary')),
-                            'ai_topics_generated': sum(1 for c in doc_info.chunks if c.metadata.get('topic')),
+                            'document_summaries_generated': bool(doc_summaries_will_generate),
                             'hierarchical_analysis': True,
                             'enhanced_processing': True,
                             'enhanced_database': True,
@@ -240,7 +294,8 @@ class UnifiedVectorSearchManager:
                             str(project.project_id),
                             str(original_doc.document_id), 
                             'failed', 
-                            f'Enhanced batch insertion failed for {len(doc_info.chunks)} chunks'
+                            f'Enhanced batch insertion failed for {len(doc_info.chunks)} chunks',
+                            enable_summary=doc_summaries_will_generate,
                         )
                         failed_count += 1
                         logger.error(f"💥 ENHANCED FAILURE: {doc_info.document_metadata.get('file_name')} - Enhanced batch insertion failed")
@@ -251,7 +306,8 @@ class UnifiedVectorSearchManager:
                         str(project.project_id),
                         str(original_doc.document_id), 
                         'failed', 
-                        f'Enhanced batch insertion exception: {str(batch_error)[:200]}'
+                        f'Enhanced batch insertion exception: {str(batch_error)[:200]}',
+                        enable_summary=doc_summaries_will_generate,
                     )
                     failed_count += 1
                     logger.exception(f"🚨 ENHANCED BATCH EXCEPTION: {doc_info.document_metadata.get('file_name')}: {batch_error}")
@@ -261,7 +317,13 @@ class UnifiedVectorSearchManager:
                 failed_count += 1
                 # Mark document as failed due to processing error
                 if 'original_doc' in locals() and original_doc:
-                    self._update_document_status(str(project.project_id), str(original_doc.document_id), 'failed', f'Enhanced processing error: {str(e)[:200]}')
+                    self._update_document_status(
+                        str(project.project_id),
+                        str(original_doc.document_id),
+                        'failed',
+                        f'Enhanced processing error: {str(e)[:200]}',
+                        enable_summary=doc_summaries_will_generate,
+                    )
 
         # Update collection status
         collection = self._update_collection_status(project, processed_count, failed_count, 'enhanced')
@@ -278,8 +340,8 @@ class UnifiedVectorSearchManager:
             'processing_mode': 'enhanced',
             'total_processing_time_ms': total_processing_time,
             'features_enabled': {
-                'ai_summaries': True,
-                'ai_topics': True,
+                'ai_summaries': bool(doc_summaries_will_generate),
+                'ai_topics': False,
                 'hierarchical_analysis': True,
                 'enhanced_categorization': True,
                 'complete_metadata': True,
@@ -288,7 +350,7 @@ class UnifiedVectorSearchManager:
             'collection_name': collection.collection_name if collection else 'default'
         }
     
-    def _update_document_status(self, project_id: str, document_id: str, status: str, message: str):
+    def _update_document_status(self, project_id: str, document_id: str, status: str, message: str, enable_summary: bool = True):
         """Update individual document processing status for frontend tracking using DocumentVectorStatus
         
         SECURITY: Requires project_id to ensure document belongs to the correct project.
@@ -334,12 +396,17 @@ class UnifiedVectorSearchManager:
                 
                 if status == 'completed':
                     doc_vector_status.processed_at = timezone.now()
-                    doc_vector_status.summary_generated = True  # We generate AI summaries
-                    doc_vector_status.topic_generated = True   # We generate AI topics
-                    doc_vector_status.summary_generated_at = timezone.now()
-                    doc_vector_status.topic_generated_at = timezone.now()
-                    doc_vector_status.summarizer_used = 'openai_gpt'
-                    doc_vector_status.topic_generator_used = 'openai_gpt'
+                    # Document-level summaries (no per-chunk summaries/topics anymore)
+                    doc_vector_status.summary_generated = bool(enable_summary)
+                    doc_vector_status.summary_generated_at = timezone.now() if enable_summary else None
+                    doc_vector_status.summary_chunks_count = 1 if enable_summary else 0
+                    doc_vector_status.summarizer_used = 'file_api_llm' if enable_summary else 'none'
+
+                    # Topics are fully removed.
+                    doc_vector_status.topic_generated = False
+                    doc_vector_status.topic_generated_at = None
+                    doc_vector_status.topic_chunks_count = 0
+                    doc_vector_status.topic_generator_used = 'none'
                 
                 doc_vector_status.updated_at = timezone.now()
                 doc_vector_status.save()

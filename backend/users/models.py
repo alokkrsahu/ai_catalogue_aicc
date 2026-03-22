@@ -408,7 +408,7 @@ class IntelliDocProject(models.Model):
     # Document organization settings
     preserve_original_folder_structure = models.BooleanField(
         default=False,
-        help_text="When enabled, preserves the original folder structure from uploaded files instead of auto-classifying into categories"
+        help_text="When enabled, uses LLM-based folder organization (based on per-document short summaries) instead of filename/path auto-classification"
     )
     
     created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='intellidoc_projects')
@@ -571,6 +571,82 @@ class ProjectDocument(models.Model):
     def get_storage_path(self):
         """Generate secure storage path for the document"""
         return f"projects/{self.project.project_id}/documents/{self.document_id}_{self.original_filename}"
+
+
+class ProjectDocumentSummary(models.Model):
+    """
+    Document-level AI summaries generated from the provider's File API.
+
+    One row per `ProjectDocument` (project isolation is enforced via the FK chain:
+    ProjectDocument -> IntelliDocProject).
+    """
+
+    document = models.OneToOneField(
+        ProjectDocument,
+        on_delete=models.CASCADE,
+        related_name='document_summary',
+    )
+
+    # ~3000-word summary
+    long_summary = models.TextField(blank=True)
+    # ~200-word derived summary
+    short_summary = models.TextField(blank=True)
+
+    llm_provider = models.CharField(max_length=20, default='openai')
+    llm_model = models.CharField(max_length=100, blank=True)
+    summarizer_used = models.CharField(max_length=50, default='file_api')
+
+    memory = models.JSONField(
+        default=list, blank=True,
+        help_text="Accumulated agent insights from tool calls",
+    )
+    citation = models.JSONField(
+        default=dict, blank=True,
+        help_text="Bibliographic metadata for the document (title, authors, year, DOI, etc.)",
+    )
+
+    generated_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-generated_at']
+
+    def __str__(self):
+        return f"Summary: {self.document.original_filename}"
+
+
+class ProjectDocumentFolderOrganization(models.Model):
+    """
+    Stores a per-project mapping of each document to an LLM-chosen folder path
+    (used for both Milvus chunk organization and the UI node attachment folder picker).
+
+    Project isolation is enforced via:
+    ProjectDocumentFolderOrganization -> ProjectDocument -> IntelliDocProject.
+    """
+
+    document = models.OneToOneField(
+        ProjectDocument,
+        on_delete=models.CASCADE,
+        related_name='folder_organization',
+    )
+
+    # Example: "Legal/Contracts" (depth <= 2; no leading/trailing slashes)
+    folder_path = models.CharField(max_length=200, default='General')
+
+    llm_provider = models.CharField(max_length=20, default='openai')
+    llm_model = models.CharField(max_length=100, blank=True)
+    organization_method = models.CharField(max_length=50, default='llm_folder_org')
+
+    generated_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['document']),
+        ]
+
+    def __str__(self):
+        return f"Folder org for {self.document.original_filename}: {self.folder_path}"
 
 # ============================================================================
 # PROJECT-SPECIFIC API KEY MANAGEMENT
@@ -1391,6 +1467,8 @@ class WorkflowExecutionMessageType(models.TextChoices):
     REFLECTION_FEEDBACK = 'reflection_feedback', 'Reflection Feedback'
     REFLECTION_REVISION = 'reflection_revision', 'Reflection Revision'
     REFLECTION_FINAL = 'reflection_final', 'Reflection Final'
+    TOOL_PLAN = 'tool_plan', 'Tool Plan'
+    TOOL_NOTEBOOK = 'tool_notebook', 'Tool Notebook Entry'
     REFLECTION_ITERATION = 'reflection_iteration', 'Reflection Iteration'
 
 

@@ -49,6 +49,21 @@ class EnhancedHierarchicalVectorSearchManager:
                     'total_chunks_created': 0
                 }
             
+            # If LLM folder organization was previously generated, use it.
+            if getattr(project, 'preserve_original_folder_structure', False):
+                try:
+                    from users.models import ProjectDocumentFolderOrganization
+
+                    folder_org_map = {
+                        str(doc_id): folder_path
+                        for doc_id, folder_path in ProjectDocumentFolderOrganization.objects.filter(document__in=documents).values_list(
+                            'document__document_id', 'folder_path'
+                        )
+                    }
+                    processor.folder_organization_map = folder_org_map
+                except Exception as e:
+                    logger.debug(f"Could not load LLM folder organization mapping: {e}")
+            
             # Process documents with enhanced hierarchical structure
             processed_count = 0
             failed_count = 0
@@ -82,13 +97,7 @@ class EnhancedHierarchicalVectorSearchManager:
                         }
                         processing_details.append(doc_details)
                         
-                        # Log enhanced hierarchical information
-                        # Count successful summaries and topics
-                        chunks_with_summaries = sum(1 for chunk in doc_info.chunks if chunk.metadata.get('summary'))
-                        total_summary_words = sum(chunk.metadata.get('summary_word_count', 0) for chunk in doc_info.chunks)
-                        chunks_with_topics = sum(1 for chunk in doc_info.chunks if chunk.metadata.get('topic'))
-                        total_topic_words = sum(chunk.metadata.get('topic_word_count', 0) for chunk in doc_info.chunks)
-                        
+                        # Log enhanced hierarchical information (chunk summaries/topics removed)
                         logger.info(f"✅ Enhanced processing completed: {doc_info.document_metadata['file_name']}")
                         logger.info(f"   📁 Category: {doc_info.document_metadata['category']}")
                         logger.info(f"   📂 Subcategory: {doc_info.document_metadata.get('subcategory', 'None')}")
@@ -97,20 +106,6 @@ class EnhancedHierarchicalVectorSearchManager:
                         logger.info(f"   🧩 Chunks Created: {chunks_count}")
                         logger.info(f"   📝 Original Length: {doc_info.document_metadata['original_content_length']:,} chars")
                         logger.info(f"   🔧 Organization: {doc_info.document_metadata['organization_level']}")
-                        logger.info(f"   📄 Summaries Generated: {chunks_with_summaries}/{chunks_count} chunks")
-                        logger.info(f"   📊 Summary Words: {total_summary_words}")
-                        logger.info(f"   🏷️ Topics Generated: {chunks_with_topics}/{chunks_count} chunks")
-                        logger.info(f"   💬 Total Topic Words: {total_topic_words}")
-                        
-                        # Update doc_details with summary and topic stats
-                        doc_details.update({
-                            'chunks_with_summaries': chunks_with_summaries,
-                            'total_summary_words': total_summary_words,
-                            'summary_coverage': chunks_with_summaries / chunks_count if chunks_count > 0 else 0,
-                            'chunks_with_topics': chunks_with_topics,
-                            'total_topic_words': total_topic_words,
-                            'topic_coverage': chunks_with_topics / chunks_count if chunks_count > 0 else 0
-                        })
                         
                         if doc_info.content_map['structure_type'] == 'sectioned':
                             logger.info(f"   📑 Sections Detected: {len(doc_info.content_map['sections'])}")

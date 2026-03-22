@@ -89,6 +89,20 @@ class EnhancedProjectVectorSearchService:
             
             # Process each document in the project using enhanced hierarchical processor
             documents = project.documents.filter(upload_status='ready')
+            if getattr(project, 'preserve_original_folder_structure', False):
+                try:
+                    from users.models import ProjectDocumentFolderOrganization
+
+                    folder_org_map = {
+                        str(doc_id): folder_path
+                        for doc_id, folder_path in ProjectDocumentFolderOrganization.objects.filter(
+                            document__in=documents
+                        ).values_list('document__document_id', 'folder_path')
+                    }
+                    self.processor.folder_organization_map = folder_org_map
+                except Exception as e:
+                    logger.debug(f"Could not load LLM folder organization mapping: {e}")
+
             for doc_info in self.processor.process_project_documents_enhanced(list(documents)):
                 # Check if stop was requested
                 if self._should_stop_processing():
@@ -459,25 +473,65 @@ class EnhancedProjectVectorSearchService:
                 
                 # Get document statuses
                 document_statuses = DocumentVectorStatus.objects.filter(collection=collection)
+                current_project_doc_ids = list(
+                    ProjectDocument.objects.filter(project=project).values_list('id', flat=True)
+                )
+                current_doc_statuses = document_statuses.filter(document_id__in=current_project_doc_ids)
                 
                 # Count by status
                 status_counts = {
-                    'pending': document_statuses.filter(status=VectorProcessingStatus.PENDING).count(),
-                    'processing': document_statuses.filter(status=VectorProcessingStatus.PROCESSING).count(),
-                    'completed': document_statuses.filter(status=VectorProcessingStatus.COMPLETED).count(),
-                    'failed': document_statuses.filter(status=VectorProcessingStatus.FAILED).count()
+                    'pending': current_doc_statuses.filter(status=VectorProcessingStatus.PENDING).count(),
+                    'processing': current_doc_statuses.filter(status=VectorProcessingStatus.PROCESSING).count(),
+                    'completed': current_doc_statuses.filter(status=VectorProcessingStatus.COMPLETED).count(),
+                    'failed': current_doc_statuses.filter(status=VectorProcessingStatus.FAILED).count()
                 }
                 
                 # Count unprocessed documents (not in DocumentVectorStatus)
-                processed_doc_ids = document_statuses.values_list('document_id', flat=True)
+                processed_doc_ids = current_doc_statuses.values_list('document_id', flat=True)
                 unprocessed_count = ProjectDocument.objects.filter(
                     project=project
                 ).exclude(id__in=processed_doc_ids).count()
-                
-                # Normalize status to lowercase for frontend compatibility
+
+                # Derive effective status from current corpus state, not stale collection status.
+                has_all_status_rows = (unprocessed_count == 0 and total_documents > 0)
+                all_terminal = has_all_status_rows and (status_counts['completed'] + status_counts['failed'] == total_documents)
+                control_is_processing = control_status.get('status') == 'PROCESSING'
+
+                # Thread-liveness cross-check: don't trust PROCESSING_CONTROL if thread is dead
+                thread_alive = (
+                    self.project_id in PROCESSING_THREADS
+                    and PROCESSING_THREADS[self.project_id].is_alive()
+                )
+                if control_is_processing and not thread_alive:
+                    logger.warning(
+                        "Auto-healed stale PROCESSING_CONTROL for project %s",
+                        self.project_id,
+                    )
+                    PROCESSING_CONTROL.setdefault(self.project_id, {})['status'] = 'STALE'
+                    control_is_processing = False
+
+                if (control_is_processing and thread_alive) or status_counts['processing'] > 0:
+                    normalized_status = 'processing'
+                elif total_documents == 0:
+                    normalized_status = 'not_created'
+                elif has_all_status_rows and status_counts['completed'] == total_documents:
+                    normalized_status = 'completed'
+                elif all_terminal and status_counts['failed'] > 0:
+                    normalized_status = 'failed'
+                else:
+                    # New uploads/deletes or not-yet-processed corpus should not appear as completed.
+                    normalized_status = 'pending'
+
                 raw_status = collection.status
-                normalized_status = raw_status.lower() if raw_status else 'not_created'
-                logger.debug(f"📊 STATUS: Normalized status '{raw_status}' -> '{normalized_status}'")
+                logger.debug(
+                    "📊 STATUS: Effective status '%s' (raw collection status='%s', totals=%s, completed=%s, failed=%s, unprocessed=%s)",
+                    normalized_status,
+                    raw_status,
+                    total_documents,
+                    status_counts['completed'],
+                    status_counts['failed'],
+                    unprocessed_count,
+                )
                 
                 return {
                     'project_id': self.project_id,
@@ -488,7 +542,7 @@ class EnhancedProjectVectorSearchService:
                     'document_statuses': status_counts,
                     'last_processed_at': collection.last_processed_at.isoformat() if collection.last_processed_at else None,
                     'error_message': collection.error_message,
-                    'is_processing': control_status.get('status') == 'PROCESSING',
+                    'is_processing': normalized_status == 'processing',
                     'current_document_id': control_status.get('current_document_id'),
                     'stop_requested': control_status.get('stop_requested', False),
                     'processing_progress': {
@@ -562,10 +616,144 @@ class EnhancedVectorSearchManager:
     
     @staticmethod
     def get_project_processing_status(project_id: str) -> Dict[str, Any]:
-        """Get detailed processing status for a project"""
+        """Get detailed processing status for a project (heavy -- creates processor + Milvus)"""
         service = EnhancedVectorSearchManager.get_project_service(project_id)
         return service.get_processing_status()
-    
+
+    @staticmethod
+    def get_processing_status_lightweight(project_id: str) -> Dict[str, Any]:
+        """ORM-only status query -- no processor, no Milvus, no embedder.
+
+        Designed for the polling endpoint so every 3-second poll doesn't spin
+        up a full EnhancedHierarchicalProcessor + Milvus connection.
+        """
+        from users.models import (
+            IntelliDocProject, ProjectVectorCollection,
+            DocumentVectorStatus, VectorProcessingStatus, ProjectDocument,
+        )
+
+        try:
+            project = IntelliDocProject.objects.get(project_id=project_id)
+        except IntelliDocProject.DoesNotExist:
+            return {
+                'project_id': project_id,
+                'collection_status': 'error',
+                'error': f'Project {project_id} not found',
+                'processing_progress': {'completed': 0, 'total': 0, 'percentage': 0},
+                'is_processing': False,
+            }
+
+        total_documents = ProjectDocument.objects.filter(project=project).count()
+        control_status = PROCESSING_CONTROL.get(project_id, {})
+
+        # --- Thread-liveness cross-check (auto-heal stale PROCESSING_CONTROL) ---
+        control_is_processing = control_status.get('status') == 'PROCESSING'
+        thread_alive = (
+            project_id in PROCESSING_THREADS
+            and PROCESSING_THREADS[project_id].is_alive()
+        )
+        if control_is_processing and not thread_alive:
+            logger.warning(
+                "Auto-healed stale PROCESSING_CONTROL for project %s "
+                "(control said PROCESSING but no thread is alive)",
+                project_id,
+            )
+            PROCESSING_CONTROL.setdefault(project_id, {})['status'] = 'STALE'
+            control_is_processing = False
+
+        try:
+            collection = ProjectVectorCollection.objects.get(project=project)
+
+            current_project_doc_ids = list(
+                ProjectDocument.objects.filter(project=project).values_list('id', flat=True)
+            )
+            current_doc_statuses = DocumentVectorStatus.objects.filter(
+                collection=collection, document_id__in=current_project_doc_ids,
+            )
+
+            status_counts = {
+                'pending': current_doc_statuses.filter(status=VectorProcessingStatus.PENDING).count(),
+                'processing': current_doc_statuses.filter(status=VectorProcessingStatus.PROCESSING).count(),
+                'completed': current_doc_statuses.filter(status=VectorProcessingStatus.COMPLETED).count(),
+                'failed': current_doc_statuses.filter(status=VectorProcessingStatus.FAILED).count(),
+            }
+
+            processed_doc_ids = current_doc_statuses.values_list('document_id', flat=True)
+            unprocessed_count = ProjectDocument.objects.filter(
+                project=project
+            ).exclude(id__in=processed_doc_ids).count()
+
+            has_all_status_rows = (unprocessed_count == 0 and total_documents > 0)
+            all_terminal = has_all_status_rows and (
+                status_counts['completed'] + status_counts['failed'] == total_documents
+            )
+
+            if (control_is_processing and thread_alive) or status_counts['processing'] > 0:
+                normalized_status = 'processing'
+            elif total_documents == 0:
+                normalized_status = 'not_created'
+            elif has_all_status_rows and status_counts['completed'] == total_documents:
+                normalized_status = 'completed'
+            elif all_terminal and status_counts['failed'] > 0:
+                normalized_status = 'failed'
+            else:
+                normalized_status = 'pending'
+
+            logger.debug(
+                "LIGHTWEIGHT STATUS: project=%s effective='%s' (thread_alive=%s, completed=%s, "
+                "failed=%s, unprocessed=%s, total=%s)",
+                project_id, normalized_status, thread_alive,
+                status_counts['completed'], status_counts['failed'],
+                unprocessed_count, total_documents,
+            )
+
+            return {
+                'project_id': project_id,
+                'collection_status': normalized_status,
+                'collection_name': collection.collection_name,
+                'total_documents': total_documents,
+                'unprocessed_documents': unprocessed_count,
+                'document_statuses': status_counts,
+                'last_processed_at': (
+                    collection.last_processed_at.isoformat()
+                    if collection.last_processed_at else None
+                ),
+                'error_message': collection.error_message,
+                'is_processing': normalized_status == 'processing',
+                'current_document_id': control_status.get('current_document_id'),
+                'stop_requested': control_status.get('stop_requested', False),
+                'processing_progress': {
+                    'completed': status_counts['completed'],
+                    'total': total_documents,
+                    'percentage': (
+                        (status_counts['completed'] / total_documents * 100)
+                        if total_documents > 0 else 0
+                    ),
+                },
+            }
+
+        except ProjectVectorCollection.DoesNotExist:
+            return {
+                'project_id': project_id,
+                'collection_status': 'processing' if thread_alive else 'not_created',
+                'collection_name': None,
+                'total_documents': total_documents,
+                'unprocessed_documents': total_documents,
+                'document_statuses': {
+                    'pending': 0, 'processing': 0, 'completed': 0, 'failed': 0,
+                },
+                'last_processed_at': None,
+                'error_message': '',
+                'is_processing': thread_alive,
+                'current_document_id': control_status.get('current_document_id'),
+                'stop_requested': control_status.get('stop_requested', False),
+                'processing_progress': {
+                    'completed': 0,
+                    'total': total_documents,
+                    'percentage': 0,
+                },
+            }
+
     @staticmethod
     def get_document_statuses(project_id: str) -> List[Dict[str, Any]]:
         """Get individual document processing statuses"""
