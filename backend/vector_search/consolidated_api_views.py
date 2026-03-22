@@ -41,7 +41,7 @@ def run_processing_in_background(project_id: str, processing_mode: str = 'enhanc
         
         # Update PROCESSING_CONTROL on completion
         PROCESSING_CONTROL[project_id] = {
-            'status': 'COMPLETED' if result.get('status') == 'completed' else 'FAILED',
+            'status': 'COMPLETED' if result.get('status') in ('completed', 'all_already_processed') else 'FAILED',
             'stop_requested': False,
             'current_document_id': None,
         }
@@ -135,6 +135,29 @@ def process_unified_consolidated(request, project_id, llm_config=None, processin
                 }
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        # Synchronous pre-flight: if all ready docs are already COMPLETED, skip thread entirely
+        from users.models import DocumentVectorStatus, VectorProcessingStatus as VPS
+        completed_doc_ids = DocumentVectorStatus.objects.filter(
+            document__in=ready_documents,
+            status=VPS.COMPLETED,
+        ).values_list('document_id', flat=True)
+        new_docs_count = ready_documents.exclude(id__in=completed_doc_ids).count()
+
+        if new_docs_count == 0:
+            logger.info(
+                f"✅ CONSOLIDATED: All {ready_documents.count()} documents already processed "
+                f"for project {project_id}. Nothing to do."
+            )
+            return Response({
+                'success': True,
+                'status': 'all_already_processed',
+                'message': 'All documents are already processed. Upload new files to process them.',
+                'project_id': str(project_id),
+                'ready_documents': ready_documents.count(),
+                'new_documents': 0,
+                'skipped_documents': ready_documents.count(),
+            }, status=status.HTTP_200_OK)
+
         # Use provided LLM config or defaults
         if not llm_config:
             llm_config = {

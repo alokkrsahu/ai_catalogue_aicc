@@ -96,8 +96,9 @@
   let statusPollingInterval: ReturnType<typeof setInterval> | null = null;
   let statusRequestInFlight = false;
 
-  // Use vector_count (vectors/embeddings created) as the "processed" metric.
-  // Do NOT fall back to ready_documents — that counts upload-ready files, not vectorised ones.
+  // vector_count maps to processing_progress.completed on the backend:
+  // the count of ProjectDocument rows with DocumentVectorStatus.status=COMPLETED.
+  // This is not the raw Milvus chunk count.
   $: processedCount = Number(processingStatus?.vector_status?.vector_count) || 0;
   $: totalDocumentsCount = processingStatus?.vector_status?.total_documents ?? 0;
   $: rawProcessingStatus = processingStatus?.vector_status?.processing_status || processingStatus?.vector_status?.collection_status || 'not_created';
@@ -230,9 +231,17 @@
   
   // Helper function to format processing status
   function formatProcessingStatus(status: string | undefined | null): string {
-    if (!status) return 'Ready';
-    // Capitalize first letter
-    return status.charAt(0).toUpperCase() + status.slice(1);
+    const labels: Record<string, string> = {
+      'not_created': 'Not Started',
+      'pending':     'Pending',
+      'processing':  'Processing',
+      'completed':   'Completed',
+      'failed':      'Failed',
+      'error':       'Error',
+      'unknown':     'Unknown',
+    };
+    if (!status) return 'Not Started';
+    return labels[status] ?? (status.charAt(0).toUpperCase() + status.slice(1).replace(/_/g, ' '));
   }
   
   // Toggle sidebar function
@@ -737,8 +746,11 @@
       pollingAttempts++;
       await loadProcessingStatus();
 
-      const raw = rawProcessingStatus;
-      const stillProcessing = serverIsProcessing;
+      // Derive directly from processingStatus to avoid stale $: reactive reads after async update
+      const raw = processingStatus?.vector_status?.processing_status
+                || processingStatus?.vector_status?.collection_status
+                || 'not_created';
+      const stillProcessing = processingStatus?.vector_status?.is_processing === true;
       const vectorCount = processingStatus?.vector_status?.vector_count || 0;
       const isTerminalRaw = ['completed', 'failed', 'error'].includes(raw);
 
@@ -892,23 +904,26 @@
       
       console.log('✅ UNIVERSAL: Upload completed successfully');
       
-      const successCount = result.total_successful || result.total_extracted || files.length;
+      const successCount = result.total_successful || result.total_extracted || 0;
       const failCount = result.total_failed || 0;
-      
+
       if (successCount > 0) {
         toasts.success(`Successfully uploaded ${successCount} file(s)${failCount > 0 ? ` (${failCount} failed)` : ''}`);
+        // Reload documents and folder hierarchy only when something was uploaded
+        await Promise.all([loadDocuments(), loadHierarchicalPaths()]);
       } else {
         toasts.error('No files were uploaded successfully');
       }
-      
-      // Reload documents and folder hierarchy
-      await Promise.all([loadDocuments(), loadHierarchicalPaths()]);
-      
+
     } catch (error) {
       console.error('❌ UNIVERSAL: File upload failed:', error);
       toasts.error(`Upload failed: ${error.message}`);
     } finally {
       uploading = false;
+      // Reset all file inputs so the same file can be re-selected
+      if (fileInput) fileInput.value = '';
+      if (folderInput) folderInput.value = '';
+      if (zipInput) zipInput.value = '';
     }
   }
   
@@ -1049,26 +1064,23 @@
       
       console.log('✅ UNIVERSAL: Document processing started', result);
       
-      // Handle 409 (already running) gracefully
+      // Handle response status
       if (result.status === 'already_running') {
         toasts.info('Processing is already running for this project');
+        await loadProcessingStatus();
+        startStatusPolling();
+      } else if (result.status === 'all_already_processed') {
+        toasts.info('All documents are already processed. Upload new files to process them.');
+        await loadProcessingStatus(); // refresh status display with current counts
       } else {
         toasts.success('Document processing started in background');
+        await loadProcessingStatus();
+        startStatusPolling();
       }
-      
-      // Reload status and start polling for progress
-      await loadProcessingStatus();
-      startStatusPolling();
-      
+
     } catch (error: any) {
       console.error('❌ UNIVERSAL: Document processing failed:', error);
-      // 409 returned as error from fetch; show friendly message
-      if (error.message?.includes('409') || error.message?.toLowerCase().includes('already')) {
-        toasts.info('Processing is already running for this project');
-        startStatusPolling();
-      } else {
-        toasts.error(`Processing failed: ${error.message}`);
-      }
+      toasts.error(`Processing failed: ${error.message}`);
     } finally {
       processing = false;
     }

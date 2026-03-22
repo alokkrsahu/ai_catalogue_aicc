@@ -8,7 +8,10 @@ from django.utils import timezone
 from django.db import transaction
 from asgiref.sync import async_to_sync
 
-from users.models import IntelliDocProject, ProjectDocument, ProjectVectorCollection, VectorProcessingStatus
+from users.models import (
+    IntelliDocProject, ProjectDocument, ProjectVectorCollection,
+    VectorProcessingStatus, DocumentVectorStatus,
+)
 from .embeddings import get_embedder_instance
 
 logger = logging.getLogger(__name__)
@@ -154,10 +157,8 @@ class UnifiedVectorSearchManager:
         for doc in all_documents:
             logger.info(f"  • {doc.original_filename}: status={doc.upload_status}")
         
-        # Use ready documents for processing
-        documents = ready_documents
-        
-        if not documents.exists():
+        # No files uploaded at all
+        if not ready_documents.exists():
             logger.warning(f"No ready documents found for project {project.name}")
             return {
                 'status': 'completed',
@@ -172,6 +173,32 @@ class UnifiedVectorSearchManager:
                     'project_id': str(project.project_id),
                     'project_name': project.name
                 }
+            }
+
+        # Incremental: skip docs already successfully embedded in Milvus
+        already_completed_doc_ids = DocumentVectorStatus.objects.filter(
+            document__in=ready_documents,
+            status=VectorProcessingStatus.COMPLETED,
+        ).values_list('document_id', flat=True)
+
+        documents = ready_documents.exclude(id__in=already_completed_doc_ids)
+
+        skipped_count = len(already_completed_doc_ids)
+        logger.info(
+            f"  • Skipping {skipped_count} already-COMPLETED documents; "
+            f"{documents.count()} to process"
+        )
+
+        if not documents.exists():
+            logger.info(f"All documents already processed for project {project.name}")
+            return {
+                'status': 'all_already_processed',
+                'message': 'All documents are already processed',
+                'processed_documents': 0,
+                'failed_documents': 0,
+                'skipped_documents': skipped_count,
+                'total_chunks_created': 0,
+                'processing_mode': 'enhanced',
             }
 
         logger.info(f"🚀 Starting enhanced processing for {documents.count()} documents in project {project.name}")

@@ -355,14 +355,17 @@ export class CleanUniversalApiService {
       body: formData,
     });
 
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.message || `Zip upload failed: ${response.status}`);
+    const responseData = await response.json().catch(() => ({}));
+
+    // A 400 with `failed_extractions` means the zip was valid but all files were
+    // unsupported/corrupt — return the body so callers can show the detailed list.
+    // Any other non-ok status (401, 500, etc.) is a genuine error — throw.
+    if (!response.ok && responseData.failed_extractions === undefined) {
+      throw new Error(responseData.message || responseData.error || `Zip upload failed: ${response.status}`);
     }
 
-    const result = await response.json();
-    console.log(`✅ UNIVERSAL: Zip extraction completed: ${result.total_extracted} files extracted, ${result.total_failed} failed`);
-    return result;
+    console.log(`✅ UNIVERSAL: Zip extraction completed: ${responseData.total_extracted ?? 0} files extracted, ${responseData.total_failed ?? 0} failed`);
+    return responseData;
   }
 
   /**
@@ -418,14 +421,13 @@ export class CleanUniversalApiService {
       body: Object.keys(requestBody).length > 0 ? JSON.stringify(requestBody) : undefined,
     });
 
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.message || errorData.error || `Process documents failed: ${response.status}`);
+    const responseData = await response.json().catch(() => ({}));
+    if (!response.ok && response.status !== 409) {
+      throw new Error(responseData.message || responseData.error || `Process documents failed: ${response.status}`);
     }
-
-    const result = await response.json();
-    console.log('✅ UNIVERSAL: Document processing started successfully');
-    return result;
+    // 409 (already_running) is returned as data, not thrown — caller checks result.status
+    console.log('✅ UNIVERSAL: Document processing response received');
+    return responseData;
   }
 
   /**
