@@ -287,8 +287,7 @@ class DocumentVectorStatusSerializer(serializers.ModelSerializer):
             'processing_time_ms', 'error_message', 'processed_at', 'created_at', 'updated_at',
             # Summary and Topic tracking
             'summary_generated', 'summary_generated_at', 'summary_chunks_count',
-            'topic_generated', 'topic_generated_at', 'topic_chunks_count',
-            'summarizer_used', 'topic_generator_used', 'processing_progress'
+            'summarizer_used', 'processing_progress'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'processing_progress']
 
@@ -303,10 +302,6 @@ class DocumentChunkSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'chunk_id', 'chunk_index', 'chunk_type', 'section_title',
             'content_length', 'has_embedding', 'vector_id',
-            # Summary fields
-            'has_summary', 'summary_word_count', 'summary_generated_at', 'summarizer_used',
-            # Topic fields
-            'has_topic', 'topic_word_count', 'topic_generated_at', 'topic_generator_used',
             # Metadata
             'document', 'created_at', 'updated_at',
             # Computed properties
@@ -320,9 +315,7 @@ class DocumentChunkSummarySerializer(serializers.ModelSerializer):
     class Meta:
         model = DocumentChunk
         fields = [
-            'chunk_id', 'chunk_index', 'section_title',
-            'has_summary', 'summary_word_count', 'summarizer_used',
-            'has_topic', 'topic_word_count', 'topic_generator_used'
+            'chunk_id', 'chunk_index', 'section_title'
         ]
 
 

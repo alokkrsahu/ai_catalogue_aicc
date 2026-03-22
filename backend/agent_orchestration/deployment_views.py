@@ -9,6 +9,7 @@ Deployment / chat limitations (see DEPLOYMENT_CHAT_LIMITATIONS.md in project roo
 """
 import logging
 import json
+import queue as queue_mod
 import uuid
 import hashlib
 import threading
@@ -43,6 +44,25 @@ from .deployment_executor import WorkflowDeploymentExecutor
 from .deployment_rate_limiter import WorkflowDeploymentRateLimiter
 
 logger = logging.getLogger('workflow_deployment')
+
+
+def _embed_hex_to_rgb_csv(hex_color: str, fallback_rgb: str) -> str:
+    """
+    Convert #RRGGBB or #RGB to 'r, g, b' for CSS --*-rgb custom properties.
+    Invalid or non-hex values return fallback_rgb (comma-separated decimals).
+    """
+    if not hex_color or not isinstance(hex_color, str):
+        return fallback_rgb
+    h = hex_color.strip().lstrip('#')
+    try:
+        if len(h) == 3:
+            h = ''.join(c * 2 for c in h)
+        if len(h) != 6:
+            return fallback_rgb
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return f'{r}, {g}, {b}'
+    except ValueError:
+        return fallback_rgb
 
 
 def _add_cors_headers(response, request):
@@ -632,7 +652,8 @@ class DeploymentViewSet(viewsets.ViewSet):
             sessions_query = DeploymentSession.objects.filter(deployment=deployment)
             
             if session_id_filter:
-                sessions_query = sessions_query.filter(session_id__icontains=session_id_filter)
+                # Exact match so preload / activity lookup returns the intended session (icontains can match wrong rows)
+                sessions_query = sessions_query.filter(session_id=session_id_filter)
             
             total_sessions = sessions_query.count()
             sessions = sessions_query.order_by('-last_activity')[offset:offset + limit]
@@ -1127,21 +1148,54 @@ def public_chat_endpoint_stream(request, project_id):
             # Send thinking indicator
             yield f"data: {json.dumps({'type': 'thinking'})}\n\n"
             
-            # Execute workflow
+            # Execute workflow in background thread with event queue
             executor = WorkflowDeploymentExecutor()
             execution_id = f"deploy_exec_{timezone.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
             
-            try:
-                execution_result = asyncio.run(
-                    executor.execute_deployment_workflow(
-                        deployment,
-                        full_conversation,
-                        session_id,
-                        execution_id,
-                        current_user_query=user_query
+            event_queue = queue_mod.Queue()
+
+            def _emit_event(event_type, data):
+                event_queue.put({"type": event_type, **data})
+
+            result_holder = [None, None]  # [result, error]
+
+            def _run_workflow():
+                try:
+                    result_holder[0] = asyncio.run(
+                        executor.execute_deployment_workflow(
+                            deployment,
+                            full_conversation,
+                            session_id,
+                            execution_id,
+                            current_user_query=user_query,
+                            event_callback=_emit_event,
+                        )
                     )
-                )
-            except Exception as e:
+                except Exception as exc:
+                    result_holder[1] = exc
+                finally:
+                    event_queue.put({"type": "_done"})
+
+            wf_thread = threading.Thread(
+                target=_run_workflow, daemon=True,
+                name=f"deploy-wf-{execution_id[:8]}"
+            )
+            wf_thread.start()
+
+            # Consume intermediate events from queue and yield as SSE
+            while True:
+                try:
+                    evt = event_queue.get(timeout=0.5)
+                except queue_mod.Empty:
+                    continue
+                if evt["type"] == "_done":
+                    break
+                yield f"data: {json.dumps(evt)}\n\n"
+
+            wf_thread.join(timeout=5)
+
+            if result_holder[1] is not None:
+                e = result_holder[1]
                 logger.error(f"❌ DEPLOYMENT STREAM: Error executing workflow: {e}", exc_info=True)
                 _exec_time_ms = int((timezone.now() - start_time).total_seconds() * 1000)
                 _fail_result = {'status': 'error', 'error': 'Workflow execution failed'}
@@ -1163,7 +1217,8 @@ def public_chat_endpoint_stream(request, project_id):
                 ).start()
                 yield f"data: {json.dumps({'type': 'error', 'error': 'Workflow execution failed', 'request_id': request_id})}\n\n"
                 return
-            
+
+            execution_result = result_holder[0]
             execution_time_ms = int((timezone.now() - start_time).total_seconds() * 1000)
             
             # Handle different execution results (persist session on each path so user message is not lost)
@@ -1231,6 +1286,19 @@ def public_chat_endpoint_stream(request, project_id):
                 yield f"data: {json.dumps({'type': 'error', 'error': 'No response generated', 'request_id': request_id})}\n\n"
                 return
             
+            # Persist conversation (including assistant response) BEFORE streaming
+            # so the response survives even if the client disconnects mid-stream.
+            stream_citations = execution_result.get('citations') or []
+            assistant_history_entry = {
+                'role': 'assistant',
+                'content': assistant_response,
+                'timestamp': timezone.now().isoformat(),
+            }
+            if stream_citations:
+                assistant_history_entry['citations'] = stream_citations
+            conversation_history.append(assistant_history_entry)
+            _save_session_conversation_sync(deployment_session, conversation_history)
+
             # Stream the response word by word for smooth appearance
             words = assistant_response.split(' ')
             accumulated = ""
@@ -1247,14 +1315,7 @@ def public_chat_endpoint_stream(request, project_id):
                 import time
                 time.sleep(0.02)  # 20ms delay between words
             
-            # Add assistant response to conversation history for background save
-            conversation_history.append({
-                'role': 'assistant',
-                'content': assistant_response,
-                'timestamp': timezone.now().isoformat()
-            })
-            
-            # Start background save
+            # Save execution metadata in background (conversation already persisted above)
             background_thread = threading.Thread(
                 target=_save_deployment_data_async,
                 args=(
@@ -1273,8 +1334,8 @@ def public_chat_endpoint_stream(request, project_id):
             )
             background_thread.start()
             
-            # Send completion
-            yield f"data: {json.dumps({'type': 'done', 'request_id': request_id, 'execution_time_ms': execution_time_ms})}\n\n"
+            # Send completion (stream_citations computed earlier, before streaming)
+            yield f"data: {json.dumps({'type': 'done', 'request_id': request_id, 'execution_time_ms': execution_time_ms, 'citations': stream_citations})}\n\n"
             
         except Exception as e:
             logger.error(f"❌ DEPLOYMENT STREAM: Error in stream generation: {e}", exc_info=True)
@@ -1573,10 +1634,11 @@ def submit_deployment_human_input(request, project_id):
             workflow = deployment.workflow
             if workflow:
                 graph_json = workflow.graph_json
-                assistant_response = executor._extract_end_node_output(result, graph_json)
+                assistant_response, response_citations = executor._extract_end_node_output(result, graph_json)
             else:
                 # Fallback: try to get from result directly
                 assistant_response = result.get('response', '') or result.get('conversation_history', '')
+                response_citations = result.get('citations') or []
             
             # User input was already added to conversation history when submitted
             # Just add the assistant response now
@@ -1595,6 +1657,7 @@ def submit_deployment_human_input(request, project_id):
             return JsonResponse({
                 'status': 'success',
                 'response': assistant_response,
+                'citations': response_citations or [],
                 'metadata': {
                     'request_id': request_id,
                     'execution_time_ms': execution_time_ms,
@@ -1643,8 +1706,10 @@ def embed_chatbot_html(request, project_id):
                 content_type='text/html'
             )
         
-        # Get the endpoint URL and customization settings
-        # Use X-Forwarded-Proto to determine the scheme when behind a reverse proxy
+        # Absolute URL fallback (e.g. external embeds). In-app iframe must use the browser's
+        # origin — build_absolute_uri often yields 127.0.0.1:8000 or internal Docker host behind
+        # Vite/nginx proxy, which the user's browser cannot reach → fetch fails ("connection problem").
+        # Use X-Forwarded-Proto to determine the scheme when behind a reverse proxy.
         base_url = request.build_absolute_uri('/').rstrip('/')
         if request.META.get('HTTP_X_FORWARDED_PROTO') == 'https' and base_url.startswith('http://'):
             base_url = 'https://' + base_url[len('http://'):]
@@ -1669,8 +1734,8 @@ def embed_chatbot_html(request, project_id):
     :root {{
       --primary-color: {primary_color};
       --secondary-color: {secondary_color};
-      --primary-rgb: {int(primary_color[1:3], 16)}, {int(primary_color[3:5], 16)}, {int(primary_color[5:7], 16)};
-      --secondary-rgb: {int(secondary_color[1:3], 16)}, {int(secondary_color[3:5], 16)}, {int(secondary_color[5:7], 16)};
+      --primary-rgb: {_embed_hex_to_rgb_csv(primary_color, '120, 178, 232')};
+      --secondary-rgb: {_embed_hex_to_rgb_csv(secondary_color, '58, 109, 152')};
     }}
     
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -1691,7 +1756,7 @@ def embed_chatbot_html(request, project_id):
       background: rgba(255, 255, 255, 0.95);
       backdrop-filter: blur(20px);
       -webkit-backdrop-filter: blur(20px);
-      border-radius: 24px;
+      border-radius: 0;
       box-shadow: 
         0 25px 50px -12px rgba(0, 0, 0, 0.25),
         0 0 0 1px rgba(255, 255, 255, 0.1);
@@ -1798,26 +1863,27 @@ def embed_chatbot_html(request, project_id):
       flex: 1;
       padding: 20px;
       overflow-y: auto;
+      scrollbar-gutter: stable;
       background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
       font-size: 14px;
       scroll-behavior: smooth;
     }}
     
     .chat-messages::-webkit-scrollbar {{
-      width: 6px;
+      width: 7px;
     }}
     
     .chat-messages::-webkit-scrollbar-track {{
-      background: transparent;
+      background: rgba(0, 0, 0, 0.03);
     }}
     
     .chat-messages::-webkit-scrollbar-thumb {{
-      background: rgba(0, 0, 0, 0.1);
-      border-radius: 3px;
+      background: rgba(0, 0, 0, 0.15);
+      border-radius: 4px;
     }}
     
     .chat-messages::-webkit-scrollbar-thumb:hover {{
-      background: rgba(0, 0, 0, 0.2);
+      background: rgba(0, 0, 0, 0.25);
     }}
     
     .msg {{
@@ -1938,6 +2004,11 @@ def embed_chatbot_html(request, project_id):
     .chat-input button:disabled {{
       opacity: 0.5;
       cursor: not-allowed;
+    }}
+    
+    .chat-input button:focus-visible {{
+      outline: 2px solid var(--primary-color);
+      outline-offset: 2px;
     }}
     
     .chat-input button svg {{
@@ -2202,6 +2273,183 @@ def embed_chatbot_html(request, project_id):
     .bubble markdown h2 {{ font-size: 1.25em; font-weight: 700; margin: 12px 0 6px; }}
     .bubble markdown h3 {{ font-size: 1.1em; font-weight: 600; margin: 10px 0 4px; }}
     .bubble markdown hr {{ border: none; border-top: 1px solid #e2e8f0; margin: 12px 0; }}
+
+    .cite-chip {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 18px;
+      height: 18px;
+      padding: 0 4px;
+      border-radius: 4px;
+      background: var(--primary-color, #0ea5e9);
+      color: white;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      vertical-align: super;
+      margin: 0 1px;
+      line-height: 1;
+      transition: background 0.15s;
+    }}
+    .cite-chip:hover {{
+      filter: brightness(0.85);
+    }}
+    .cite-tooltip {{
+      position: fixed;
+      max-width: 340px;
+      background: #1e293b;
+      color: #e2e8f0;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 13px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+      z-index: 9999;
+      animation: citeIn 0.15s ease-out;
+    }}
+    .cite-tooltip-title {{
+      font-weight: 600;
+      color: #38bdf8;
+      margin-bottom: 6px;
+      font-size: 12px;
+    }}
+    .cite-tooltip-link {{
+      color: #38bdf8;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+      cursor: pointer;
+      transition: color 0.15s;
+    }}
+    .cite-tooltip-link:hover {{
+      color: #7dd3fc;
+    }}
+    .cite-tooltip-source {{
+      font-size: 11px;
+      color: #94a3b8;
+      margin-bottom: 4px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .cite-tooltip-quote {{
+      font-style: italic;
+      color: #cbd5e1;
+      font-size: 12px;
+      line-height: 1.5;
+    }}
+    @keyframes citeIn {{
+      from {{ opacity: 0; transform: translateY(-4px); }}
+      to {{ opacity: 1; transform: translateY(0); }}
+    }}
+
+    /* ── Activity / Planning panel ────────────────────────────── */
+    .activity-panel {{
+      background: #f1f5f9;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      margin: 0 16px 6px 56px;
+      overflow: hidden;
+      transition: max-height 0.35s ease, opacity 0.25s ease;
+      max-height: 320px;
+      opacity: 1;
+    }}
+    .activity-panel.collapsed {{
+      max-height: 32px;
+      cursor: pointer;
+    }}
+    .activity-header {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #64748b;
+      user-select: none;
+      cursor: pointer;
+    }}
+    .activity-header svg {{
+      width: 14px; height: 14px; flex-shrink: 0;
+      transition: transform 0.25s;
+    }}
+    .activity-panel.collapsed .activity-header svg {{
+      transform: rotate(-90deg);
+    }}
+    .activity-items {{
+      max-height: 260px;
+      overflow-y: auto;
+      padding: 0 12px 8px;
+    }}
+    .activity-panel.collapsed .activity-items {{
+      display: none;
+    }}
+    .activity-item {{
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 5px 0;
+      font-size: 12px;
+      color: #475569;
+      line-height: 1.45;
+      border-bottom: 1px solid #e2e8f0;
+      animation: actItemIn 0.2s ease-out;
+    }}
+    .activity-item:last-child {{ border-bottom: none; }}
+    .activity-item-icon {{
+      flex-shrink: 0;
+      width: 18px; height: 18px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 4px;
+      font-size: 11px;
+    }}
+    .activity-item-body b {{ color: #334155; }}
+
+    .activity-item.expandable {{
+      cursor: pointer;
+      flex-wrap: wrap;
+    }}
+    .activity-item.expandable:hover {{
+      background: #e2e8f0;
+      border-radius: 6px;
+    }}
+    .activity-item.expandable .activity-item-body::after {{
+      content: ' ▸';
+      font-size: 10px;
+      color: #94a3b8;
+      transition: transform 0.2s;
+    }}
+    .activity-item.expanded .activity-item-body::after {{
+      content: ' ▾';
+    }}
+    .activity-detail {{
+      display: none;
+      width: 100%;
+      margin-top: 4px;
+      padding: 8px 10px;
+      background: #e8ecf1;
+      border-radius: 6px;
+      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+      font-size: 11px;
+      line-height: 1.55;
+      color: #334155;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 180px;
+      overflow-y: auto;
+      animation: detailSlide 0.2s ease-out;
+    }}
+    .activity-item.expanded .activity-detail {{
+      display: block;
+    }}
+    @keyframes detailSlide {{
+      from {{ opacity: 0; max-height: 0; }}
+      to {{ opacity: 1; max-height: 180px; }}
+    }}
+
+    @keyframes actItemIn {{
+      from {{ opacity: 0; transform: translateX(-6px); }}
+      to {{ opacity: 1; transform: translateX(0); }}
+    }}
   </style>
 </head>
 <body>
@@ -2214,7 +2462,7 @@ def embed_chatbot_html(request, project_id):
       <div class="chat-header-title">{chatbot_title}</div>
       <div class="chat-header-sub">{chatbot_subtitle}</div>
     </div>
-    <div class="online-indicator"></div>
+    <div class="online-indicator" role="status" aria-label="Assistant online" title="Online"></div>
   </div>
   <div id="messages" class="chat-messages"></div>
   <div id="status" class="status"></div>
@@ -2245,7 +2493,15 @@ def embed_chatbot_html(request, project_id):
 </div>
 
 <script>
-  const ENDPOINT_URL = {json.dumps(endpoint_url)};
+  // Resolve chat API from the page URL so POST /stream/ stays same-origin (proxied /api on :5173).
+  const _pathPartsForEndpoint = window.location.pathname.split('/').filter(Boolean);
+  const _wdIdx = _pathPartsForEndpoint.indexOf('workflow-deploy');
+  const _embedProjectId = (_wdIdx >= 0 && _wdIdx + 1 < _pathPartsForEndpoint.length)
+    ? _pathPartsForEndpoint[_wdIdx + 1]
+    : '';
+  const ENDPOINT_URL = _embedProjectId
+    ? (window.location.origin + '/api/workflow-deploy/' + _embedProjectId + '/')
+    : {json.dumps(endpoint_url)};
   const STREAM_URL = ENDPOINT_URL.replace(/\\/$/, '') + '/stream/';
   const SUBMIT_INPUT_URL = ENDPOINT_URL.replace(/\\/$/, '') + '/submit-input/';
   const INITIAL_GREETING = {json.dumps(initial_greeting)};
@@ -2339,6 +2595,138 @@ def embed_chatbot_html(request, project_id):
     return html;
   }}
 
+  let _chatCitations = [];
+  let _activeCiteTooltip = null;
+
+  function parseCitations(text) {{
+    const pattern = /---CITATIONS---\\s*([\\s\\S]*?)\\s*---END_CITATIONS---/;
+    const m = text.match(pattern);
+    if (!m) return {{ cleanText: text, citations: [] }};
+    var cleanText = text.slice(0, m.index).trim();
+    // Strip trailing "CITATIONS" headings the LLM sometimes emits before the block
+    cleanText = cleanText.replace(/[\\n\\r]+(?:#{1,6}\\s*)?(?:\\*{{1,2}})?CITATIONS(?:\\*{{1,2}})?\\s*$/i, '').trim();
+    let citations = [];
+    try {{
+      citations = JSON.parse(m[1].trim());
+      if (!Array.isArray(citations)) citations = [];
+      else citations = citations.filter(function(c) {{
+        if (!c || typeof c !== 'object') return false;
+        var r = parseInt(c.ref, 10);
+        if (isNaN(r)) return false;
+        c.ref = r;
+        return true;
+      }});
+    }} catch(e) {{ citations = []; }}
+    return {{ cleanText, citations }};
+  }}
+
+  function renderCitationChips(html, citations) {{
+    if (!citations || citations.length === 0) return html;
+    return html.replace(/\\[(\\d+)\\]/g, function(match, num) {{
+      const ref = parseInt(num, 10);
+      const cit = citations.find(function(c) {{ return Number(c.ref) === ref; }});
+      if (!cit) return match;
+      return '<span class="cite-chip" data-ref="' + ref + '">' + ref + '</span>';
+    }});
+  }}
+
+  function _getCiteAuthHeaders() {{
+    try {{
+      var raw = localStorage.getItem('auth');
+      if (raw) {{
+        var parsed = JSON.parse(raw);
+        if (parsed && parsed.token) return {{ 'Authorization': 'Bearer ' + parsed.token }};
+      }}
+    }} catch(_e) {{}}
+    return {{}};
+  }}
+
+  function openCitationDocument(documentId) {{
+    if (!projectId || !documentId) return;
+    var url = '/api/projects/' + projectId + '/documents/' + documentId + '/download/';
+    fetch(url, {{ headers: _getCiteAuthHeaders() }})
+      .then(function(resp) {{
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return resp.blob();
+      }})
+      .then(function(blob) {{
+        var blobUrl = URL.createObjectURL(blob);
+        window.open(blobUrl, '_blank');
+        setTimeout(function() {{ URL.revokeObjectURL(blobUrl); }}, 60000);
+      }})
+      .catch(function(err) {{
+        console.error('Citation document open failed:', err);
+      }});
+  }}
+
+  function showCiteTooltip(chipEl, ref) {{
+    if (_activeCiteTooltip) {{ _activeCiteTooltip.remove(); _activeCiteTooltip = null; }}
+    const cit = _chatCitations.find(function(c) {{ return Number(c.ref) === ref; }});
+    if (!cit) return;
+    const tip = document.createElement('div');
+    tip.className = 'cite-tooltip';
+    var isWeb = cit.url || cit.source === 'web';
+    var titleHtml;
+    if (cit.document_id) {{
+      var loc = '';
+      if (cit.page) loc += 'p.' + cit.page;
+      if (cit.section) loc += (loc ? ', ' : '') + cit.section;
+      var titleText = (cit.document_title || 'Document') + (loc ? ' &mdash; ' + loc : '');
+      titleHtml = '<a class="cite-tooltip-link" href="#" data-docid="' + cit.document_id + '">' + titleText + '</a>';
+    }} else if (isWeb && cit.url) {{
+      var safeUrl = cit.url.replace(/"/g, '&quot;').replace(/</g, '&lt;');
+      titleHtml = '<a class="cite-tooltip-link" href="' + safeUrl + '" target="_blank" rel="noopener">' + (cit.document_title || cit.url).replace(/</g, '&lt;') + '</a>';
+    }} else {{
+      titleHtml = (cit.document_title || 'Source').replace(/</g, '&lt;');
+    }}
+    var sourceHtml = '';
+    if (isWeb && cit.url) {{
+      try {{
+        var domain = new URL(cit.url).hostname.replace(/^www\\./, '');
+        sourceHtml = '<div class="cite-tooltip-source">&#127760; ' + domain.replace(/</g, '&lt;') + '</div>';
+      }} catch(_e) {{
+        sourceHtml = '<div class="cite-tooltip-source">&#127760; Web</div>';
+      }}
+    }}
+    tip.innerHTML = '<div class="cite-tooltip-title">' + titleHtml + '</div>' +
+      sourceHtml +
+      '<div class="cite-tooltip-quote">&ldquo;' +
+      ((cit.quoted_text || '').slice(0, 300).replace(/</g,'&lt;')) +
+      '&rdquo;</div>';
+    const rect = chipEl.getBoundingClientRect();
+    tip.style.left = rect.left + 'px';
+    tip.style.top = (rect.bottom + 6) + 'px';
+    document.body.appendChild(tip);
+    _activeCiteTooltip = tip;
+  }}
+
+  document.addEventListener('click', function(e) {{
+    var link = e.target.closest && e.target.closest('.cite-tooltip-link');
+    if (link) {{
+      if (link.dataset.docid) {{
+        e.preventDefault();
+        e.stopPropagation();
+        openCitationDocument(link.dataset.docid);
+        return;
+      }}
+      if (link.href && link.target === '_blank') {{
+        return;
+      }}
+    }}
+    const chip = e.target.closest && e.target.closest('.cite-chip');
+    if (chip) {{
+      const ref = parseInt(chip.dataset.ref, 10);
+      if (_activeCiteTooltip && _activeCiteTooltip._ref === ref) {{
+        _activeCiteTooltip.remove(); _activeCiteTooltip = null;
+      }} else {{
+        showCiteTooltip(chip, ref);
+        if (_activeCiteTooltip) _activeCiteTooltip._ref = ref;
+      }}
+    }} else if (_activeCiteTooltip) {{
+      _activeCiteTooltip.remove(); _activeCiteTooltip = null;
+    }}
+  }});
+
   const messages = [];
   // Allow explicit session_id via URL for in-app chatbot, fallback to random for external embeds
   const urlParams = new URLSearchParams(window.location.search || '');
@@ -2358,43 +2746,67 @@ def embed_chatbot_html(request, project_id):
   const humanInputSubmit = document.getElementById('humanInputSubmit');
   const humanInputCancel = document.getElementById('humanInputCancel');
   
+  // Forward Escape key to the parent window so fullscreen can be exited
+  // even when the iframe has keyboard focus.
+  document.addEventListener('keydown', function(e) {{
+    if (e.key === 'Escape') {{
+      try {{ parent.postMessage({{ type: 'chatbot_escape' }}, '*'); }} catch(_) {{}}
+    }}
+  }});
+
+  // Extract projectId from URL path: /api/workflow-deploy/<project_id>/embed/
+  const _pathParts = window.location.pathname.split('/').filter(Boolean);
+  const _pidIdx = _pathParts.indexOf('workflow-deploy') + 1;
+  const projectId = _pidIdx > 0 && _pidIdx < _pathParts.length ? _pathParts[_pidIdx] : null;
+
   // Preload existing conversation history for this session (if any)
-  (async function preloadConversation() {
-    try {
-      // Extract projectId from URL path: /api/workflow-deploy/<project_id>/embed/
-      const pathParts = window.location.pathname.split('/').filter(Boolean);
-      const projectIdIndex = pathParts.indexOf('workflow-deploy') + 1;
-      const projectId = projectIdIndex > 0 && projectIdIndex < pathParts.length ? pathParts[projectIdIndex] : null;
-
-      if (!projectId || !sessionId) {
+  const preloadPromise = (async function preloadConversation() {{
+    try {{
+      if (!projectId || !sessionId) {{
         return;
-      }
+      }}
 
-      const activityUrl = `/api/agent-orchestration/projects/${projectId}/deployment/activity/?session_id=${encodeURIComponent(sessionId)}&limit=1`;
-      const resp = await fetch(activityUrl, { credentials: 'include' });
-      if (!resp.ok) {
+      const activityUrl = `/api/agent-orchestration/projects/${{projectId}}/deployment/activity/?session_id=${{encodeURIComponent(sessionId)}}&limit=1`;
+      // SPA uses JWT in localStorage; REST_FRAMEWORK is JWT-only (no session auth for this API)
+      let _preloadHeaders = {{}};
+      try {{
+        const _rawAuth = localStorage.getItem('auth');
+        if (_rawAuth) {{
+          const _authParsed = JSON.parse(_rawAuth);
+          if (_authParsed && _authParsed.token) {{
+            _preloadHeaders = {{ 'Authorization': 'Bearer ' + _authParsed.token }};
+          }}
+        }}
+      }} catch (_e) {{}}
+      const resp = await fetch(activityUrl, {{
+        credentials: 'include',
+        headers: _preloadHeaders
+      }});
+      if (!resp.ok) {{
+        console.warn('Chatbot preload: activity request failed', resp.status);
         return;
-      }
+      }}
 
       const data = await resp.json().catch(() => null);
-      if (!data || !Array.isArray(data.sessions) || data.sessions.length === 0) {
+      if (!data || !Array.isArray(data.sessions) || data.sessions.length === 0) {{
         return;
-      }
+      }}
 
       const session = data.sessions[0];
       const history = Array.isArray(session.conversation_history) ? session.conversation_history : [];
 
       // Optionally cap to last 100 messages
       const recentHistory = history.slice(-100);
-      for (const msg of recentHistory) {
+      for (const msg of recentHistory) {{
         if (!msg || !msg.role || typeof msg.content !== 'string') continue;
-        appendMessage(msg.role === 'user' ? 'user' : 'assistant', msg.content);
-        messages.push({ role: msg.role, content: msg.content });
-      }
-    } catch (e) {
+        const msgCitations = Array.isArray(msg.citations) ? msg.citations : undefined;
+        appendMessage(msg.role === 'user' ? 'user' : 'assistant', msg.content, false, msgCitations);
+        messages.push({{ role: msg.role, content: msg.content }});
+      }}
+    }} catch (e) {{
       console.warn('Chatbot preload failed:', e);
-    }
-  })();
+    }}
+  }})();
   
   // Auto-resize textarea
   function autoResize() {{
@@ -2403,15 +2815,27 @@ def embed_chatbot_html(request, project_id):
   }}
   inputEl.addEventListener('input', autoResize);
 
-  function appendMessage(role, text, isStreaming = false) {{
+  function appendMessage(role, text, isStreaming = false, apiCitations = undefined) {{
     const msg = document.createElement('div');
     msg.className = 'msg ' + (role === 'user' ? 'user' : 'assistant');
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     
     if (role === 'assistant' && !isStreaming) {{
+      let cleanText = text;
+      let citations = [];
+      if (Array.isArray(apiCitations) && apiCitations.length > 0) {{
+        citations = apiCitations;
+      }} else {{
+        const parsed = parseCitations(text);
+        cleanText = parsed.cleanText;
+        citations = parsed.citations;
+      }}
+      if (citations.length > 0) _chatCitations = citations;
       const markdownEl = document.createElement('markdown');
-      markdownEl.innerHTML = renderMarkdown(text);
+      let rendered = renderMarkdown(cleanText);
+      if (citations.length > 0) rendered = renderCitationChips(rendered, citations);
+      markdownEl.innerHTML = rendered;
       bubble.appendChild(markdownEl);
     }} else {{
       bubble.textContent = text;
@@ -2438,6 +2862,130 @@ def embed_chatbot_html(request, project_id):
   function hideThinkingIndicator() {{
     const indicator = document.getElementById('thinking-indicator');
     if (indicator) indicator.remove();
+  }}
+
+  /* ── Activity / planning panel ─────────────────────────── */
+  let _activityPanel = null;
+  let _activityItems = null;
+  let _activityHeader = null;
+  let _activityStartTs = null;
+
+  const _activityIcons = {{
+    planning: '📋', delegate_start: '🤝', delegate_plan: '📝',
+    tool_result: '🔍', delegate_done: '✅', synthesizing: '⚙️',
+  }};
+
+  function _ensureActivityPanel() {{
+    if (_activityPanel) return;
+    _activityStartTs = Date.now();
+
+    _activityPanel = document.createElement('div');
+    _activityPanel.className = 'activity-panel';
+
+    _activityHeader = document.createElement('div');
+    _activityHeader.className = 'activity-header';
+    _activityHeader.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+      '<polyline points="6 9 12 15 18 9"></polyline></svg>' +
+      '<span>Processing…</span>';
+    var panelRef = _activityPanel;
+    _activityHeader.addEventListener('click', function() {{
+      panelRef.classList.toggle('collapsed');
+    }});
+
+    _activityItems = document.createElement('div');
+    _activityItems.className = 'activity-items';
+
+    _activityPanel.appendChild(_activityHeader);
+    _activityPanel.appendChild(_activityItems);
+
+    const thinkingEl = document.getElementById('thinking-indicator');
+    if (thinkingEl) {{
+      thinkingEl.parentNode.insertBefore(_activityPanel, thinkingEl);
+      thinkingEl.remove();
+    }} else {{
+      messagesEl.appendChild(_activityPanel);
+    }}
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }}
+
+  function showActivityItem(data) {{
+    _ensureActivityPanel();
+    const icon = _activityIcons[data.type] || '•';
+    let desc = '';
+    switch (data.type) {{
+      case 'planning':
+        desc = '<b>' + (data.agent || '') + '</b> created a plan';
+        break;
+      case 'delegate_start':
+        desc = '<b>' + (data.agent || '') + '</b> started — ' +
+               (Array.isArray(data.tasks) ? data.tasks.length + ' task(s)' : '');
+        break;
+      case 'delegate_plan':
+        desc = '<b>' + (data.agent || '') + '</b> created its plan';
+        break;
+      case 'tool_result':
+        desc = '<b>' + (data.agent || '') + '</b> queried <i>' +
+               (data.tool || '') + '</i> (' + (data.chars || 0) + ' chars)';
+        break;
+      case 'delegate_done':
+        desc = '<b>' + (data.agent || '') + '</b> finished (' +
+               (data.chars || 0) + ' chars)';
+        break;
+      case 'synthesizing':
+        desc = '<b>' + (data.agent || '') + '</b> is synthesizing the final answer';
+        break;
+      default:
+        desc = JSON.stringify(data);
+    }}
+
+    let detail = '';
+    if ((data.type === 'planning' || data.type === 'delegate_plan') && data.content) {{
+      detail = data.content;
+    }} else if (data.type === 'delegate_start' && Array.isArray(data.tasks) && data.tasks.length) {{
+      detail = data.tasks.map(function(t, i) {{ return (i + 1) + '. ' + t; }}).join('\\n');
+    }} else if (data.type === 'tool_result' && data.content) {{
+      detail = data.content;
+    }}
+
+    const item = document.createElement('div');
+    item.className = 'activity-item' + (detail ? ' expandable' : '');
+    const bodyEl = document.createElement('span');
+    bodyEl.className = 'activity-item-body';
+    bodyEl.innerHTML = desc;
+
+    if (detail) {{
+      const detailEl = document.createElement('div');
+      detailEl.className = 'activity-detail';
+      detailEl.textContent = detail;
+      bodyEl.appendChild(detailEl);
+      item.addEventListener('click', function() {{
+        item.classList.toggle('expanded');
+      }});
+    }}
+
+    item.innerHTML = '<span class="activity-item-icon">' + icon + '</span>';
+    item.appendChild(bodyEl);
+    _activityItems.appendChild(item);
+    _activityItems.scrollTop = _activityItems.scrollHeight;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }}
+
+  function collapseActivityPanel() {{
+    if (!_activityPanel) return;
+    const elapsed = _activityStartTs
+      ? Math.round((Date.now() - _activityStartTs) / 1000)
+      : 0;
+    const hdr = _activityPanel.querySelector('.activity-header span');
+    if (hdr) hdr.textContent = 'Processed in ' + elapsed + 's — click to expand';
+    _activityPanel.classList.add('collapsed');
+  }}
+
+  function resetActivityPanel() {{
+    _activityPanel = null;
+    _activityItems = null;
+    _activityHeader = null;
+    _activityStartTs = null;
   }}
 
   function showHumanInputModal(title, message) {{
@@ -2490,7 +3038,7 @@ def embed_chatbot_html(request, project_id):
         currentExecutionId = data.execution_id;
       }} else if (data.status === 'success') {{
         const reply = data.response || '(No response)';
-        appendMessage('assistant', reply);
+        appendMessage('assistant', reply, false, data.citations);
         messages.push({{ role: 'assistant', content: reply }});
         statusEl.textContent = '';
         currentExecutionId = null;
@@ -2550,8 +3098,13 @@ def embed_chatbot_html(request, project_id):
             try {{
               const data = JSON.parse(line.slice(6));
               
-              if (data.type === 'content') {{
+              if (data.type === 'planning' || data.type === 'delegate_start' ||
+                  data.type === 'delegate_plan' || data.type === 'tool_result' ||
+                  data.type === 'delegate_done' || data.type === 'synthesizing') {{
+                showActivityItem(data);
+              }} else if (data.type === 'content') {{
                 if (!thinkingHidden) {{
+                  collapseActivityPanel();
                   hideThinkingIndicator();
                   thinkingHidden = true;
                   msg = document.createElement('div');
@@ -2579,8 +3132,25 @@ def embed_chatbot_html(request, project_id):
                 appendMessage('assistant', 'Error: ' + (data.error || 'Unexpected error'));
                 return;
               }} else if (data.type === 'done') {{
-                messages.push({{ role: 'assistant', content: accumulatedContent }});
+                collapseActivityPanel();
+                // Always clean the streamed text (strip citations block + heading)
+                const parsed = parseCitations(accumulatedContent);
+                let cleanContent = parsed.cleanText;
+                let citations = [];
+                if (Array.isArray(data.citations) && data.citations.length > 0) {{
+                  citations = data.citations;
+                }} else {{
+                  citations = parsed.citations;
+                }}
+                _chatCitations = citations;
+                if (markdownEl) {{
+                  markdownEl.innerHTML = citations.length > 0
+                    ? renderCitationChips(renderMarkdown(cleanContent), citations)
+                    : renderMarkdown(cleanContent);
+                }}
+                messages.push({{ role: 'assistant', content: cleanContent }});
                 statusEl.textContent = '';
+                resetActivityPanel();
                 return;
               }}
             }} catch (e) {{
@@ -2592,6 +3162,8 @@ def embed_chatbot_html(request, project_id):
     }} catch (e) {{
       console.error('Chat error:', e);
       hideThinkingIndicator();
+      collapseActivityPanel();
+      resetActivityPanel();
       appendMessage('assistant', 'Sorry, there was a connection problem.');
       statusEl.textContent = '';
     }} finally {{
@@ -2619,9 +3191,13 @@ def embed_chatbot_html(request, project_id):
     }}
   }});
 
-  // Initial greeting
-  appendMessage('assistant', INITIAL_GREETING);
-  messages.push({{ role: 'assistant', content: INITIAL_GREETING }});
+  // Show default greeting only after preload — and only if this session has no stored history yet
+  preloadPromise.then(() => {{
+    if (messages.length === 0) {{
+      appendMessage('assistant', INITIAL_GREETING);
+      messages.push({{ role: 'assistant', content: INITIAL_GREETING }});
+    }}
+  }});
 </script>
 </body>
 </html>'''

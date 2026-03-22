@@ -397,6 +397,107 @@ class LLMFileUploadService:
         
         return True, "Supported"
 
+    async def delete_file(self, provider: str, file_id: str) -> Dict[str, str]:
+        """
+        Delete a file from the given LLM provider's Files API.
+        
+        This is used for node-level attachments where we store the provider
+        file_id directly in the workflow graph.
+        """
+        if not file_id:
+            return {"error": "Missing file_id", "reason": "missing_file_id"}
+        
+        # Normalize provider names
+        normalized = (provider or "").lower()
+        if normalized == "gemini":
+            normalized = "google"
+        
+        # Get API key first; if missing, report an error
+        api_key = await self._get_api_key(normalized)
+        if not api_key:
+            msg = f"No API key configured for {normalized}"
+            logger.warning(f"⚠️ LLM FILE SERVICE: {msg} (delete_file)")
+            return {"error": msg, "reason": "no_api_key"}
+        
+        try:
+            if normalized == "openai":
+                return await self._delete_openai_file(file_id, api_key)
+            if normalized == "anthropic":
+                return await self._delete_anthropic_file(file_id, api_key)
+            if normalized == "google":
+                return await self._delete_google_file(file_id, api_key)
+            msg = f"Unknown provider: {normalized}"
+            logger.error(f"❌ LLM FILE SERVICE: {msg} (delete_file)")
+            return {"error": msg, "reason": "unknown_provider"}
+        except Exception as e:
+            logger.error(f"❌ LLM FILE SERVICE: Delete failed for provider={normalized}, file_id={file_id}: {e}")
+            return {"error": str(e), "reason": "provider_error"}
+
+    async def _delete_openai_file(self, file_id: str, api_key: str) -> Dict[str, str]:
+        """
+        Delete a file from OpenAI Files API.
+        
+        Uses: DELETE /v1/files/{file_id}
+        Docs: https://developers.openai.com/api/reference/resources/files/methods/delete
+        """
+        try:
+            from openai import OpenAI
+            
+            client = OpenAI(api_key=api_key)
+            response = await sync_to_async(client.files.delete)(file_id)
+            # OpenAI returns an object with id, deleted, object
+            if getattr(response, "deleted", False):
+                logger.info(f"🗑️ LLM FILE SERVICE: Deleted OpenAI file {file_id}")
+                return {"status": "deleted", "id": getattr(response, "id", file_id)}
+            logger.warning(f"⚠️ LLM FILE SERVICE: OpenAI delete did not confirm deletion for {file_id}: {response}")
+            return {"error": "OpenAI did not confirm deletion", "reason": "not_deleted"}
+        except Exception as e:
+            logger.error(f"❌ LLM FILE SERVICE: OpenAI delete failed for {file_id}: {e}")
+            return {"error": str(e), "reason": "provider_error"}
+
+    async def _delete_anthropic_file(self, file_id: str, api_key: str) -> Dict[str, str]:
+        """
+        Delete a file from Anthropic Files API (beta).
+        
+        Uses: client.beta.files.delete(file_id=...)
+        Docs: https://platform.claude.com/docs/en/api/python/beta/files/delete
+        """
+        try:
+            import anthropic
+            
+            client = anthropic.Anthropic(api_key=api_key)
+            response = await sync_to_async(client.beta.files.delete)(file_id=file_id)
+            deleted_id = getattr(response, "id", file_id)
+            logger.info(f"🗑️ LLM FILE SERVICE: Deleted Anthropic file {deleted_id}")
+            return {"status": "deleted", "id": deleted_id}
+        except Exception as e:
+            logger.error(f"❌ LLM FILE SERVICE: Anthropic delete failed for {file_id}: {e}")
+            return {"error": str(e), "reason": "provider_error"}
+
+    async def _delete_google_file(self, file_id: str, api_key: str) -> Dict[str, str]:
+        """
+        Delete a file from Google/Gemini Files API.
+        
+        Uses: genai.Client().files.delete(name=...)
+        Docs: https://ai.google.dev/gemini-api/docs/files
+        
+        Note: For Google/Gemini, we currently store the file URI as file_id.
+        The python-genai client accepts the file name; in many cases the URI
+        is also accepted as the identifier. If this ever fails in practice,
+        we can extend node-level attachments to store both uri and name.
+        """
+        try:
+            from google import genai
+            
+            client = genai.Client(api_key=api_key)
+            # Best effort: treat stored file_id as the name/identifier
+            await sync_to_async(client.files.delete)(name=file_id)
+            logger.info(f"🗑️ LLM FILE SERVICE: Deleted Google/Gemini file {file_id}")
+            return {"status": "deleted", "id": file_id}
+        except Exception as e:
+            logger.error(f"❌ LLM FILE SERVICE: Google/Gemini delete failed for {file_id}: {e}")
+            return {"error": str(e), "reason": "provider_error"}
+
 
 # Synchronous wrapper functions for use in non-async contexts
 def upload_document_sync(project: IntelliDocProject, document: ProjectDocument, providers: list = None) -> Dict[str, str]:

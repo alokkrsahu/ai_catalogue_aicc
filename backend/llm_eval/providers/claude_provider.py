@@ -75,6 +75,20 @@ class ClaudeProvider(LLMProvider):
                 body["system"] = system_message_content
             if stream:
                 body["stream"] = True
+            tools = kwargs.get("tools")
+            if tools:
+                anthropic_tools = []
+                for tool in tools:
+                    fn = tool.get("function", {})
+                    anthropic_tools.append({
+                        "name": fn.get("name", ""),
+                        "description": fn.get("description", ""),
+                        "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+                    })
+                body["tools"] = anthropic_tools
+                tool_choice = kwargs.get("tool_choice")
+                if tool_choice:
+                    body["tool_choice"] = tool_choice
             return body
         elif prompt:
             # Fallback to prompt string (backward compatibility)
@@ -90,49 +104,56 @@ class ClaudeProvider(LLMProvider):
             raise ValueError("Either 'prompt' or 'messages' must be provided")
     
     def parse_response(self, response_data: Dict[str, Any]) -> tuple[str, Optional[int]]:
-        # Safely extract text content with proper error handling
         try:
             content = response_data.get("content", [])
             stop_reason = response_data.get("stop_reason")
             usage = response_data.get("usage", {})
             output_tokens = usage.get("output_tokens", 0)
             
-            # Log detailed response info for debugging
             logger.debug(f"🔍 CLAUDE PARSE: content length={len(content)}, stop_reason={stop_reason}, output_tokens={output_tokens}")
             
+            # Detect tool_use blocks
+            tool_use_blocks = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+            if tool_use_blocks and stop_reason in ("tool_use", "end_turn"):
+                normalized = []
+                for tb in tool_use_blocks:
+                    normalized.append({
+                        "id": tb.get("id", ""),
+                        "name": tb.get("name", ""),
+                        "arguments": tb.get("input", {}),
+                    })
+                self._last_tool_calls = normalized
+                self._last_finish_reason = stop_reason
+                text_parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+                token_count = response_data.get("usage", {}).get("output_tokens")
+                return "".join(text_parts), token_count
+            
+            self._last_tool_calls = None
+            self._last_finish_reason = stop_reason
+            
             if not content:
-                # Content is empty - check if this is expected based on stop_reason
                 if stop_reason == "content_filtered":
                     raise ValueError("Response was filtered by content safety filters")
                 elif stop_reason == "max_tokens":
                     raise ValueError("Response was truncated due to max_tokens limit")
                 elif output_tokens > 0:
-                    # This is unusual: we have output tokens but no content
-                    # This can happen if Claude generated content but it was filtered or not included
-                    # Log this as a warning and return a default message to allow workflow to continue
                     logger.warning(f"⚠️ CLAUDE PARSE: Empty content but output_tokens={output_tokens}, stop_reason={stop_reason}")
-                    logger.warning(f"⚠️ CLAUDE PARSE: This may indicate content filtering or API issue. Returning default message.")
-                    # Return a default message instead of empty string to allow workflow to continue
                     default_message = "I apologize, but I was unable to generate a response. This may be due to content filtering or an API issue."
                     return default_message, output_tokens
                 else:
                     raise ValueError(f"No content in response. Stop reason: {stop_reason}")
             
-            # Extract text from first content block
             first_content = content[0]
             if not isinstance(first_content, dict):
                 raise ValueError(f"Expected content block to be a dict, got {type(first_content)}")
             
-            # Check content block type
             content_type = first_content.get("type")
             if content_type != "text":
                 raise ValueError(f"Unsupported content type: {content_type}. Expected 'text'")
             
             text = first_content.get("text")
             
-            # Handle None or empty content
             if text is None:
-                # Check for stop_reason to understand why content is None
                 if stop_reason == "max_tokens":
                     raise ValueError("Response was truncated due to max_tokens limit")
                 elif stop_reason == "stop_sequence":
@@ -144,17 +165,14 @@ class ClaudeProvider(LLMProvider):
                 else:
                     raise ValueError("Response text is None without stop_reason")
             
-            # Ensure text is a string
             text = str(text) if text is not None else ""
             
             if not text.strip():
-                # Empty text after stripping whitespace
                 if output_tokens > 0:
                     logger.warning(f"⚠️ CLAUDE PARSE: Empty text but output_tokens={output_tokens}")
                 raise ValueError(f"Response text is empty or whitespace only. Stop reason: {stop_reason}")
             
         except (KeyError, IndexError, ValueError) as e:
-            # Log full response for debugging
             logger.error(f"❌ CLAUDE PARSE: Error parsing response: {e}")
             logger.error(f"❌ CLAUDE PARSE: Full response data: {response_data}")
             raise ValueError(f"Failed to parse Claude response: {e}. Response data: {response_data}")
@@ -186,6 +204,8 @@ class ClaudeProvider(LLMProvider):
             )
         
         try:
+            self._last_tool_calls = None
+            self._last_finish_reason = None
             request_body = self.format_request_body(prompt=prompt, messages=messages, **kwargs)
             logger.info(f"🔍 CLAUDE REQUEST: Model={self.model}, Body keys={list(request_body.keys())}")
             if messages:
@@ -226,7 +246,21 @@ class ClaudeProvider(LLMProvider):
                         try:
                             text, token_count = self.parse_response(data)
                             
-                            # Double-check that text is not empty after parsing
+                            parsed_tool_calls = getattr(self, '_last_tool_calls', None)
+                            parsed_finish_reason = getattr(self, '_last_finish_reason', None)
+                            
+                            if parsed_tool_calls:
+                                return LLMResponse(
+                                    text=text or "",
+                                    model=self.model,
+                                    provider="claude",
+                                    response_time_ms=response_time_ms,
+                                    token_count=token_count,
+                                    cost_estimate=self.estimate_cost(token_count),
+                                    tool_calls=parsed_tool_calls,
+                                    finish_reason=parsed_finish_reason,
+                                )
+                            
                             if not text or not text.strip():
                                 error_msg = "Claude API returned empty response content"
                                 logger.warning(f"⚠️ CLAUDE: {error_msg}. Response data: {data}")
@@ -244,10 +278,10 @@ class ClaudeProvider(LLMProvider):
                                 provider="claude",
                                 response_time_ms=response_time_ms,
                                 token_count=token_count,
-                                cost_estimate=self.estimate_cost(token_count)
+                                cost_estimate=self.estimate_cost(token_count),
+                                finish_reason=parsed_finish_reason,
                             )
                         except ValueError as parse_error:
-                            # parse_response raised an error - return it as error
                             return LLMResponse(
                                 text="",
                                 model=self.model,

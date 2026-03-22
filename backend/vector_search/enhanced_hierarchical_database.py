@@ -121,10 +121,6 @@ class EnhancedHierarchicalVectorDatabase:
 
             for i, chunk in enumerate(doc_info.chunks):
                 try:
-                    # Extract summary and topic values (may be None if summary disabled)
-                    summary_value = chunk.metadata.get('summary')
-                    topic_value = chunk.metadata.get('topic')
-                    
                     # Prepare chunk info for the real database
                     chunk_doc_info = {
                         'document_id': chunk.parent_document_id,
@@ -140,18 +136,6 @@ class EnhancedHierarchicalVectorDatabase:
 
                         # Enhanced metadata
                         'metadata': chunk.metadata,
-
-                        # Summary fields - handle None values when summary is disabled
-                        'summary': summary_value if summary_value else None,
-                        'summary_word_count': len(summary_value.split()) if summary_value else 0,
-                        'summary_generated_at': datetime.now().isoformat() if summary_value else None,
-                        'summarizer_used': 'multi_provider_summarizer' if summary_value else 'none',
-
-                        # Topic fields - handle None values when summary is disabled
-                        'topic': topic_value if topic_value else None,
-                        'topic_word_count': len(topic_value.split()) if topic_value else 0,
-                        'topic_generated_at': datetime.now().isoformat() if topic_value else None,
-                        'topic_generator_used': 'multi_provider_summarizer' if topic_value else 'none',
 
                         # Hierarchical fields
                         'hierarchy_level': doc_metadata['hierarchy_level'],

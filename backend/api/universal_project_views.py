@@ -51,6 +51,40 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
     serializer_class = IntelliDocProjectSerializer
     permission_classes = [IsAuthenticated]
     lookup_field = 'project_id'
+
+    def _mark_vector_collection_stale(self, project):
+        """
+        Mark vector status as stale after document corpus changes (upload/delete).
+        This prevents old COMPLETED status from being shown for a changed corpus.
+        """
+        try:
+            from users.models import ProjectVectorCollection, VectorProcessingStatus
+
+            collection = ProjectVectorCollection.objects.filter(project=project).first()
+            if not collection:
+                return
+
+            collection.status = VectorProcessingStatus.PENDING
+            collection.error_message = ''
+            collection.total_documents = project.documents.count()
+            collection.processed_documents = 0
+            collection.failed_documents = 0
+            collection.save(
+                update_fields=[
+                    'status',
+                    'error_message',
+                    'total_documents',
+                    'processed_documents',
+                    'failed_documents',
+                    'updated_at',
+                ]
+            )
+        except Exception as e:
+            logger.warning(
+                "⚠️ UNIVERSAL: Failed to mark vector collection stale for project %s: %s",
+                getattr(project, 'project_id', None),
+                e,
+            )
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -710,6 +744,7 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                 document.file_path = saved_path
                 document.upload_status = 'ready'
                 document.save()
+                self._mark_vector_collection_stale(project)
                 
                 serializer = ProjectDocumentSerializer(document)
                 return Response({
@@ -751,6 +786,7 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                         document.file_path = saved_path
                         document.upload_status = 'ready'
                         document.save()
+                        self._mark_vector_collection_stale(project)
                         
                         uploaded_documents.append(ProjectDocumentSerializer(document).data)
                         
@@ -883,6 +919,7 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                                 document.file_path = saved_path
                                 document.upload_status = 'ready'
                                 document.save()
+                                self._mark_vector_collection_stale(project)
                                 
                                 uploaded_documents.append(ProjectDocumentSerializer(document).data)
                                 extracted_files_info.append({
@@ -1139,7 +1176,7 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
 
         # Extract LLM configuration from request
         llm_provider = request.data.get('llm_provider', 'openai')
-        llm_model = request.data.get('llm_model', 'gpt-3.5-turbo')
+        llm_model = request.data.get('llm_model', 'gpt-5.3-chat-latest')
         enable_summary = request.data.get('enable_summary', True)
 
         logger.info(f"🚀 UNIVERSAL: Delegating document processing for project {project.project_id}")
@@ -1190,8 +1227,8 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
         """
         Update the preserve_original_folder_structure setting for a project.
         
-        When enabled, uploaded folder structures are preserved instead of 
-        auto-classifying documents into categories.
+        When enabled, folder organization is driven by LLM-based decisions
+        (using per-document short summaries) instead of filename/path auto-classification.
         
         PATCH /api/projects/{project_id}/folder-structure-setting/
         Body: {"preserve_original_folder_structure": true/false}
@@ -1211,16 +1248,21 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
         if isinstance(preserve_original, str):
             preserve_original = preserve_original.lower() in ('true', '1', 'yes')
         
+        old_value = project.preserve_original_folder_structure
+
         # Update the project setting
         project.preserve_original_folder_structure = preserve_original
         project.save(update_fields=['preserve_original_folder_structure', 'updated_at'])
         
-        logger.info(f"📁 UNIVERSAL: Updated folder structure setting to {preserve_original} for project {project.name} ({project_id})")
+        logger.info(
+            "📁 UNIVERSAL: Folder structure setting changed %s -> %s for project %s (%s)",
+            old_value, preserve_original, project.name, project_id,
+        )
         
         return Response({
             "project_id": str(project.project_id),
             "preserve_original_folder_structure": project.preserve_original_folder_structure,
-            "message": f"Folder structure setting updated. {'Original structure will be preserved' if preserve_original else 'Auto-classification will be used'}.",
+            "message": f"Folder structure setting updated. {'LLM-based folder organization will be used' if preserve_original else 'Filename/path auto-classification will be used'}.",
             "api_version": "universal_v1"
         })
     
@@ -1245,13 +1287,40 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                 # Fallback to integer id if UUID lookup fails
                 document = project.documents.get(id=document_id)
             document_name = document.original_filename
-            
+            doc_uuid = str(document.document_id)
+
+            # Clean up related DB records before deleting the document
+            from users.models import DocumentVectorStatus, ProjectDocumentSummary, ProjectDocumentFolderOrganization
+            dvs_deleted, _ = DocumentVectorStatus.objects.filter(document=document).delete()
+            sum_deleted, _ = ProjectDocumentSummary.objects.filter(document=document).delete()
+            forg_deleted, _ = ProjectDocumentFolderOrganization.objects.filter(document=document).delete()
+            if dvs_deleted or sum_deleted or forg_deleted:
+                logger.info(
+                    "🗑️ UNIVERSAL: Cleaned up related records for %s "
+                    "(vector_status=%d, summaries=%d, folder_org=%d)",
+                    document_name, dvs_deleted, sum_deleted, forg_deleted,
+                )
+
+            # Delete vectors from Milvus so the hierarchical_paths endpoint
+            # no longer returns stale entries for this document.
+            try:
+                from vector_search.enhanced_hierarchical_database import EnhancedHierarchicalVectorDatabase
+                vector_db = EnhancedHierarchicalVectorDatabase(str(project.project_id))
+                vector_db.delete_document_and_chunks(doc_uuid)
+                logger.info("🗑️ UNIVERSAL: Deleted Milvus vectors for document %s", document_name)
+            except Exception as vec_err:
+                logger.warning(
+                    "⚠️ UNIVERSAL: Failed to delete Milvus vectors for doc %s: %s",
+                    doc_uuid, vec_err,
+                )
+
             # Delete the file from storage if it exists
             if document.file_path and default_storage.exists(document.file_path):
                 default_storage.delete(document.file_path)
             
             # Delete the database record
             document.delete()
+            self._mark_vector_collection_stale(project)
             
             logger.info(f"🗑️ UNIVERSAL: Deleted document {document_name} from project {project_id}")
             

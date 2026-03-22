@@ -87,7 +87,7 @@ class ConversationOrchestrator:
     # MAIN API METHODS - Primary interfaces used by the application
     # ============================================================================
     
-    async def execute_workflow(self, workflow: AgentWorkflow, executed_by, deployment_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def execute_workflow(self, workflow: AgentWorkflow, executed_by, deployment_context: Optional[Dict[str, Any]] = None, event_callback=None) -> Dict[str, Any]:
         """
         Execute the complete workflow with REAL LLM calls and conversation chaining
         
@@ -95,11 +95,12 @@ class ConversationOrchestrator:
             workflow: The AgentWorkflow instance to execute
             executed_by: User who initiated the execution
             deployment_context: Optional deployment context with user query for UserProxyAgent handling
+            event_callback: Optional callback for streaming intermediate events
             
         Returns:
             Dict containing execution results, conversation history, and metadata
         """
-        return await self.workflow_executor.execute_workflow(workflow, executed_by, deployment_context=deployment_context)
+        return await self.workflow_executor.execute_workflow(workflow, executed_by, deployment_context=deployment_context, event_callback=event_callback)
     
     async def resume_workflow_with_human_input(self, execution_id: str, human_input: str, user):
         """
@@ -152,7 +153,7 @@ class ConversationOrchestrator:
         """
         return self.workflow_parser.find_multiple_inputs_to_node(target_node_id, graph_json)
     
-    def aggregate_multiple_inputs(self, input_sources: List[Dict[str, Any]], executed_nodes: Dict[str, str]) -> Dict[str, Any]:
+    def aggregate_multiple_inputs(self, input_sources: List[Dict[str, Any]], executed_nodes: Dict[str, Any]) -> Dict[str, Any]:
         """
         Aggregate multiple input sources into structured context
         Delegates to WorkflowParser for actual implementation
@@ -183,10 +184,10 @@ class ConversationOrchestrator:
         """
         return await self.chat_manager.craft_conversation_prompt(conversation_history, agent_node, project_id)
     
-    async def execute_group_chat_manager(self, chat_manager_node: Dict[str, Any], llm_provider, conversation_history: str, execution_sequence: List[Dict[str, Any]], graph_json: Dict[str, Any]) -> str:
+    async def execute_group_chat_manager(self, chat_manager_node: Dict[str, Any], llm_provider, conversation_history: str, execution_sequence: List[Dict[str, Any]], graph_json: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Execute GroupChatManager with delegate processing
-        Delegates to ChatManager for actual implementation
+        Execute GroupChatManager with tool-based delegation.
+        Delegates to ChatManager for actual implementation.
         """
         return await self.chat_manager.execute_group_chat_manager(
             chat_manager_node, llm_provider, conversation_history, execution_sequence, graph_json

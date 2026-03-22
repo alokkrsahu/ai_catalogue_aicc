@@ -30,6 +30,8 @@
   export let modelsLoaded: boolean = false; // Whether models are loaded
   export let hierarchicalPaths: any[] = []; // Hierarchical paths for Content Filter
   export let hierarchicalPathsLoaded: boolean = false; // Whether hierarchical paths are loaded
+  export let uploadedDocumentPaths: any[] = []; // Uploaded-file tree for node File Attachments picker
+  export let uploadedDocumentPathsLoaded: boolean = false;
   export let documentsInfo: any = null; // Document and processing status info
   // Per-document LLM upload status from backend/docaware_views.hierarchical_paths
   // Shape: documentLlmStatus[filename][provider] = { status: string, reason?: string }
@@ -117,18 +119,7 @@
         console.log('🤖 LLM CONFIG: Initialized default config for', node.type, nodeConfig.llm_provider, nodeConfig.llm_model);
       }
       
-      // Set Group Chat Manager defaults
-      if (node.type === 'GroupChatManager') {
-        if (!nodeConfig.max_rounds) {
-          nodeConfig.max_rounds = 10; // Default for Round Robin, Intelligent will override to 1
-        }
-        if (!nodeConfig.termination_strategy) {
-          nodeConfig.termination_strategy = 'all_delegates_complete';
-        }
-        if (!nodeConfig.hasOwnProperty('max_subqueries')) {
-          nodeConfig.max_subqueries = null; // Default: no limit
-        }
-      }
+      // GroupChatManager uses tool-based delegation — no round-robin/intelligent config needed
     } else if (node.type === 'UserProxyAgent') {
       // UserProxyAgent only gets LLM configuration if DocAware is enabled
       if (nodeConfig.doc_aware && !nodeConfig.llm_provider) {
@@ -159,6 +150,18 @@
         nodeConfig.rag_relevance_threshold = 0.7;
         nodeConfig.query_refinement_enabled = false;
         console.log('📚 RAG CONFIG: Initialized default RAG config for', node.type);
+      }
+
+      // Initialize Document Tool Calling default
+      if (['AssistantAgent', 'DelegateAgent'].includes(node.type) && !nodeConfig.hasOwnProperty('doc_tool_calling')) {
+        nodeConfig.doc_tool_calling = false;
+      }
+      // Initialize doc_tool_calling_documents only for new nodes (not for existing nodes that
+      // already have doc_tool_calling enabled but no selection — those fall back to all docs)
+      if (['AssistantAgent', 'DelegateAgent'].includes(node.type)
+          && !nodeConfig.hasOwnProperty('doc_tool_calling_documents')
+          && !nodeConfig.doc_tool_calling) {
+        nodeConfig.doc_tool_calling_documents = [];
       }
       
       // Initialize query_refinement_enabled if not present (for existing nodes)
@@ -607,6 +610,121 @@
       ...nodeConfig.inline_file_attachments.slice(0, index),
       ...nodeConfig.inline_file_attachments.slice(index + 1),
     ];
+    nodeConfig = { ...nodeConfig };
+    updateNodeData();
+  }
+
+  // --- Uploaded Project Document Attachment Picker (pre-processing support) ---
+  // `uploadedDocumentPaths` comes from backend `uploaded_hierarchical_paths` and
+  // is based on *uploaded* ProjectDocument.original_filename (not Milvus).
+  $: uploadedFileItems = (uploadedDocumentPaths || []).filter((p) => p?.type === 'file');
+  $: uploadedFolderItems = (uploadedDocumentPaths || []).filter((p) => p?.type === 'folder');
+  $: uploadedAttachmentItemsForRender = (() => {
+    const items = [
+      ...(uploadedFolderItems || []),
+      ...(uploadedFileItems || [])
+    ];
+
+    items.sort((a: any, b: any) => {
+      const da = uploadedPathDepth(a?.path || '');
+      const db = uploadedPathDepth(b?.path || '');
+      if (da !== db) return da - db;
+
+      // Keep folders before files at the same depth
+      if (a?.type !== b?.type) return a?.type === 'folder' ? -1 : 1;
+
+      return (a?.displayName || '').localeCompare(b?.displayName || '');
+    });
+
+    return items;
+  })();
+
+  function uploadedPathDepth(path: string): number {
+    if (!path) return 0;
+    return path.split('/').filter(Boolean).length;
+  }
+
+  function filesUnderUploadedFolder(folderPath: string): string[] {
+    const fp = folderPath || '';
+    if (!fp) return [];
+
+    const prefix = `${fp}/`;
+    return uploadedFileItems
+      .filter((f) => {
+        const fPath = f?.path || '';
+        return fPath === fp || fPath.startsWith(prefix);
+      })
+      .map((f) => f?.name)
+      .filter(Boolean);
+  }
+
+  function isFileSelected(fileName: string): boolean {
+    return (nodeConfig.file_attachment_documents || []).includes(fileName);
+  }
+
+  function isFolderFullySelected(folderPath: string): boolean {
+    const files = filesUnderUploadedFolder(folderPath);
+    if (files.length === 0) return false;
+    const selected = new Set(nodeConfig.file_attachment_documents || []);
+    return files.every((n) => selected.has(n));
+  }
+
+  function toggleFileSelection(fileName: string, checked: boolean) {
+    const selected = new Set(nodeConfig.file_attachment_documents || []);
+    if (checked) selected.add(fileName);
+    else selected.delete(fileName);
+    nodeConfig.file_attachment_documents = Array.from(selected);
+    nodeConfig = { ...nodeConfig };
+    updateNodeData();
+  }
+
+  function toggleFolderSelection(folderPath: string, checked: boolean) {
+    const descendants = filesUnderUploadedFolder(folderPath);
+    const selected = new Set(nodeConfig.file_attachment_documents || []);
+
+    if (checked) {
+      for (const name of descendants) selected.add(name);
+    } else {
+      for (const name of descendants) selected.delete(name);
+    }
+
+    nodeConfig.file_attachment_documents = Array.from(selected);
+    nodeConfig = { ...nodeConfig };
+    updateNodeData();
+  }
+
+  // ── Document Tool Calling document selection helpers ──────────────
+  function isDocToolFileSelected(fileName: string): boolean {
+    return (nodeConfig.doc_tool_calling_documents || []).includes(fileName);
+  }
+
+  function isDocToolFolderFullySelected(folderPath: string): boolean {
+    const files = filesUnderUploadedFolder(folderPath);
+    if (files.length === 0) return false;
+    const selected = new Set(nodeConfig.doc_tool_calling_documents || []);
+    return files.every((n) => selected.has(n));
+  }
+
+  function toggleDocToolFileSelection(fileName: string, checked: boolean) {
+    const selected = new Set(nodeConfig.doc_tool_calling_documents || []);
+    if (checked) selected.add(fileName);
+    else selected.delete(fileName);
+    nodeConfig.doc_tool_calling_documents = Array.from(selected);
+    nodeConfig = { ...nodeConfig };
+    updateNodeData();
+  }
+
+  function toggleDocToolFolderSelection(folderPath: string, checked: boolean) {
+    const descendants = filesUnderUploadedFolder(folderPath);
+    const selected = new Set(nodeConfig.doc_tool_calling_documents || []);
+
+    if (checked) {
+      for (const name of descendants) selected.add(name);
+    } else {
+      for (const name of descendants) selected.delete(name);
+    }
+
+    nodeConfig.doc_tool_calling_documents = Array.from(selected);
     nodeConfig = { ...nodeConfig };
     updateNodeData();
   }
@@ -1879,133 +1997,14 @@
       
       <!-- TEMPERATURE AND MAX TOKENS/MAX ROUNDS - Different layout for GroupChatManager -->
       {#if node.type === 'GroupChatManager'}
-        <!-- Delegation Mode -->
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-2">
-            Delegation Mode
-            <i class="fas fa-info-circle ml-1 text-gray-400" title="Choose how tasks are delegated to delegate agents"></i>
-          </label>
-          <select
-            bind:value={nodeConfig.delegation_mode}
-            on:change={updateNodeData}
-            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20 bg-white"
-          >
-            <option value="round_robin">Round Robin (Default)</option>
-            <option value="intelligent">Intelligent Delegation</option>
-          </select>
-          <p class="text-xs text-gray-500 mt-1">
-            {#if nodeConfig.delegation_mode === 'intelligent'}
-              <i class="fas fa-lightbulb text-yellow-500 mr-1"></i>
-              Intelligent mode splits input into subqueries and routes them to delegates based on their capabilities.
-            {:else}
-              Round robin mode processes all delegates in sequence for each round.
-            {/if}
+        <!-- Delegation uses tool-based routing (no user-facing config needed) -->
+        <div class="p-3 bg-indigo-50 border border-indigo-200 rounded-lg">
+          <p class="text-xs text-indigo-700">
+            <i class="fas fa-magic mr-1"></i>
+            Delegation uses tool-based routing: the manager creates a plan, then
+            dispatches tasks to delegates via tool calls based on their descriptions.
           </p>
         </div>
-        
-        <!-- Round Robin Configuration (only shown when round_robin mode is selected or default) -->
-        {#if !nodeConfig.delegation_mode || nodeConfig.delegation_mode === 'round_robin'}
-          <div class="p-3 bg-green-50 border border-green-200 rounded-lg space-y-3">
-            <h4 class="text-sm font-semibold text-green-900">Round Robin Settings</h4>
-            
-            <!-- Max Iterations -->
-            <div>
-              <label class="block text-xs font-medium text-gray-700 mb-1">Max Iterations</label>
-              <input
-                type="number"
-                bind:value={nodeConfig.max_iterations}
-                on:input={updateNodeData}
-                min="1"
-                max="20"
-                class="w-full px-2 py-1 border border-gray-300 rounded text-xs"
-                placeholder="2"
-              />
-              <p class="text-xs text-gray-500 mt-1">
-                Maximum number of iterations each delegate will execute in Round Robin mode. Default: 2
-              </p>
-            </div>
-          </div>
-        {/if}
-        
-        <!-- Intelligent Delegation Configuration (only shown when intelligent mode is selected) -->
-        {#if nodeConfig.delegation_mode === 'intelligent'}
-          <div class="p-3 bg-blue-50 border border-blue-200 rounded-lg space-y-3">
-            <h4 class="text-sm font-semibold text-blue-900">Intelligent Delegation Settings</h4>
-            
-            <!-- Max Subqueries -->
-            <div>
-              <label class="block text-xs font-medium text-gray-700 mb-1">
-                Max Subqueries
-                <i class="fas fa-info-circle ml-1 text-gray-400" title="Maximum number of subqueries to generate. Leave empty for no limit."></i>
-              </label>
-              <input
-                type="number"
-                min="1"
-                max="50"
-                bind:value={nodeConfig.max_subqueries}
-                on:input={updateNodeData}
-                placeholder="No limit"
-                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20 bg-white"
-              />
-              <p class="text-xs text-gray-500 mt-1">
-                Limit the number of subqueries generated from the input. Higher priority subqueries are kept when limit is applied. Leave empty for no limit.
-              </p>
-            </div>
-            
-            <!-- Confidence Threshold -->
-            <div>
-              <label class="block text-xs font-medium text-gray-700 mb-1">
-                Confidence Threshold: {nodeConfig.delegation_confidence_threshold || 0.7}
-              </label>
-              <input
-                type="range"
-                bind:value={nodeConfig.delegation_confidence_threshold}
-                on:input={updateNodeData}
-                min="0"
-                max="1"
-                step="0.05"
-                class="w-full"
-              />
-              <p class="text-xs text-gray-500 mt-1">
-                Minimum confidence score (0.0-1.0) required to assign a subquery to a delegate. Lower values allow more flexible matching.
-              </p>
-            </div>
-            
-            <!-- Delegation Timeout -->
-            <div>
-              <label class="block text-xs font-medium text-gray-700 mb-1">Delegation Timeout (seconds)</label>
-              <input
-                type="number"
-                bind:value={nodeConfig.delegation_timeout}
-                on:input={updateNodeData}
-                min="5"
-                max="300"
-                class="w-full px-2 py-1 border border-gray-300 rounded text-xs"
-                placeholder="30"
-              />
-              <p class="text-xs text-gray-500 mt-1">
-                Maximum time to wait for a delegate response before timing out.
-              </p>
-            </div>
-            
-            <!-- Max Retries -->
-            <div>
-              <label class="block text-xs font-medium text-gray-700 mb-1">Max Retries</label>
-              <input
-                type="number"
-                bind:value={nodeConfig.max_delegation_retries}
-                on:input={updateNodeData}
-                min="0"
-                max="10"
-                class="w-full px-2 py-1 border border-gray-300 rounded text-xs"
-                placeholder="3"
-              />
-              <p class="text-xs text-gray-500 mt-1">
-                Maximum number of retry attempts for failed delegations.
-              </p>
-            </div>
-          </div>
-        {/if}
       {/if}
     {/if}
     
@@ -2019,44 +2018,20 @@
             <input
               type="checkbox"
               checked={nodeConfig.doc_aware}
-              on:change={async (e) => {
+              on:change={(e) => {
                 nodeConfig.doc_aware = e.target.checked;
                 
                 if (e.target.checked) {
-                  // When enabling DocAware, ensure we have search methods loaded
-                  if (availableSearchMethods.length === 0 && !loadingSearchMethods) {
-                    console.log('📚 DOCAWARE: Toggle enabled - loading search methods');
-                    await loadSearchMethods();
-                  }
-                  
-                  // Set default values
+                  nodeConfig.search_method = 'hybrid_search';
                   if (!nodeConfig.vector_collections || nodeConfig.vector_collections.length === 0) {
                     nodeConfig.vector_collections = ['project_documents'];
                   }
-                  
-                  // Set default search method after ensuring methods are loaded
-                  if (!nodeConfig.search_method && availableSearchMethods.length > 0) {
-                    nodeConfig.search_method = 'hybrid_search';
-                    await handleSearchMethodChange();
-                  } else if (!nodeConfig.search_method) {
-                    // If still no methods available, set fallback
-                    console.warn('📚 DOCAWARE: No search methods available, will retry when methods load');
-                  }
-                  
-                  // Set default LLM configuration when DocAware is enabled
                   if (!nodeConfig.llm_provider) {
                     nodeConfig.llm_provider = 'openai';
                     nodeConfig.llm_model = 'gpt-3.5-turbo';
                   }
                 } else {
-                  // When disabling DocAware, clear search configuration
                   nodeConfig.search_method = '';
-                  selectedSearchMethod = null;
-                  searchParameters = {};
-                  testSearchResults = null;
-                  expandedResults = new Set();
-                  
-                  // Clear LLM configuration when DocAware is disabled
                   nodeConfig.llm_provider = '';
                   nodeConfig.llm_model = '';
                   nodeConfig.system_message = '';
@@ -2106,22 +2081,57 @@
 
           <div class="mb-3">
             <label class="block text-xs font-medium text-gray-700 mb-1">Select Documents to Attach</label>
-            {#if hierarchicalPaths.length > 0}
-              <select
-                multiple
-                bind:value={nodeConfig.file_attachment_documents}
-                on:change={() => updateNodeData()}
-                class="w-full px-2 py-1 border border-gray-200 rounded text-xs focus:border-gray-500 focus:ring-1 focus:ring-gray-500 bg-white h-24"
-              >
-                {#each hierarchicalPaths.filter(p => p.type === 'file') as path}
-                  <option value={path.name}>{isDocReady(path.name) ? '✓' : '⚠'} {path.displayName || path.path}</option>
-                {/each}
-              </select>
-              <p class="text-xs text-gray-500 mt-1">Hold Ctrl/Cmd to select multiple documents</p>
-            {:else}
-              <div class="text-xs text-yellow-600 p-2 bg-yellow-50 rounded">
-                No processed project documents available to select. You can still upload a new file for this node below, or upload/process documents in the Project Documents section.
+            {#if !uploadedDocumentPathsLoaded}
+              <div class="w-full px-3 py-2 border border-blue-300 rounded-lg bg-blue-50 flex items-center justify-center">
+                <i class="fas fa-spinner fa-spin mr-2 text-blue-600"></i>
+                <span class="text-sm text-blue-700">Loading uploaded documents...</span>
               </div>
+            {:else if uploadedFileItems.length === 0}
+              <div class="text-xs text-yellow-600 p-2 bg-yellow-50 rounded">
+                No uploaded project documents available yet. Upload files in the Project Documents tab first.
+              </div>
+            {:else}
+              <div class="max-h-56 overflow-y-auto pr-1 space-y-1">
+                {#each uploadedAttachmentItemsForRender as item (item.id)}
+                  {#if item.type === 'folder'}
+                    {@const depth = uploadedPathDepth(item.path || '')}
+                    {@const fileCount = filesUnderUploadedFolder(item.path || '').length}
+                    <label
+                      class="flex items-center gap-2 text-xs px-2 py-1 rounded hover:bg-gray-100 cursor-pointer"
+                      style={`padding-left: ${depth * 12}px;`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isFolderFullySelected(item.path || '')}
+                        on:change={(e) => toggleFolderSelection(item.path || '', e.currentTarget.checked)}
+                      />
+                      <span class="truncate flex-1">📁 {item.displayName}</span>
+                      <span class="ml-auto text-[10px] px-2 py-0.5 rounded bg-gray-100 text-gray-600">
+                        {fileCount}
+                      </span>
+                    </label>
+                  {:else}
+                    {@const depth = uploadedPathDepth(item.path || '') + 1}
+                    <label
+                      class="flex items-center gap-2 text-xs px-2 py-1 rounded hover:bg-gray-100 cursor-pointer"
+                      style={`padding-left: ${depth * 12}px;`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isFileSelected(item.name)}
+                        on:change={(e) => toggleFileSelection(item.name, e.currentTarget.checked)}
+                      />
+                      <span class="truncate flex-1">📄 {item.displayName}</span>
+                      <span class="ml-auto text-[10px] uppercase tracking-wide bg-gray-200 text-gray-800 px-1.5 py-0.5 rounded">
+                        {isDocReady(item.name) ? 'Ready' : 'Pending'}
+                      </span>
+                    </label>
+                  {/if}
+                {/each}
+              </div>
+              <p class="text-xs text-gray-500 mt-1">
+                Checking a folder includes all descendant files (recursive).
+              </p>
             {/if}
           </div>
 
@@ -2414,284 +2424,6 @@
             placeholder="You are a helpful assistant that uses retrieved documents to answer user questions..."
           />
         </div>
-        
-        <!-- DOCAWARE CONFIGURATION - Show when DocAware is enabled for UserProxy -->
-        <div class="border border-blue-200 rounded-lg p-4 bg-blue-50">
-          <div class="flex items-center mb-3">
-            <i class="fas fa-book text-blue-600 mr-2"></i>
-            <h4 class="font-medium text-blue-900">Document Search Configuration</h4>
-          </div>
-          
-          <!-- Query Refinement Toggle -->
-          <div class="mb-4">
-            <div class="flex items-center justify-between">
-              <div>
-                <label class="text-sm font-medium text-gray-700">Query Refinement</label>
-                <p class="text-xs text-gray-500 mt-1">Use LLM to optimize search queries while preserving all key concepts</p>
-              </div>
-              <label class="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={nodeConfig.query_refinement_enabled || false}
-                  on:change={(e) => {
-                    nodeConfig.query_refinement_enabled = e.target.checked;
-                    updateNodeData();
-                  }}
-                  class="sr-only peer"
-                />
-                <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-              </label>
-            </div>
-          </div>
-          
-          <!-- Search Method Selection -->
-          <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-700 mb-2">Search Method</label>
-            {#if loadingSearchMethods}
-              <div class="w-full px-3 py-2 border border-blue-300 rounded-lg bg-blue-50 flex items-center justify-center">
-                <i class="fas fa-spinner fa-spin mr-2 text-blue-600"></i>
-                <span class="text-sm text-blue-700">Loading search methods...</span>
-              </div>
-            {:else if searchMethodsError}
-              <div class="w-full px-3 py-2 border border-red-300 rounded-lg bg-red-50">
-                <div class="text-red-700 text-sm flex items-center">
-                  <i class="fas fa-exclamation-triangle mr-2"></i>
-                  {searchMethodsError}
-                </div>
-                <button 
-                  class="mt-2 text-xs text-red-600 hover:text-red-800 underline flex items-center"
-                  on:click={() => loadSearchMethods()}
-                >
-                  <i class="fas fa-sync mr-1"></i>
-                  Retry Loading Search Methods
-                </button>
-              </div>
-            {:else if availableSearchMethods.length === 0}
-              <div class="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-yellow-50">
-                <div class="text-yellow-700 text-sm flex items-center">
-                  <i class="fas fa-exclamation-circle mr-2"></i>
-                  No search methods available. Check DocAware service configuration.
-                </div>
-                <button 
-                  class="mt-2 text-xs text-yellow-600 hover:text-yellow-800 underline flex items-center"
-                  on:click={() => loadSearchMethods()}
-                >
-                  <i class="fas fa-sync mr-1"></i>
-                  Retry Loading Search Methods
-                </button>
-              </div>
-            {:else}
-              <!-- Normal dropdown when methods are available -->
-              <select
-                bind:value={nodeConfig.search_method}
-                on:change={() => handleSearchMethodChange()}
-                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-blue-600 focus:ring-2 focus:ring-blue-600 focus:ring-opacity-20 bg-white"
-              >
-                <option value="">Select search method...</option>
-                {#each availableSearchMethods as method}
-                  <option value={method.id}>{method.name}</option>
-                {/each}
-              </select>
-            {/if}
-            
-            <!-- Search Method Description -->
-            {#if selectedSearchMethod}
-              <div class="mt-2 p-2 bg-blue-100 rounded text-xs text-blue-700">
-                <strong>{selectedSearchMethod.name}:</strong> {selectedSearchMethod.description}
-              </div>
-            {/if}
-          </div>
-          
-          <!-- Multi-Select Content Filter -->
-          <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-700 mb-2">
-              Content Filters (Multi-Select)
-              <i class="fas fa-info-circle text-gray-400 ml-1" title="Select multiple folders and/or files to filter DocAware searches"></i>
-            </label>
-
-            {#if !hierarchicalPathsLoaded}
-              <div class="w-full px-3 py-2 border border-blue-300 rounded-lg bg-blue-50 flex items-center justify-center">
-                <i class="fas fa-spinner fa-spin mr-2 text-blue-600"></i>
-                <span class="text-sm text-blue-700">Loading content filter data...</span>
-              </div>
-            {:else if hierarchicalPaths.length === 0}
-              <div class="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-yellow-50">
-                <div class="text-yellow-700 text-sm">
-                  {#if documentsInfo && documentsInfo.total_documents > 0}
-                    {#if documentsInfo.collection_status === 'PROCESSING'}
-                      <div class="flex items-center">
-                        <i class="fas fa-spinner fa-spin mr-2"></i>
-                        <span>Documents are being processed ({documentsInfo.processing_status?.processed_documents || 0}/{documentsInfo.processing_status?.total_documents || documentsInfo.total_documents}). Content filters will be available once processing completes.</span>
-                      </div>
-                    {:else if documentsInfo.collection_status === 'COMPLETED' && documentsInfo.processing_status?.processed_documents === 0}
-                      <div class="flex items-center">
-                        <i class="fas fa-exclamation-triangle mr-2"></i>
-                        <span>Processing completed but no documents were vectorized. Please check document processing logs.</span>
-                      </div>
-                    {:else}
-                      <div class="flex items-center">
-                  <i class="fas fa-info-circle mr-2"></i>
-                        <span>You have {documentsInfo.total_documents} document{documentsInfo.total_documents === 1 ? '' : 's'} uploaded, but they haven't been processed yet. Please process documents first to enable content filtering.</span>
-                      </div>
-                    {/if}
-                  {:else}
-                    <div class="flex items-center">
-                      <i class="fas fa-info-circle mr-2"></i>
-                      <span>No folders/files available for filtering. Upload and process documents first.</span>
-                    </div>
-                  {/if}
-                </div>
-              </div>
-            {:else}
-              <!-- Selected filters display (chips/tags) -->
-              {#if nodeConfig.content_filters && nodeConfig.content_filters.length > 0}
-                <div class="flex flex-wrap gap-2 mb-2 p-2 bg-gray-50 border border-gray-200 rounded-lg">
-                  {#each nodeConfig.content_filters as filterId}
-                    {@const item = hierarchicalPaths.find(p => p.id === filterId)}
-                    {#if item}
-                      <div class="flex items-center gap-1 px-2 py-1 bg-blue-100 text-blue-800 rounded-md text-xs">
-                        <i class="fas fa-{item.type === 'folder' ? 'folder' : 'file'} text-blue-600"></i>
-                        <span>{item.displayName}</span>
-                        <button
-                          type="button"
-                          on:click={() => {
-                            if (nodeConfig.content_filters && Array.isArray(nodeConfig.content_filters)) {
-                              nodeConfig.content_filters = nodeConfig.content_filters.filter(id => id !== filterId);
-                              updateNodeData();
-                            }
-                          }}
-                          class="ml-1 text-blue-600 hover:text-blue-800 focus:outline-none"
-                          title="Remove filter"
-                        >
-                          <i class="fas fa-times"></i>
-                        </button>
-                      </div>
-                    {/if}
-                  {/each}
-                </div>
-              {/if}
-
-              <!-- Dropdown to add more filters -->
-              <select
-                on:change={(e) => {
-                  const selectedValue = e.target.value;
-                  // Initialize content_filters if undefined
-                  if (!nodeConfig.content_filters) {
-                    nodeConfig.content_filters = [];
-                  }
-                  if (selectedValue && !nodeConfig.content_filters.includes(selectedValue)) {
-                    nodeConfig.content_filters = [...nodeConfig.content_filters, selectedValue];
-                    updateNodeData();
-                  }
-                  // Reset dropdown
-                  e.target.value = '';
-                }}
-                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-blue-600 focus:ring-2 focus:ring-blue-600 focus:ring-opacity-20 bg-white"
-              >
-                <option value="">Add folder or file filter...</option>
-                <optgroup label="Folders">
-                  {#each hierarchicalPaths.filter(p => p.type === 'folder') as folder}
-                    <option value={folder.id} disabled={nodeConfig.content_filters && nodeConfig.content_filters.includes(folder.id)}>
-                      📁 {folder.displayName}
-                    </option>
-                  {/each}
-                </optgroup>
-                <optgroup label="Files">
-                  {#each hierarchicalPaths.filter(p => p.type === 'file') as file}
-                    <option value={file.id} disabled={nodeConfig.content_filters && nodeConfig.content_filters.includes(file.id)}>
-                      📄 {file.displayName}
-                    </option>
-                  {/each}
-                </optgroup>
-              </select>
-            {/if}
-
-            <!-- Content Filter Description -->
-            {#if nodeConfig.content_filters && nodeConfig.content_filters.length > 0}
-              <div class="mt-2 p-2 bg-green-100 rounded text-xs text-green-700">
-                <div class="flex items-center mb-1">
-                  <i class="fas fa-filter mr-1"></i>
-                  <strong>Active Filters ({nodeConfig.content_filters.length}):</strong>
-                </div>
-                <div class="mt-1">
-                  DocAware will only search documents in the selected {nodeConfig.content_filters.length === 1 ? 'location' : 'locations'}.
-                </div>
-                <div class="text-xs text-green-600 mt-1">
-                  Multiple filters use OR logic - results from ANY selected location will be returned.
-                </div>
-              </div>
-            {:else}
-              <div class="mt-2 p-2 bg-gray-100 rounded text-xs text-gray-600">
-                <i class="fas fa-globe mr-1"></i>
-                <strong>No Filter:</strong> DocAware will search all project documents
-              </div>
-            {/if}
-          </div>
-          
-          <!-- Dynamic Search Method Parameters -->
-          {#if selectedSearchMethod}
-            <div class="space-y-3">
-              <h5 class="text-sm font-medium text-gray-700">Search Parameters</h5>
-              
-              {#each docAwareService.generateParameterInputs(selectedSearchMethod) as {key, parameter, defaultValue}}
-                <div>
-                  <label class="block text-xs font-medium text-gray-600 mb-1">
-                    {key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                    {#if parameter.description}
-                      <i class="fas fa-question-circle text-gray-400 ml-1" title="{parameter.description}"></i>
-                    {/if}
-                  </label>
-                  
-                  {#if parameter.type === 'select'}
-                    <select
-                      value={searchParameters[key] || defaultValue}
-                      on:change={(e) => handleSearchParameterChange(key, e.target.value)}
-                      class="w-full px-2 py-1 border border-gray-200 rounded text-xs focus:border-blue-600 focus:ring-1 focus:ring-blue-600 focus:ring-opacity-20 bg-white"
-                    >
-                      {#each parameter.options || [] as option}
-                        <option value={option}>{option}</option>
-                      {/each}
-                    </select>
-                  {:else if parameter.type === 'multiselect'}
-                    <div class="text-xs text-gray-500">Multi-select (Advanced): {JSON.stringify(searchParameters[key] || defaultValue)}</div>
-                  {:else if parameter.type === 'number'}
-                    <input
-                      type="number"
-                      value={searchParameters[key] || defaultValue}
-                      min={parameter.min}
-                      max={parameter.max}
-                      step={parameter.step || 1}
-                      on:input={(e) => handleSearchParameterChange(key, parseFloat(e.target.value) || defaultValue)}
-                      class="w-full px-2 py-1 border border-gray-200 rounded text-xs focus:border-blue-600 focus:ring-1 focus:ring-blue-600 focus:ring-opacity-20"
-                    />
-                  {:else if parameter.type === 'boolean'}
-                    <label class="flex items-center">
-                      <input
-                        type="checkbox"
-                        checked={searchParameters[key] !== undefined ? searchParameters[key] : defaultValue}
-                        on:change={(e) => handleSearchParameterChange(key, e.target.checked)}
-                        class="mr-2 text-blue-600 border-gray-300 rounded focus:ring-blue-600"
-                      />
-                      <span class="text-xs text-gray-600">Enable this option</span>
-                    </label>
-                  {:else if parameter.type === 'text'}
-                    <input
-                      type="text"
-                      value={searchParameters[key] || defaultValue || ''}
-                      on:input={(e) => handleSearchParameterChange(key, e.target.value)}
-                      placeholder={parameter.description}
-                      class="w-full px-2 py-1 border border-gray-200 rounded text-xs focus:border-blue-600 focus:ring-1 focus:ring-blue-600 focus:ring-opacity-20"
-                    />
-                  {/if}
-                  
-                  {#if parameter.description}
-                    <p class="text-xs text-gray-500 mt-1">{parameter.description}</p>
-                  {/if}
-                </div>
-              {/each}
-            </div>
-          {/if}
-        </div>
       {/if}
       
       <!-- WEBSEARCH TOGGLE - For UserProxyAgent -->
@@ -2902,22 +2634,57 @@
 
           <div class="mb-3">
             <label class="block text-xs font-medium text-gray-700 mb-1">Select Documents to Attach</label>
-            {#if hierarchicalPaths.length > 0}
-              <select
-                multiple
-                bind:value={nodeConfig.file_attachment_documents}
-                on:change={() => updateNodeData()}
-                class="w-full px-2 py-1 border border-gray-200 rounded text-xs focus:border-gray-500 focus:ring-1 focus:ring-gray-500 bg-white h-24"
-              >
-                {#each hierarchicalPaths.filter(p => p.type === 'file') as path}
-                  <option value={path.name}>{isDocReady(path.name) ? '✓' : '⚠'} {path.displayName || path.path}</option>
-                {/each}
-              </select>
-              <p class="text-xs text-gray-500 mt-1">Hold Ctrl/Cmd to select multiple documents</p>
-            {:else}
-              <div class="text-xs text-yellow-600 p-2 bg-yellow-50 rounded">
-                No processed project documents available to select. You can still upload a new file for this node below, or upload/process documents in the Project Documents section.
+            {#if !uploadedDocumentPathsLoaded}
+              <div class="w-full px-3 py-2 border border-blue-300 rounded-lg bg-blue-50 flex items-center justify-center">
+                <i class="fas fa-spinner fa-spin mr-2 text-blue-600"></i>
+                <span class="text-sm text-blue-700">Loading uploaded documents...</span>
               </div>
+            {:else if uploadedFileItems.length === 0}
+              <div class="text-xs text-yellow-600 p-2 bg-yellow-50 rounded">
+                No uploaded project documents available yet. Upload files in the Project Documents tab first.
+              </div>
+            {:else}
+              <div class="max-h-56 overflow-y-auto pr-1 space-y-1">
+                {#each uploadedAttachmentItemsForRender as item (item.id)}
+                  {#if item.type === 'folder'}
+                    {@const depth = uploadedPathDepth(item.path || '')}
+                    {@const fileCount = filesUnderUploadedFolder(item.path || '').length}
+                    <label
+                      class="flex items-center gap-2 text-xs px-2 py-1 rounded hover:bg-gray-100 cursor-pointer"
+                      style={`padding-left: ${depth * 12}px;`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isFolderFullySelected(item.path || '')}
+                        on:change={(e) => toggleFolderSelection(item.path || '', e.currentTarget.checked)}
+                      />
+                      <span class="truncate flex-1">📁 {item.displayName}</span>
+                      <span class="ml-auto text-[10px] px-2 py-0.5 rounded bg-gray-100 text-gray-600">
+                        {fileCount}
+                      </span>
+                    </label>
+                  {:else}
+                    {@const depth = uploadedPathDepth(item.path || '') + 1}
+                    <label
+                      class="flex items-center gap-2 text-xs px-2 py-1 rounded hover:bg-gray-100 cursor-pointer"
+                      style={`padding-left: ${depth * 12}px;`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isFileSelected(item.name)}
+                        on:change={(e) => toggleFileSelection(item.name, e.currentTarget.checked)}
+                      />
+                      <span class="truncate flex-1">📄 {item.displayName}</span>
+                      <span class="ml-auto text-[10px] uppercase tracking-wide bg-gray-200 text-gray-800 px-1.5 py-0.5 rounded">
+                        {isDocReady(item.name) ? 'Ready' : 'Pending'}
+                      </span>
+                    </label>
+                  {/if}
+                {/each}
+              </div>
+              <p class="text-xs text-gray-500 mt-1">
+                Checking a folder includes all descendant files (recursive).
+              </p>
             {/if}
           </div>
 
@@ -3008,6 +2775,99 @@
       {/if}
     {/if}
 
+    <!-- DOCUMENT TOOL CALLING TOGGLE -->
+    {#if ['AssistantAgent', 'DelegateAgent'].includes(node.type)}
+      <div>
+        <div class="flex items-center justify-between">
+          <label class="text-sm font-medium text-gray-700">Document Tool Calling</label>
+          <label class="relative inline-flex items-center cursor-pointer">
+            <input
+              type="checkbox"
+              checked={nodeConfig.doc_tool_calling}
+              on:change={(e) => {
+                nodeConfig.doc_tool_calling = e.target.checked;
+                if (!e.target.checked) {
+                  nodeConfig.doc_tool_calling_documents = [];
+                }
+                nodeConfig = { ...nodeConfig };
+                updateNodeData();
+              }}
+              class="sr-only peer"
+            />
+            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-600"></div>
+          </label>
+        </div>
+        <p class="text-xs text-gray-500 mt-1">Agent analyzes project documents using tool calls with a plan-and-execute approach</p>
+
+        {#if nodeConfig.doc_tool_calling}
+          <div class="mt-3 border border-purple-200 rounded-lg p-3 bg-purple-50/30">
+            <label class="text-xs font-medium text-gray-700 mb-2 block">Select Documents for Tool Calling</label>
+            {#if !uploadedDocumentPathsLoaded}
+              <div class="flex items-center gap-2 text-xs text-gray-500 py-2">
+                <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                </svg>
+                Loading uploaded documents...
+              </div>
+            {:else if uploadedAttachmentItemsForRender.length === 0}
+              <p class="text-xs text-gray-500 italic py-2">No documents uploaded. Upload files in the Project Documents tab first.</p>
+            {:else}
+              <div class="max-h-56 overflow-y-auto pr-1 space-y-1">
+                {#each uploadedAttachmentItemsForRender as item (item.id)}
+                  {#if item.type === 'folder'}
+                    {@const depth = uploadedPathDepth(item.path || '')}
+                    {@const fileCount = filesUnderUploadedFolder(item.path || '').length}
+                    <label
+                      class="flex items-center gap-2 text-xs px-2 py-1 rounded hover:bg-purple-100 cursor-pointer"
+                      style={`padding-left: ${depth * 12}px;`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isDocToolFolderFullySelected(item.path || '')}
+                        on:change={(e) => toggleDocToolFolderSelection(item.path || '', e.currentTarget.checked)}
+                      />
+                      <span class="truncate flex-1">📁 {item.displayName}</span>
+                      <span class="ml-auto text-[10px] px-2 py-0.5 rounded bg-purple-100 text-purple-600">
+                        {fileCount}
+                      </span>
+                    </label>
+                  {:else}
+                    {@const depth = uploadedPathDepth(item.path || '') + 1}
+                    <label
+                      class="flex items-center gap-2 text-xs px-2 py-1 rounded hover:bg-purple-100 cursor-pointer"
+                      style={`padding-left: ${depth * 12}px;`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isDocToolFileSelected(item.name)}
+                        on:change={(e) => toggleDocToolFileSelection(item.name, e.currentTarget.checked)}
+                      />
+                      <span class="truncate flex-1">📄 {item.displayName}</span>
+                      <span class="ml-auto text-[10px] uppercase tracking-wide bg-purple-200 text-purple-800 px-1.5 py-0.5 rounded">
+                        {isDocReady(item.name) ? 'Ready' : 'Pending'}
+                      </span>
+                    </label>
+                  {/if}
+                {/each}
+              </div>
+              <p class="text-xs text-gray-500 mt-1">
+                Checking a folder includes all descendant files (recursive).
+              </p>
+            {/if}
+            {#if nodeConfig.doc_tool_calling && (nodeConfig.doc_tool_calling_documents || []).length === 0 && uploadedDocumentPathsLoaded && uploadedAttachmentItemsForRender.length > 0}
+              <div class="mt-2 flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+                <svg class="w-4 h-4 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                </svg>
+                <span>No documents selected — <strong>{nodeConfig.name || 'this agent'}</strong> will have no document tool access.</span>
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </div>
+    {/if}
+
     <!-- DOCAWARE TOGGLE - For other applicable agents (excluding UserProxyAgent) -->
     {#if ['AssistantAgent', 'DelegateAgent'].includes(node.type)}
       <div>
@@ -3017,36 +2877,16 @@
             <input
               type="checkbox"
               checked={nodeConfig.doc_aware}
-              on:change={async (e) => {
+              on:change={(e) => {
                 nodeConfig.doc_aware = e.target.checked;
                 
                 if (e.target.checked) {
-                  // When enabling DocAware, ensure we have search methods loaded
-                  if (availableSearchMethods.length === 0 && !loadingSearchMethods) {
-                    console.log('📚 DOCAWARE: Toggle enabled - loading search methods');
-                    await loadSearchMethods();
-                  }
-                  
-                  // Set default values
+                  nodeConfig.search_method = 'hybrid_search';
                   if (!nodeConfig.vector_collections || nodeConfig.vector_collections.length === 0) {
                     nodeConfig.vector_collections = ['project_documents'];
                   }
-                  
-                  // Set default search method after ensuring methods are loaded
-                  if (!nodeConfig.search_method && availableSearchMethods.length > 0) {
-                    nodeConfig.search_method = 'hybrid_search';
-                    await handleSearchMethodChange();
-                  } else if (!nodeConfig.search_method) {
-                    // If still no methods available, set fallback
-                    console.warn('📚 DOCAWARE: No search methods available, will retry when methods load');
-                  }
                 } else {
-                  // When disabling DocAware, clear search configuration
                   nodeConfig.search_method = '';
-                  selectedSearchMethod = null;
-                  searchParameters = {};
-                  testSearchResults = null;
-                  expandedResults = new Set();
                 }
                 
                 nodeConfig = { ...nodeConfig };
@@ -3059,501 +2899,6 @@
         </div>
         <p class="text-xs text-gray-500 mt-1">Enable document-aware RAG capabilities for this agent</p>
       </div>
-      
-      <!-- DOCAWARE CONFIGURATION - Show when DocAware is enabled -->
-      {#if nodeConfig.doc_aware}
-        <div class="border border-blue-200 rounded-lg p-4 bg-blue-50">
-          <div class="flex items-center mb-3">
-            <i class="fas fa-book text-blue-600 mr-2"></i>
-            <h4 class="font-medium text-blue-900">Document Search Configuration</h4>
-          </div>
-          
-          <!-- Chunk-based DocAware Configuration -->
-          <!-- Query Refinement Toggle -->
-          <div class="mb-4">
-            <div class="flex items-center justify-between">
-              <div>
-                <label class="text-sm font-medium text-gray-700">Query Refinement</label>
-                <p class="text-xs text-gray-500 mt-1">Use LLM to optimize search queries while preserving all key concepts</p>
-              </div>
-              <label class="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={nodeConfig.query_refinement_enabled || false}
-                  on:change={(e) => {
-                    nodeConfig.query_refinement_enabled = e.target.checked;
-                    updateNodeData();
-                  }}
-                  class="sr-only peer"
-                />
-                <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-              </label>
-            </div>
-          </div>
-          
-          <!-- Search Method Selection -->
-          <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-700 mb-2">Search Method</label>
-            {#if loadingSearchMethods}
-              <div class="w-full px-3 py-2 border border-blue-300 rounded-lg bg-blue-50 flex items-center justify-center">
-                <i class="fas fa-spinner fa-spin mr-2 text-blue-600"></i>
-                <span class="text-sm text-blue-700">Loading search methods...</span>
-              </div>
-            {:else if searchMethodsError}
-              <div class="w-full px-3 py-2 border border-red-300 rounded-lg bg-red-50">
-                <div class="text-red-700 text-sm flex items-center">
-                  <i class="fas fa-exclamation-triangle mr-2"></i>
-                  {searchMethodsError}
-                </div>
-                <button 
-                  class="mt-2 text-xs text-red-600 hover:text-red-800 underline flex items-center"
-                  on:click={() => loadSearchMethods()}
-                >
-                  <i class="fas fa-sync mr-1"></i>
-                  Retry Loading Search Methods
-                </button>
-              </div>
-            {:else if availableSearchMethods.length === 0}
-              <div class="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-yellow-50">
-                <div class="text-yellow-700 text-sm flex items-center">
-                  <i class="fas fa-exclamation-circle mr-2"></i>
-                  No search methods available. Check DocAware service configuration.
-                </div>
-                <button 
-                  class="mt-2 text-xs text-yellow-600 hover:text-yellow-800 underline flex items-center"
-                  on:click={() => loadSearchMethods()}
-                >
-                  <i class="fas fa-sync mr-1"></i>
-                  Retry Loading Search Methods
-                </button>
-              </div>
-            {:else}
-              <!-- Normal dropdown when methods are available -->
-              <select
-                bind:value={nodeConfig.search_method}
-                on:change={() => handleSearchMethodChange()}
-                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-blue-600 focus:ring-2 focus:ring-blue-600 focus:ring-opacity-20 bg-white"
-              >
-                <option value="">Select search method...</option>
-                {#each availableSearchMethods as method}
-                  <option value={method.id}>{method.name}</option>
-                {/each}
-              </select>
-            {/if}
-            
-            <!-- Search Method Description -->
-            {#if selectedSearchMethod}
-              <div class="mt-2 p-2 bg-blue-100 rounded text-xs text-blue-700">
-                <strong>{selectedSearchMethod.name}:</strong> {selectedSearchMethod.description}
-              </div>
-            {/if}
-          </div>
-          
-          <!-- Multi-Select Content Filter -->
-          <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-700 mb-2">
-              Content Filters (Multi-Select)
-              <i class="fas fa-info-circle text-gray-400 ml-1" title="Select multiple folders and/or files to filter DocAware searches"></i>
-            </label>
-
-            {#if !hierarchicalPathsLoaded}
-              <div class="w-full px-3 py-2 border border-blue-300 rounded-lg bg-blue-50 flex items-center justify-center">
-                <i class="fas fa-spinner fa-spin mr-2 text-blue-600"></i>
-                <span class="text-sm text-blue-700">Loading content filter data...</span>
-              </div>
-            {:else if hierarchicalPaths.length === 0}
-              <div class="w-full px-3 py-2 border border-yellow-300 rounded-lg bg-yellow-50">
-                <div class="text-yellow-700 text-sm">
-                  {#if documentsInfo && documentsInfo.total_documents > 0}
-                    {#if documentsInfo.collection_status === 'PROCESSING'}
-                      <div class="flex items-center">
-                        <i class="fas fa-spinner fa-spin mr-2"></i>
-                        <span>Documents are being processed ({documentsInfo.processing_status?.processed_documents || 0}/{documentsInfo.processing_status?.total_documents || documentsInfo.total_documents}). Content filters will be available once processing completes.</span>
-                      </div>
-                    {:else if documentsInfo.collection_status === 'COMPLETED' && documentsInfo.processing_status?.processed_documents === 0}
-                      <div class="flex items-center">
-                        <i class="fas fa-exclamation-triangle mr-2"></i>
-                        <span>Processing completed but no documents were vectorized. Please check document processing logs.</span>
-                      </div>
-                    {:else}
-                      <div class="flex items-center">
-                  <i class="fas fa-info-circle mr-2"></i>
-                        <span>You have {documentsInfo.total_documents} document{documentsInfo.total_documents === 1 ? '' : 's'} uploaded, but they haven't been processed yet. Please process documents first to enable content filtering.</span>
-                      </div>
-                    {/if}
-                  {:else}
-                    <div class="flex items-center">
-                      <i class="fas fa-info-circle mr-2"></i>
-                      <span>No folders/files available for filtering. Upload and process documents first.</span>
-                    </div>
-                  {/if}
-                </div>
-              </div>
-            {:else}
-              <!-- Selected filters display (chips/tags) -->
-              {#if nodeConfig.content_filters && nodeConfig.content_filters.length > 0}
-                <div class="flex flex-wrap gap-2 mb-2 p-2 bg-gray-50 border border-gray-200 rounded-lg">
-                  {#each nodeConfig.content_filters as filterId}
-                    {@const item = hierarchicalPaths.find(p => p.id === filterId)}
-                    {#if item}
-                      <div class="flex items-center gap-1 px-2 py-1 bg-blue-100 text-blue-800 rounded-md text-xs">
-                        <i class="fas fa-{item.type === 'folder' ? 'folder' : 'file'} text-blue-600"></i>
-                        <span>{item.displayName}</span>
-                        <button
-                          type="button"
-                          on:click={() => {
-                            if (nodeConfig.content_filters && Array.isArray(nodeConfig.content_filters)) {
-                              nodeConfig.content_filters = nodeConfig.content_filters.filter(id => id !== filterId);
-                              updateNodeData();
-                            }
-                          }}
-                          class="ml-1 text-blue-600 hover:text-blue-800 focus:outline-none"
-                          title="Remove filter"
-                        >
-                          <i class="fas fa-times"></i>
-                        </button>
-                      </div>
-                    {/if}
-                  {/each}
-                </div>
-              {/if}
-
-              <!-- Dropdown to add more filters -->
-              <select
-                on:change={(e) => {
-                  const selectedValue = e.target.value;
-                  // Initialize content_filters if undefined
-                  if (!nodeConfig.content_filters) {
-                    nodeConfig.content_filters = [];
-                  }
-                  if (selectedValue && !nodeConfig.content_filters.includes(selectedValue)) {
-                    nodeConfig.content_filters = [...nodeConfig.content_filters, selectedValue];
-                    updateNodeData();
-                  }
-                  // Reset dropdown
-                  e.target.value = '';
-                }}
-                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-blue-600 focus:ring-2 focus:ring-blue-600 focus:ring-opacity-20 bg-white"
-              >
-                <option value="">Add folder or file filter...</option>
-                <optgroup label="Folders">
-                  {#each hierarchicalPaths.filter(p => p.type === 'folder') as folder}
-                    <option value={folder.id} disabled={nodeConfig.content_filters && nodeConfig.content_filters.includes(folder.id)}>
-                      📁 {folder.displayName}
-                    </option>
-                  {/each}
-                </optgroup>
-                <optgroup label="Files">
-                  {#each hierarchicalPaths.filter(p => p.type === 'file') as file}
-                    <option value={file.id} disabled={nodeConfig.content_filters && nodeConfig.content_filters.includes(file.id)}>
-                      📄 {file.displayName}
-                    </option>
-                  {/each}
-                </optgroup>
-              </select>
-            {/if}
-
-            <!-- Content Filter Description -->
-            {#if nodeConfig.content_filters && nodeConfig.content_filters.length > 0}
-              <div class="mt-2 p-2 bg-green-100 rounded text-xs text-green-700">
-                <div class="flex items-center mb-1">
-                  <i class="fas fa-filter mr-1"></i>
-                  <strong>Active Filters ({nodeConfig.content_filters.length}):</strong>
-                </div>
-                <div class="mt-1">
-                  DocAware will only search documents in the selected {nodeConfig.content_filters.length === 1 ? 'location' : 'locations'}.
-                </div>
-                <div class="text-xs text-green-600 mt-1">
-                  Multiple filters use OR logic - results from ANY selected location will be returned.
-                </div>
-              </div>
-            {:else}
-              <div class="mt-2 p-2 bg-gray-100 rounded text-xs text-gray-600">
-                <i class="fas fa-globe mr-1"></i>
-                <strong>No Filter:</strong> DocAware will search all project documents
-              </div>
-            {/if}
-          </div>
-          
-          <!-- Dynamic Search Method Parameters -->
-          {#if selectedSearchMethod}
-            <div class="space-y-3">
-              <h5 class="text-sm font-medium text-gray-700">Search Parameters</h5>
-              
-              {#each docAwareService.generateParameterInputs(selectedSearchMethod) as {key, parameter, defaultValue}}
-                <div>
-                  <label class="block text-xs font-medium text-gray-600 mb-1">
-                    {key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                    {#if parameter.description}
-                      <i class="fas fa-question-circle text-gray-400 ml-1" title="{parameter.description}"></i>
-                    {/if}
-                  </label>
-                  
-                  {#if parameter.type === 'select'}
-                    <select
-                      value={searchParameters[key] || defaultValue}
-                      on:change={(e) => handleSearchParameterChange(key, e.target.value)}
-                      class="w-full px-2 py-1 border border-gray-200 rounded text-xs focus:border-blue-600 focus:ring-1 focus:ring-blue-600 focus:ring-opacity-20 bg-white"
-                    >
-                      {#each parameter.options || [] as option}
-                        <option value={option}>{option}</option>
-                      {/each}
-                    </select>
-                  {:else if parameter.type === 'multiselect'}
-                    <div class="text-xs text-gray-500">Multi-select (Advanced): {JSON.stringify(searchParameters[key] || defaultValue)}</div>
-                  {:else if parameter.type === 'number'}
-                    <input
-                      type="number"
-                      value={searchParameters[key] || defaultValue}
-                      min={parameter.min}
-                      max={parameter.max}
-                      step={parameter.step || 1}
-                      on:input={(e) => handleSearchParameterChange(key, parseFloat(e.target.value) || defaultValue)}
-                      class="w-full px-2 py-1 border border-gray-200 rounded text-xs focus:border-blue-600 focus:ring-1 focus:ring-blue-600 focus:ring-opacity-20"
-                    />
-                  {:else if parameter.type === 'boolean'}
-                    <label class="flex items-center">
-                      <input
-                        type="checkbox"
-                        checked={searchParameters[key] !== undefined ? searchParameters[key] : defaultValue}
-                        on:change={(e) => handleSearchParameterChange(key, e.target.checked)}
-                        class="mr-2 text-blue-600 border-gray-300 rounded focus:ring-blue-600"
-                      />
-                      <span class="text-xs text-gray-600">Enable this option</span>
-                    </label>
-                  {:else if parameter.type === 'text'}
-                    <input
-                      type="text"
-                      value={searchParameters[key] || defaultValue || ''}
-                      on:input={(e) => handleSearchParameterChange(key, e.target.value)}
-                      placeholder={parameter.description}
-                      class="w-full px-2 py-1 border border-gray-200 rounded text-xs focus:border-blue-600 focus:ring-1 focus:ring-blue-600 focus:ring-opacity-20"
-                    />
-                  {/if}
-                  
-                  {#if parameter.description}
-                    <p class="text-xs text-gray-500 mt-1">{parameter.description}</p>
-                  {/if}
-                </div>
-              {/each}
-            </div>
-            
-            <!-- Test Search Section -->
-            {#if projectId}
-              <div class="mt-4 pt-3 border-t border-blue-200">
-                <!-- Custom Test Query Input -->
-                <div class="mb-3">
-                  <label class="block text-xs font-medium text-gray-600 mb-1">
-                    Test Query
-                    <i class="fas fa-info-circle text-gray-400 ml-1" title="Enter a custom query to test search. Leave empty to use input from connected agents."></i>
-                  </label>
-                  <input
-                    type="text"
-                    bind:value={testSearchQuery}
-                    placeholder="Enter test query or leave empty to use connected agent input..."
-                    class="w-full px-2 py-1.5 border border-gray-200 rounded text-xs focus:border-blue-600 focus:ring-1 focus:ring-blue-600 focus:ring-opacity-20"
-                  />
-                  {#if !testSearchQuery}
-                    <p class="text-xs text-gray-400 mt-1">
-                      <i class="fas fa-link mr-1"></i>
-                      Will use input from connected agents if empty
-                    </p>
-                  {/if}
-                </div>
-                
-                <div class="flex items-center justify-between mb-2">
-                  <span class="text-xs font-medium text-gray-700">Test Search</span>
-                  <button
-                    class="px-3 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    on:click={testSearch}
-                    disabled={testingSearch}
-                  >
-                    {#if testingSearch}
-                      <i class="fas fa-spinner fa-spin mr-1"></i>
-                      Testing...
-                    {:else}
-                      <i class="fas fa-search mr-1"></i>
-                      Test Search
-                    {/if}
-                  </button>
-                </div>
-                
-                <!-- Test Results - Enhanced Display -->
-                {#if testSearchResults}
-                  <div class="mt-2 rounded text-xs {testSearchResults.success ? 'bg-green-50 border border-green-200' : 'bg-red-50 border border-red-200'}">
-                    {#if testSearchResults.success}
-                      <!-- Success Header -->
-                      <div class="p-2 border-b border-green-200 bg-green-100">
-                        <div class="flex items-center text-green-800">
-                          <i class="fas fa-check-circle mr-2"></i>
-                          <strong>Test Successful!</strong>
-                        </div>
-                        <div class="text-green-700 mt-1">
-                          Found <strong>{testSearchResults.results_count}</strong> results using <strong>{testSearchResults.method}</strong>
-                        </div>
-                        <div class="text-green-600 text-xs mt-1">
-                          Query: "{testSearchResults.query}"
-                        </div>
-                      </div>
-                      
-                      <!-- Search Results List -->
-                      {#if testSearchResults.sample_results && testSearchResults.sample_results.length > 0}
-                        <div class="p-2">
-                          <div class="text-green-800 font-medium mb-2 flex items-center justify-between">
-                            <span>Search Results ({testSearchResults.sample_results.length} of {testSearchResults.results_count}):</span>
-                            <button
-                              class="text-xs text-green-600 hover:text-green-800 underline"
-                              on:click={() => {
-                                if (expandedResults.size === testSearchResults.sample_results.length) {
-                                  expandedResults = new Set();
-                                } else {
-                                  expandedResults = new Set(testSearchResults.sample_results.map((_, i) => i));
-                                }
-                              }}
-                            >
-                              {expandedResults.size === testSearchResults.sample_results.length ? 'Collapse All' : 'Expand All'}
-                            </button>
-                          </div>
-                          
-                          <div class="space-y-2 max-h-96 overflow-y-auto">
-                            {#each testSearchResults.sample_results as result, index}
-                              <div class="bg-green-100 border border-green-200 rounded p-2">
-                                <!-- Result Header -->
-                                <div class="flex items-center justify-between mb-1">
-                                  <span class="font-medium text-green-800">
-                                    Result #{index + 1}
-                                    {#if result.source}
-                                      - {result.source}
-                                    {/if}
-                                  </span>
-                                  <div class="flex items-center space-x-2 text-xs text-green-600">
-                                    {#if result.score !== undefined}
-                                      <span class="bg-green-200 px-2 py-1 rounded">
-                                        Score: {(result.score * 100).toFixed(1)}%
-                                      </span>
-                                    {/if}
-                                    {#if result.page}
-                                      <span class="bg-green-200 px-2 py-1 rounded">
-                                        Page {result.page}
-                                      </span>
-                                    {/if}
-                                  </div>
-                                </div>
-                                
-                                <!-- Content Display with Expand/Collapse -->
-                                <div class="bg-white border border-green-300 rounded p-2 text-gray-800">
-                                  <div class="flex items-center justify-between text-xs text-gray-600 mb-1">
-                                    <span>Content:</span>
-                                    {#if result.content && result.content.length > 200}
-                                      <button
-                                        class="text-blue-600 hover:text-blue-800 underline"
-                                        on:click={() => {
-                                          if (expandedResults.has(index)) {
-                                            expandedResults.delete(index);
-                                            expandedResults = expandedResults;
-                                          } else {
-                                            expandedResults.add(index);
-                                            expandedResults = expandedResults;
-                                          }
-                                        }}
-                                      >
-                                        {expandedResults.has(index) ? 'Show Less' : 'Show Full Content'}
-                                      </button>
-                                    {/if}
-                                  </div>
-                                  <div class="text-sm leading-relaxed whitespace-pre-wrap {expandedResults.has(index) ? 'max-h-96 overflow-y-auto' : ''}">
-                                    {#if expandedResults.has(index)}
-                                      {result.content || result.content_preview || 'No content available'}
-                                    {:else}
-                                      {result.content_preview || result.content?.substring(0, 200) + '...' || 'No content available'}
-                                    {/if}
-                                  </div>
-                                </div>
-                                
-                                <!-- Metadata -->
-                                {#if result.search_method}
-                                  <div class="mt-1 text-xs text-green-600">
-                                    Method: {result.search_method}
-                                  </div>
-                                {/if}
-                              </div>
-                            {/each}
-                          </div>
-                          
-                          <!-- Results Info -->
-                          {#if testSearchResults.results_count > testSearchResults.sample_results.length}
-                            <div class="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded text-center text-yellow-700">
-                              <i class="fas fa-info-circle mr-1"></i>
-                              Showing {testSearchResults.sample_results.length} of {testSearchResults.results_count} total results (limited by search_limit parameter)
-                            </div>
-                          {:else}
-                            <div class="mt-2 p-2 bg-green-100 border border-green-200 rounded text-center text-green-700">
-                              <i class="fas fa-check-circle mr-1"></i>
-                              Showing all {testSearchResults.sample_results.length} results
-                            </div>
-                          {/if}
-                          
-                          <!-- Search Parameters Used -->
-                          {#if testSearchResults.parameters_used}
-                            <div class="mt-2 p-2 bg-blue-50 border border-blue-200 rounded">
-                              <div class="text-blue-800 font-medium text-xs mb-1">Search Parameters Used:</div>
-                              <div class="text-xs text-blue-700">
-                                {#each Object.entries(testSearchResults.parameters_used) as [key, value]}
-                                  <div class="flex justify-between">
-                                    <span class="font-medium">{key.replace(/_/g, ' ')}:</span>
-                                    <span>{JSON.stringify(value)}</span>
-                                  </div>
-                                {/each}
-                              </div>
-                            </div>
-                          {/if}
-                        </div>
-                      {:else}
-                        <div class="p-2 text-green-700">
-                          <div class="flex items-center">
-                            <i class="fas fa-exclamation-circle mr-2"></i>
-                            Search completed successfully but no sample results were returned.
-                          </div>
-                          <div class="text-xs mt-1">
-                            This might indicate that the relevance threshold is too high or no documents match the search query.
-                          </div>
-                        </div>
-                      {/if}
-                      
-                    {:else}
-                      <!-- Error Display -->
-                      <div class="p-2">
-                        <div class="flex items-center text-red-800">
-                          <i class="fas fa-exclamation-triangle mr-2"></i>
-                          <strong>Test Failed</strong>
-                        </div>
-                        <div class="text-red-700 mt-1">
-                          {testSearchResults.error || 'Unknown error occurred'}
-                        </div>
-                        {#if testSearchResults.query}
-                          <div class="text-red-600 text-xs mt-1">
-                            Query: "{testSearchResults.query}"
-                          </div>
-                        {/if}
-                        {#if testSearchResults.method}
-                          <div class="text-red-600 text-xs mt-1">
-                            Method: {testSearchResults.method}
-                          </div>
-                        {/if}
-                      </div>
-                    {/if}
-                  </div>
-                {/if}
-              </div>
-            {:else}
-              <div class="mt-3 p-2 bg-yellow-50 border border-yellow-200 rounded text-xs text-yellow-700">
-                <i class="fas fa-info-circle mr-1"></i>
-                Project ID required for search testing
-              </div>
-            {/if}
-          {/if}
-        </div>
-      {/if}
       
       <!-- WEBSEARCH TOGGLE - For AssistantAgent, DelegateAgent -->
       <div>
@@ -3730,16 +3075,13 @@
     
     <!-- DELEGATE-SPECIFIC FIELDS -->
     {#if node.type === 'DelegateAgent'}
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-2">Termination Condition</label>
-        <input
-          type="text"
-          bind:value={nodeConfig.termination_condition}
-          on:input={updateNodeData}
-          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-oxford-blue focus:ring-2 focus:ring-oxford-blue focus:ring-opacity-20"
-          placeholder="FINISH"
-        />
-        <p class="text-xs text-gray-600 mt-1">Note: Max iterations are controlled by the Group Chat Manager's Max Rounds setting</p>
+      <div class="p-3 bg-orange-50 border border-orange-200 rounded-lg">
+        <p class="text-xs text-orange-700">
+          <i class="fas fa-info-circle mr-1"></i>
+          This delegate is invoked by its parent Group Chat Manager via tool calls.
+          Make sure the <strong>Description</strong> field above clearly describes
+          this delegate's expertise so the manager can route tasks correctly.
+        </p>
       </div>
     {/if}
     

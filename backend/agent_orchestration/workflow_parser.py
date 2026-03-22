@@ -8,6 +8,12 @@ Handles workflow graph parsing and multiple input processing for conversation or
 import logging
 from typing import Dict, List, Any, Optional
 
+from .executed_nodes_codec import (
+    plain_executed_output,
+    citations_from_executed_output,
+    format_upstream_citations_block,
+)
+
 logger = logging.getLogger('conversation_orchestrator')
 
 
@@ -337,13 +343,13 @@ class WorkflowParser:
         logger.info(f"✅ OUTGOING: Found {len(target_nodes)} target nodes for source node {source_node_id}")
         return target_nodes
     
-    def aggregate_multiple_inputs(self, input_sources: List[Dict[str, Any]], executed_nodes: Dict[str, str]) -> Dict[str, Any]:
+    def aggregate_multiple_inputs(self, input_sources: List[Dict[str, Any]], executed_nodes: Dict[str, Any]) -> Dict[str, Any]:
         """
         Aggregate multiple input sources into structured context
         
         Args:
             input_sources: List of input node metadata
-            executed_nodes: Dict mapping node_id to their output/response
+            executed_nodes: Dict mapping node_id to their output/response (str or packed dict with text+citations)
         
         Returns:
             Dict with aggregated context information
@@ -352,6 +358,7 @@ class WorkflowParser:
         
         aggregated_context = {
             'primary_input': '',
+            'primary_plain': '',
             'secondary_inputs': [],
             'input_summary': '',
             'all_inputs': [],
@@ -372,30 +379,38 @@ class WorkflowParser:
             input_name = input_source['name']
             input_type = input_source['type']
             
-            # Get the output/response from this input node
-            input_content = executed_nodes.get(input_id, f"[No output from {input_name}]")
+            # Get the output/response from this input node (may be str or {text, citations})
+            raw_output = executed_nodes.get(input_id, f"[No output from {input_name}]")
+            content_plain = plain_executed_output(raw_output)
+            upstream_cites = citations_from_executed_output(raw_output)
+            display_content = content_plain
+            if upstream_cites:
+                display_content = content_plain + format_upstream_citations_block(input_name, upstream_cites)
             
             # DEBUG: Log if content is missing or truncated
             if input_id not in executed_nodes:
                 logger.warning(f"⚠️ MULTI-INPUT: Node {input_id} ({input_name}) not found in executed_nodes. Available keys: {list(executed_nodes.keys())}")
-            elif len(str(input_content)) < 50:
-                logger.warning(f"⚠️ MULTI-INPUT: Node {input_id} ({input_name}) has suspiciously short content ({len(str(input_content))} chars): {input_content[:100]}")
+            elif len(content_plain) < 50 and input_id in executed_nodes:
+                logger.warning(f"⚠️ MULTI-INPUT: Node {input_id} ({input_name}) has suspiciously short content ({len(content_plain)} chars): {content_plain[:100]}")
             
             input_context = {
                 'name': input_name,
                 'type': input_type,
-                'content': input_content,
+                'content': display_content,
+                'content_plain': content_plain,
+                'citations': upstream_cites,
                 'priority': i + 1
             }
             
             input_contexts.append(input_context)
             aggregated_context['all_inputs'].append(input_context)
             
-            logger.info(f"📥 MULTI-INPUT: Processed input {i+1}: {input_name} ({input_type}) - {len(str(input_content))} chars (node_id: {input_id})")
+            logger.info(f"📥 MULTI-INPUT: Processed input {i+1}: {input_name} ({input_type}) - {len(str(display_content))} chars (node_id: {input_id})")
         
         # Set primary input (first/highest priority)
         if input_contexts:
             aggregated_context['primary_input'] = input_contexts[0]['content']
+            aggregated_context['primary_plain'] = input_contexts[0].get('content_plain', input_contexts[0]['content'])
             aggregated_context['secondary_inputs'] = input_contexts[1:] if len(input_contexts) > 1 else []
         
         # Create formatted summary

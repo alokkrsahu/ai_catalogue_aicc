@@ -563,14 +563,19 @@ class WebSearchHandler:
         
         query_parts = []
         
-        # Add primary input
-        if aggregated_context.get('primary_input'):
+        # Prefer plain upstream text (omit citation appendix) for search query length/quality
+        primary_plain = aggregated_context.get('primary_plain')
+        if primary_plain:
+            query_parts.append(str(primary_plain))
+        elif aggregated_context.get('primary_input'):
             primary_input = str(aggregated_context['primary_input'])
             query_parts.append(primary_input)
         
-        # Add secondary inputs
         for secondary in aggregated_context.get('secondary_inputs', []):
-            if secondary.get('content'):
+            sec_plain = secondary.get('content_plain')
+            if sec_plain:
+                query_parts.append(str(sec_plain))
+            elif secondary.get('content'):
                 query_parts.append(str(secondary['content']))
         
         combined_query = " ".join(query_parts).strip()
@@ -653,3 +658,137 @@ class WebSearchHandler:
         except Exception as e:
             logger.error(f"❌ WEBSEARCH FROM QUERY: Error: {e}")
             return f"⚠️ Web search failed: {str(e)}"
+
+    # =========================================================================
+    # Tool-based Web Search (LLM-callable tool)
+    # =========================================================================
+
+    WEB_SEARCH_TOOL_NAME = "web_search"
+
+    def build_websearch_tool(self, agent_node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Build an OpenAI-format tool schema for web search.
+
+        Returns None if web search is not enabled for this agent.
+        The tool description adapts based on the configured mode.
+        """
+        if not self.is_websearch_enabled(agent_node):
+            return None
+
+        agent_data = agent_node.get('data', {})
+        mode = self.get_websearch_mode(agent_node)
+
+        if mode == 'urls':
+            urls = agent_data.get('web_search_urls', [])
+            url_list = ', '.join(urls[:5])
+            if len(urls) > 5:
+                url_list += f' (and {len(urls) - 5} more)'
+            description = (
+                f"Fetch content from pre-configured URLs: {url_list}. "
+                "Call this tool to retrieve the latest content from these websites."
+            )
+            parameters = {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Optional: a question or topic to focus on when summarising the fetched content",
+                    }
+                },
+                "required": [],
+            }
+        elif mode == 'domains':
+            domains = agent_data.get('web_search_domains', [])
+            domain_list = ', '.join(domains[:10])
+            description = (
+                f"Search the web within these domains: {domain_list}. "
+                "Use this tool when you need real-time or specific information from these websites."
+            )
+            parameters = {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query to look up within the configured domains",
+                    }
+                },
+                "required": ["query"],
+            }
+        else:
+            description = (
+                "Search the internet for real-time information using DuckDuckGo. "
+                "Use this tool when you need current facts, recent events, or "
+                "information not available in the project documents."
+            )
+            parameters = {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query to look up on the internet",
+                    }
+                },
+                "required": ["query"],
+            }
+
+        return {
+            "type": "function",
+            "function": {
+                "name": self.WEB_SEARCH_TOOL_NAME,
+                "description": description[:1024],
+                "parameters": parameters,
+            },
+        }
+
+    async def execute_websearch_tool(
+        self,
+        agent_node: Dict[str, Any],
+        query: str,
+        project_id: str,
+    ) -> str:
+        """
+        Execute a web search tool call and return formatted results.
+
+        Dispatches to the appropriate handler based on the agent's
+        configured web search mode (general / domains / urls).
+        """
+        agent_data = agent_node.get('data', {})
+        mode = self.get_websearch_mode(agent_node)
+        cache_ttl = agent_data.get('web_search_cache_ttl', 3600)
+        max_results = agent_data.get('web_search_max_results', 5)
+
+        logger.info(
+            f"🌐 WEBSEARCH TOOL: mode={mode}, query='{(query or '')[:60]}'"
+        )
+        start_time = time.time()
+
+        try:
+            if mode == 'urls':
+                urls = agent_data.get('web_search_urls', [])
+                if not urls:
+                    return "No URLs configured for web search."
+                context = await self._get_url_context(urls, cache_ttl, project_id)
+            elif mode == 'domains':
+                domains = agent_data.get('web_search_domains', [])
+                if not query:
+                    return "A search query is required for domain-restricted web search."
+                context = await self._get_domain_search_context(
+                    query, domains, max_results, cache_ttl, project_id
+                )
+            else:
+                if not query:
+                    return "A search query is required for general web search."
+                context = await self._get_general_search_context(
+                    query, max_results, cache_ttl, project_id
+                )
+
+            duration_ms = (time.time() - start_time) * 1000
+            logger.info(
+                f"🌐 WEBSEARCH TOOL: completed in {duration_ms:.0f}ms, "
+                f"{len(context)} chars"
+            )
+            return context or "No results found."
+
+        except Exception as e:
+            logger.error(f"❌ WEBSEARCH TOOL: Error: {e}")
+            return f"Web search failed: {str(e)}"

@@ -180,15 +180,7 @@ class MilvusProjectVectorDatabase:
                 FieldSchema(name="section_title", dtype=DataType.VARCHAR, max_length=200),
                 FieldSchema(name="is_complete_document", dtype=DataType.BOOL),
                 
-                # AI-Generated Content Fields (Summary and Topic)
-                FieldSchema(name="summary", dtype=DataType.VARCHAR, max_length=2000),
-                FieldSchema(name="summary_word_count", dtype=DataType.INT64),
-                FieldSchema(name="summary_generated_at", dtype=DataType.VARCHAR, max_length=50),
-                FieldSchema(name="summarizer_used", dtype=DataType.VARCHAR, max_length=50),
-                FieldSchema(name="topic", dtype=DataType.VARCHAR, max_length=500),
-                FieldSchema(name="topic_word_count", dtype=DataType.INT64),
-                FieldSchema(name="topic_generated_at", dtype=DataType.VARCHAR, max_length=50),
-                FieldSchema(name="topic_generator_used", dtype=DataType.VARCHAR, max_length=50),
+                # AI-Generated Content Fields removed (document-level summaries live in Postgres)
                 
                 # Processing Metadata Fields
                 FieldSchema(name="vector_id", dtype=DataType.VARCHAR, max_length=100),
@@ -209,6 +201,30 @@ class MilvusProjectVectorDatabase:
             else:
                 self.collection = Collection(self.collection_name, using=self.connection_alias)
                 logger.info(f"Using existing enhanced collection: {self.collection_name}")
+                
+                # If the existing collection schema doesn't match, drop/recreate.
+                # We removed chunk-level summary/topic fields, so stale collections must be rebuilt.
+                try:
+                    expected_field_names = [f.name for f in fields]
+                    existing_field_names = [f.name for f in self.collection.schema.fields]
+                    if existing_field_names != expected_field_names:
+                        logger.warning(
+                            f"⚠️ Enhanced collection schema mismatch for {self.collection_name}. "
+                            f"Dropping/recreating to match new schema. "
+                            f"Expected={expected_field_names}, Existing={existing_field_names}"
+                        )
+                        self.collection.drop()
+                        self.collection = Collection(
+                            name=self.collection_name,
+                            schema=schema,
+                            using=self.connection_alias,
+                        )
+                        self._create_indices()
+                except Exception as schema_check_error:
+                    logger.warning(
+                        f"⚠️ Failed while validating enhanced collection schema for {self.collection_name}: {schema_check_error}. "
+                        f"Will rely on load failure handling below."
+                    )
             
             # Load collection for search with proper error handling
             try:
@@ -344,14 +360,6 @@ class MilvusProjectVectorDatabase:
                 [],  # chunk_type
                 [],  # section_title
                 [],  # is_complete_document
-                [],  # summary
-                [],  # summary_word_count
-                [],  # summary_generated_at
-                [],  # summarizer_used
-                [],  # topic
-                [],  # topic_word_count
-                [],  # topic_generated_at
-                [],  # topic_generator_used
                 [],  # vector_id
                 [],  # has_embedding
                 [],  # processing_time_ms
@@ -417,21 +425,11 @@ class MilvusProjectVectorDatabase:
                 batch_entities[19].append(safe_str(metadata.get('section_title')))
                 batch_entities[20].append(safe_bool(metadata.get('is_complete_document')))
                 
-                # AI-Generated Content Fields
-                batch_entities[21].append(safe_str(metadata.get('summary')))
-                batch_entities[22].append(safe_int(metadata.get('summary_word_count')))
-                batch_entities[23].append(safe_str(metadata.get('summary_generated_at')))
-                batch_entities[24].append(safe_str(metadata.get('summarizer_used'), 'enhanced_ai'))
-                batch_entities[25].append(safe_str(metadata.get('topic')))
-                batch_entities[26].append(safe_int(metadata.get('topic_word_count')))
-                batch_entities[27].append(safe_str(metadata.get('topic_generated_at')))
-                batch_entities[28].append(safe_str(metadata.get('topic_generator_used'), 'enhanced_ai'))
-                
                 # Processing Metadata Fields
-                batch_entities[29].append(safe_str(metadata.get('vector_id')))
-                batch_entities[30].append(safe_bool(metadata.get('has_embedding')))
-                batch_entities[31].append(safe_int(metadata.get('processing_time_ms')))
-                batch_entities[32].append(safe_str(metadata.get('error_message')))
+                batch_entities[21].append(safe_str(metadata.get('vector_id')))
+                batch_entities[22].append(safe_bool(metadata.get('has_embedding')))
+                batch_entities[23].append(safe_int(metadata.get('processing_time_ms')))
+                batch_entities[24].append(safe_str(metadata.get('error_message')))
             
             logger.info(f"📦 Prepared batch entities for {document_name}: {len(chunks_data)} chunks")
             return batch_entities
@@ -508,16 +506,6 @@ class MilvusProjectVectorDatabase:
                 [safe_str(metadata.get('section_title'))],
                 [safe_bool(metadata.get('is_complete_document'))],
                 
-                # AI-Generated Content Fields - handle None values when summary is disabled
-                [safe_str(metadata.get('summary')) if metadata.get('summary') else ''],
-                [safe_int(metadata.get('summary_word_count', 0))],
-                [safe_str(metadata.get('summary_generated_at'))],
-                [safe_str(metadata.get('summarizer_used', 'none'), 'none')],
-                [safe_str(metadata.get('topic')) if metadata.get('topic') else ''],
-                [safe_int(metadata.get('topic_word_count', 0))],
-                [safe_str(metadata.get('topic_generated_at'))],
-                [safe_str(metadata.get('topic_generator_used', 'none'), 'none')],
-                
                 # Processing Metadata Fields
                 [safe_str(metadata.get('vector_id'))],
                 [safe_bool(metadata.get('has_embedding'))],
@@ -582,8 +570,6 @@ class MilvusProjectVectorDatabase:
                     "category", "subcategory", "document_type", "virtual_path", "hierarchical_path",
                     "hierarchy_level", "organization_level", "chunk_id", "chunk_index", "total_chunks",
                     "chunk_type", "section_title", "is_complete_document",
-                    "summary", "summary_word_count", "summary_generated_at", "summarizer_used",
-                    "topic", "topic_word_count", "topic_generated_at", "topic_generator_used",
                     "vector_id", "has_embedding", "processing_time_ms", "error_message"
                 ]
             )
@@ -601,8 +587,6 @@ class MilvusProjectVectorDatabase:
                     "uploaded_at": hit.entity.get('uploaded_at'),
                     "category": hit.entity.get('category'),
                     "subcategory": hit.entity.get('subcategory'),
-                    "summary": hit.entity.get('summary'),
-                    "topic": hit.entity.get('topic'),
                     "similarity": float(hit.score)
                 })
             

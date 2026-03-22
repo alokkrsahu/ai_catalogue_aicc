@@ -14,7 +14,7 @@ import re
 from .embeddings import DocumentEmbedder
 from .summarization import get_summarizer
 from .gemini_extractor import get_gemini_extractor, initialize_gemini_extractor
-from project_api_keys.integration_examples import ProjectAwareOpenAISummarizer, MultiProviderSummarizer
+from project_api_keys.integration_examples import ProjectAwareOpenAISummarizer
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,8 @@ class EnhancedHierarchicalProcessor:
         max_chunk_size: int = 35000,
         llm_provider: str = None,
         llm_model: str = None,
-        enable_summary: bool = True
+        enable_summary: bool = True,
+        folder_organization_map: Optional[Dict[str, str]] = None,
     ):
         """
         Initialize processor with project-specific API keys and LLM configuration
@@ -101,7 +102,7 @@ class EnhancedHierarchicalProcessor:
             embedder: DocumentEmbedder instance
             max_chunk_size: Maximum chunk size in characters
             llm_provider: LLM provider to use (e.g., 'openai', 'anthropic', 'google')
-            llm_model: LLM model to use (e.g., 'gpt-3.5-turbo', 'claude-3-opus')
+            llm_model: LLM model to use (e.g., 'gpt-5.3-chat-latest', 'claude-3-opus')
             enable_summary: Whether to generate summaries for chunks
 
         Raises:
@@ -116,37 +117,25 @@ class EnhancedHierarchicalProcessor:
         # Get preserve_original_folder_structure setting from project
         self.preserve_original_folder_structure = getattr(project, 'preserve_original_folder_structure', False)
 
+        # Optional LLM-provided folder mapping: {str(document_id): "Category/Subcategory"}
+        # Used when preserve_original_folder_structure=True to replace uploaded folder paths.
+        self.folder_organization_map: Dict[str, str] = folder_organization_map or {}
+
         # Determine LLM provider and model (default to OpenAI if not specified)
         self.llm_provider = llm_provider or 'openai'
-        self.llm_model = llm_model or 'gpt-3.5-turbo'
+        self.llm_model = llm_model or 'gpt-5.3-chat-latest'
 
-        logger.info(f"📋 PROCESSOR: Initializing with LLM Provider: {self.llm_provider}, Model: {self.llm_model}, Enable Summary: {self.enable_summary}, Preserve Original Folders: {self.preserve_original_folder_structure}")
+        logger.info(
+            "📋 PROCESSOR: Initializing with LLM Provider: %s, Model: %s, Enable Summary: %s, Preserve Original Folders: %s",
+            self.llm_provider,
+            self.llm_model,
+            self.enable_summary,
+            self.preserve_original_folder_structure,
+        )
 
-        # Use MultiProviderSummarizer if summary is enabled, otherwise None
-        if self.enable_summary:
-            try:
-                self.summarizer = MultiProviderSummarizer(
-                    project=project,
-                    provider_type=self.llm_provider,
-                    model=self.llm_model
-                )
-
-                # Check if summarizer is available
-                if not self.summarizer.is_available():
-                    error_msg = (
-                        f"❌ PROJECT API KEY REQUIRED: Project '{project.name}' does not have a {self.llm_provider} API key configured. "
-                        f"Please add your {self.llm_provider} API key in the project's API Management settings before processing documents."
-                    )
-                    logger.error(error_msg)
-                    raise ValueError(error_msg)
-
-                logger.info(f"✅ AI Summarizer initialized with {self.llm_provider} provider (model: {self.llm_model}) for project '{project.name}'")
-            except Exception as e:
-                logger.error(f"❌ Failed to initialize MultiProviderSummarizer: {e}")
-                raise ValueError(f"Failed to initialize summarizer: {str(e)}")
-        else:
-            self.summarizer = None
-            logger.info(f"ℹ️ Summarizer disabled for project '{project.name}' - summaries will not be generated")
+        # Chunk-level summary/topic generation has been removed.
+        # Document-level summaries will be generated separately (file-based) during Start Processing.
+        self.summarizer = None
 
         # Initialize PDF extractor (use Google/Gemini if selected, otherwise fallback)
         self._initialize_extractors()
@@ -204,7 +193,13 @@ class EnhancedHierarchicalProcessor:
         
         for doc in documents:
             filename = doc.original_filename
-            hierarchy_info = self._analyze_filename_structure(filename)
+            if self.preserve_original_folder_structure:
+                # preserve_original_folder_structure now means:
+                # use LLM-chosen folder organization only.
+                folder_override = self.folder_organization_map.get(str(getattr(doc, "document_id", "")), "")
+                hierarchy_info = self._build_llm_structure_path(filename, folder_override or "General")
+            else:
+                hierarchy_info = self._analyze_filename_structure(filename)
             
             # Store document in hierarchy
             hierarchy['documents'][doc.id] = hierarchy_info
@@ -228,18 +223,10 @@ class EnhancedHierarchicalProcessor:
         return hierarchy
     
     def _analyze_filename_structure(self, filename: str) -> Dict[str, Any]:
-        """Enhanced filename analysis with detailed hierarchy mapping
-        
-        Supports two modes:
-        1. preserve_original_folder_structure=True: Uses the exact folder structure from uploaded files
-        2. preserve_original_folder_structure=False: Auto-classifies based on filename patterns
+        """Enhanced filename analysis with detailed hierarchy mapping.
+
+        This path is used only when preserve_original_folder_structure=False.
         """
-        
-        # Check if we should preserve original folder structure
-        if self.preserve_original_folder_structure:
-            return self._build_original_structure_path(filename)
-        
-        # Otherwise, use existing auto-classification logic
         return self._build_auto_classified_path(filename)
     
     def _build_original_structure_path(self, filename: str) -> Dict[str, Any]:
@@ -318,6 +305,69 @@ class EnhancedHierarchicalProcessor:
         }
         
         logger.debug(f"📁 PRESERVE ORIGINAL: {filename} -> {virtual_path}")
+        return structure
+
+    def _build_llm_structure_path(self, filename: str, folder_path: str) -> Dict[str, Any]:
+        """
+        Build virtual path using an LLM-decided folder_path instead of uploaded folder names.
+        Example:
+          folder_path="Legal/Contracts" -> documents/Legal/Contracts/<file_only>
+        """
+        normalized_filename = (filename or "").replace('\\', '/')
+        normalized_filename = re.sub(r'/+', '/', normalized_filename)
+        normalized_filename = normalized_filename.strip('/')
+
+        if '/' in normalized_filename:
+            _, file_only = normalized_filename.rsplit('/', 1)
+        else:
+            file_only = normalized_filename
+
+        if not file_only:
+            logger.warning("Empty file name detected while building LLM structure path; using Path().name fallback")
+            file_only = Path(filename).name or filename or "unknown_file"
+
+        file_only = str(file_only).strip()
+        name_without_ext = Path(file_only).stem.lower()
+
+        folder_path = (folder_path or "").replace('\\', '/').strip('/')
+        folder_levels = [p for p in folder_path.split('/') if p.strip()]
+        if not folder_levels:
+            # Keep behavior predictable if the LLM produced an empty/invalid folder path.
+            folder_levels = []
+
+        category = folder_levels[0] if len(folder_levels) >= 1 else 'General'
+        subcategory = folder_levels[1] if len(folder_levels) >= 2 else None
+        hierarchy_level = len(folder_levels)
+
+        if hierarchy_level == 0:
+            organization_level = 'flat'
+        elif hierarchy_level <= 2:
+            organization_level = 'structured'
+        else:
+            organization_level = 'highly_organized'
+
+        if folder_levels:
+            safe_folder_path = '/'.join(folder_levels[:2])
+            virtual_path = f'documents/{safe_folder_path}/{file_only}'
+        else:
+            virtual_path = f'documents/{file_only}'
+
+        structure = {
+            'original_filename': filename,
+            'base_name': name_without_ext,
+            'category': category,
+            'subcategory': subcategory,
+            'document_type': 'document',
+            'hierarchy_level': hierarchy_level,
+            'virtual_path': virtual_path,
+            'folder_indicators': ['llm_organized'] if folder_levels else [],
+            'content_type_hints': [],
+            'organization_level': organization_level,
+            # Store the LLM-chosen folder path for reference/debugging.
+            'original_folder_path': '/'.join(folder_levels[:2]) if folder_levels else '',
+        }
+
+        logger.debug("📁 LLM FOLDER ORG: %s -> %s", filename, virtual_path)
         return structure
     
     def _build_auto_classified_path(self, filename: str) -> Dict[str, Any]:
@@ -748,7 +798,7 @@ class EnhancedHierarchicalProcessor:
     def _create_single_chunk(self, content: str, chunk_index: int, total_chunks: int,
                            document_metadata: Dict[str, Any], hier_info: Dict[str, Any],
                            chunk_type: str, section_title: str) -> DocumentChunk:
-        """Create a single document chunk and generate its summary and topic."""
+        """Create a single document chunk (no summary/topic generation)."""
         
         logger.info(f"      Creating chunk {chunk_index} ('{chunk_type}' / '{section_title}')...")
         
@@ -758,32 +808,6 @@ class EnhancedHierarchicalProcessor:
         folder_path = '/'.join(path_parts[:-1])
         chunk_hierarchical_path = f"{folder_path}/{file_part}#chunk_{chunk_index:03d}"
         
-        # Generate summary and topic if enabled
-        summary = None
-        topic = None
-        
-        if self.enable_summary and self.summarizer:
-            logger.info(f"         -> Generating AI content (summary/topic) using {self.llm_provider} provider (model: {self.llm_model})...")
-            summary_metadata = {'file_name': document_metadata['file_name'], 'section_title': section_title}
-
-            # Generate summary and topic using configured provider
-            summary = self.summarizer.generate_summary(content, summary_metadata) or None
-            topic = self.summarizer.generate_topic(content, summary_metadata) or None
-
-            if not summary:
-                logger.warning(f"         -> ⚠️ Failed to generate summary for chunk {chunk_index}.")
-                summary = None
-            else:
-                logger.info(f"         -> ✔️ Summary generated ({len(summary)} chars).")
-
-            if not topic:
-                logger.warning(f"         -> ⚠️ Failed to generate topic for chunk {chunk_index}.")
-                topic = None
-            else:
-                logger.info(f"         -> ✔️ Topic generated: '{topic}'.")
-        else:
-            logger.info(f"         -> ℹ️ Summary generation disabled - skipping summary/topic generation for chunk {chunk_index}.")
-
         chunk_id = str(uuid.uuid4())
         chunk_metadata = {
             **document_metadata,
@@ -792,8 +816,6 @@ class EnhancedHierarchicalProcessor:
             'chunk_type': chunk_type,
             'section_title': section_title,
             'content_length': len(content),
-            'summary': summary or None,  # Explicitly set to None if not generated
-            'topic': topic or None,  # Explicitly set to None if not generated
         }
         
         logger.info(f"      ✔️ Chunk {chunk_index} created successfully.")
