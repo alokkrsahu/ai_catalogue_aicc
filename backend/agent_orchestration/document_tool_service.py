@@ -531,21 +531,32 @@ async def execute_document_tool(
         current_memory = doc_summary.memory if isinstance(doc_summary.memory, list) else []
         current_memory.append(memory_entry)
         doc_summary.memory = current_memory
-        await sync_to_async(doc_summary.save)(update_fields=["memory", "updated_at"])
-        logger.info(
-            f"🧠 DOC MEMORY: Saved entry #{len(current_memory)} for "
-            f"{doc.original_filename} ({len(citations)} citations)"
-        )
 
-        # Trigger condensation if needed
-        if len(current_memory) > CONDENSATION_THRESHOLD:
-            await condense_document_memory(doc_summary, provider, model, project, project_api_key)
+        # Background DB writes — not needed for the current response.
+        # The in-memory object is already updated; persist asynchronously.
+        _doc_filename = doc.original_filename
+        _mem_count = len(current_memory)
+        _needs_condensation = _mem_count > CONDENSATION_THRESHOLD
+        _needs_citation = not doc_summary.citation
 
-        # Extract bibliographic citation on first use
-        if not doc_summary.citation:
-            await extract_document_citation(
-                doc, doc_summary, file_id, provider, model, project, project_api_key
-            )
+        async def _background_persist():
+            try:
+                await sync_to_async(doc_summary.save)(update_fields=["memory", "updated_at"])
+                logger.info(
+                    f"🧠 DOC MEMORY: Saved entry #{_mem_count} for "
+                    f"{_doc_filename} ({len(citations)} citations)"
+                )
+                if _needs_condensation:
+                    await condense_document_memory(doc_summary, provider, model, project, project_api_key)
+                if _needs_citation:
+                    await extract_document_citation(
+                        doc, doc_summary, file_id, provider, model, project, project_api_key
+                    )
+            except Exception as bg_err:
+                logger.warning(f"⚠️ DOC MEMORY: Background persist failed for {_doc_filename}: {bg_err}")
+
+        import asyncio
+        asyncio.create_task(_background_persist())
 
     logger.info(
         f"✅ DOC TOOL EXEC: {doc.original_filename} answered in {elapsed}ms "

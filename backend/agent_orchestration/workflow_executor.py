@@ -1877,6 +1877,22 @@ class WorkflowExecutor:
                 project_id, selected_filenames=doc_tool_selected
             )
 
+        # ---- Pre-warm: upload all tool documents to LLM provider in parallel ----
+        if tool_map:
+            try:
+                from .llm_file_service import LLMFileUploadService
+                from users.models import ProjectDocument as _PWDoc
+                _prewarm_project = await sync_to_async(lambda: workflow.project)()
+                _file_svc = LLMFileUploadService(_prewarm_project)
+                _doc_ids = list(set(tool_map.values()))
+                _prewarm_docs = await sync_to_async(list)(_PWDoc.objects.filter(document_id__in=_doc_ids))
+                _upload_tasks = [_file_svc._upload_to_provider(doc, provider_name) for doc in _prewarm_docs]
+                _results = await asyncio.gather(*_upload_tasks, return_exceptions=True)
+                _ok = sum(1 for r in _results if not isinstance(r, Exception))
+                logger.info(f"🔥 PRE-WARM: Uploaded {_ok}/{len(_prewarm_docs)} documents to {provider_name}")
+            except Exception as pw_err:
+                logger.warning(f"⚠️ PRE-WARM: Failed to pre-warm uploads: {pw_err}")
+
         # ---- Build web search tool ----
         _ws_handler = getattr(self.chat_manager, 'websearch_handler', None)
         ws_tool = _ws_handler.build_websearch_tool(node) if _ws_handler else None
@@ -1936,57 +1952,63 @@ class WorkflowExecutor:
                     "non-redundant questions."
                 )
 
-        # ---- Phase 1: Planning ----
-        planning_messages = list(llm_messages)  # shallow copy
-        if has_doc_tools:
-            planning_content = (
-                "Before answering, create a numbered plan of which documents "
-                "you will consult and what information you need from each.\n\n"
-                "Available documents (as tools you can call):\n"
-                f"{tool_descriptions}"
-                f"{memory_section}\n\n"
-                "Output ONLY the plan as a numbered list."
-            )
+        # ---- Phase 1: Planning (controlled by plan_mode toggle) ----
+        plan_mode_enabled = node_data.get("plan_mode", True)  # default ON for backward compat
+        plan_text = ""
+
+        if plan_mode_enabled:
+            planning_messages = list(llm_messages)  # shallow copy
+            if has_doc_tools:
+                planning_content = (
+                    "Before answering, create a numbered plan of which documents "
+                    "you will consult and what information you need from each.\n\n"
+                    "Available documents (as tools you can call):\n"
+                    f"{tool_descriptions}"
+                    f"{memory_section}\n\n"
+                    "Output ONLY the plan as a numbered list."
+                )
+            else:
+                planning_content = (
+                    "Before answering, create a numbered plan of what information "
+                    "you need to find using the available tools.\n\n"
+                    "Available tools:\n"
+                    f"{tool_descriptions}\n\n"
+                    "Output ONLY the plan as a numbered list."
+                )
+            planning_messages.append({
+                "role": "user",
+                "content": planning_content,
+            })
+            plan_response = await llm_provider.generate_response(messages=planning_messages)
+            if plan_response.error:
+                raise Exception(f"Agent {node_name} planning error: {plan_response.error}")
+
+            plan_text = plan_response.text.strip()
+            logger.info(f"📋 DOC TOOL CALLING [{node_name}]: Plan created ({len(plan_text)} chars)")
+
+            if event_callback:
+                event_callback("planning", {"agent": node_name, "content": plan_text})
+
+            messages.append({
+                "sequence": message_sequence,
+                "agent_name": node_name,
+                "agent_type": node_type,
+                "content": plan_text,
+                "message_type": "tool_plan",
+                "timestamp": timezone.now().isoformat(),
+                "response_time_ms": getattr(plan_response, "response_time_ms", 0),
+                "token_count": getattr(plan_response, "token_count", None),
+                "metadata": {
+                    "llm_provider": provider_name,
+                    "llm_model": model_name,
+                    "phase": "planning",
+                },
+            })
+            message_sequence += 1
+            execution_record.messages_data = messages
+            await sync_to_async(execution_record.save)()
         else:
-            planning_content = (
-                "Before answering, create a numbered plan of what information "
-                "you need to find using the available tools.\n\n"
-                "Available tools:\n"
-                f"{tool_descriptions}\n\n"
-                "Output ONLY the plan as a numbered list."
-            )
-        planning_messages.append({
-            "role": "user",
-            "content": planning_content,
-        })
-        plan_response = await llm_provider.generate_response(messages=planning_messages)
-        if plan_response.error:
-            raise Exception(f"Agent {node_name} planning error: {plan_response.error}")
-
-        plan_text = plan_response.text.strip()
-        logger.info(f"📋 DOC TOOL CALLING [{node_name}]: Plan created ({len(plan_text)} chars)")
-
-        if event_callback:
-            event_callback("planning", {"agent": node_name, "content": plan_text})
-
-        messages.append({
-            "sequence": message_sequence,
-            "agent_name": node_name,
-            "agent_type": node_type,
-            "content": plan_text,
-            "message_type": "tool_plan",
-            "timestamp": timezone.now().isoformat(),
-            "response_time_ms": getattr(plan_response, "response_time_ms", 0),
-            "token_count": getattr(plan_response, "token_count", None),
-            "metadata": {
-                "llm_provider": provider_name,
-                "llm_model": model_name,
-                "phase": "planning",
-            },
-        })
-        message_sequence += 1
-        execution_record.messages_data = messages
-        await sync_to_async(execution_record.save)()
+            logger.info(f"⚡ DOC TOOL CALLING [{node_name}]: Plan mode disabled — skipping planning phase")
 
         # ---- Phase 2: Tool calling loop ----
         notebook: List[Dict[str, Any]] = []
@@ -2005,11 +2027,12 @@ class WorkflowExecutor:
 
         # Start the tool-calling conversation from the original messages
         tool_conv = list(llm_messages)
+        _plan_intro = f"Here is your plan:\n{plan_text}\n\n" if plan_mode_enabled and plan_text else ""
         tool_conv.append({
             "role": "user",
             "content": (
-                f"Here is your plan:\n{plan_text}\n\n"
-                "Now execute this plan step by step. Use the document tools "
+                f"{_plan_intro}"
+                "Use the document tools "
                 "to retrieve information. When you have gathered all the "
                 "information you need, provide your final answer WITHOUT "
                 "calling any more tools.\n\n"

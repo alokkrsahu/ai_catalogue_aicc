@@ -211,6 +211,22 @@ async def run_delegate_doc_tool_loop(
             project_id, selected_filenames=doc_tool_selected
         )
 
+    # Pre-warm: upload all tool documents to LLM provider in parallel
+    if tool_map:
+        try:
+            from .llm_file_service import LLMFileUploadService
+            from users.models import ProjectDocument as _PWDoc, IntelliDocProject as _PWProj
+            _pw_proj = await sync_to_async(_PWProj.objects.get)(project_id=project_id)
+            _file_svc = LLMFileUploadService(_pw_proj)
+            _doc_ids = list(set(tool_map.values()))
+            _pw_docs = await sync_to_async(list)(_PWDoc.objects.filter(document_id__in=_doc_ids))
+            _upload_tasks = [_file_svc._upload_to_provider(doc, provider_name) for doc in _pw_docs]
+            _results = await asyncio.gather(*_upload_tasks, return_exceptions=True)
+            _ok = sum(1 for r in _results if not isinstance(r, Exception))
+            logger.info(f"🔥 PRE-WARM (delegate): Uploaded {_ok}/{len(_pw_docs)} documents to {provider_name}")
+        except Exception as pw_err:
+            logger.warning(f"⚠️ PRE-WARM (delegate): Failed: {pw_err}")
+
     ws_tool = websearch_handler.build_websearch_tool(delegate_node) if websearch_handler else None
     if ws_tool:
         tools.append(ws_tool)
@@ -266,27 +282,33 @@ async def run_delegate_doc_tool_loop(
     except Exception as mem_err:
         logger.warning(f"⚠️ DELEGATE TOOL EXEC [{delegate_name}]: Could not fetch memory context: {mem_err}")
 
-    # Phase 1 — delegate-level planning
-    planning_messages = list(base_messages)
-    planning_messages.append({
-        "role": "user",
-        "content": (
-            "Before answering, create a numbered plan of which documents "
-            "you will consult and what information you need from each.\n\n"
-            f"Available documents (as tools you can call):\n{tool_descriptions}"
-            f"{memory_section}\n\n"
-            "Output ONLY the plan as a numbered list."
-        ),
-    })
-    plan_resp = await delegate_llm.generate_response(messages=planning_messages)
-    if plan_resp.error:
-        return f"[Error from {delegate_name} planning: {plan_resp.error}]"
-    plan_text = plan_resp.text.strip()
-    logger.info(
-        f"📋 DELEGATE TOOL EXEC [{delegate_name}]: Plan created ({len(plan_text)} chars)"
-    )
-    if event_callback:
-        event_callback("delegate_plan", {"agent": delegate_name, "content": plan_text})
+    # Phase 1 — delegate-level planning (controlled by plan_mode toggle)
+    plan_mode_enabled = data.get("plan_mode", True)  # default ON for backward compat
+    plan_text = ""
+
+    if plan_mode_enabled:
+        planning_messages = list(base_messages)
+        planning_messages.append({
+            "role": "user",
+            "content": (
+                "Before answering, create a numbered plan of which documents "
+                "you will consult and what information you need from each.\n\n"
+                f"Available documents (as tools you can call):\n{tool_descriptions}"
+                f"{memory_section}\n\n"
+                "Output ONLY the plan as a numbered list."
+            ),
+        })
+        plan_resp = await delegate_llm.generate_response(messages=planning_messages)
+        if plan_resp.error:
+            return f"[Error from {delegate_name} planning: {plan_resp.error}]"
+        plan_text = plan_resp.text.strip()
+        logger.info(
+            f"📋 DELEGATE TOOL EXEC [{delegate_name}]: Plan created ({len(plan_text)} chars)"
+        )
+        if event_callback:
+            event_callback("delegate_plan", {"agent": delegate_name, "content": plan_text})
+    else:
+        logger.info(f"⚡ DELEGATE TOOL EXEC [{delegate_name}]: Plan mode disabled — skipping planning phase")
 
     # Phase 2 — tool loop
     title_ref_lines = [
@@ -300,11 +322,12 @@ async def run_delegate_doc_tool_loop(
         )
 
     tool_conv = list(base_messages)
+    _plan_intro = f"Here is your plan:\n{plan_text}\n\n" if plan_text else ""
     tool_conv.append({
         "role": "user",
         "content": (
-            f"Here is your plan:\n{plan_text}\n\n"
-            "Now execute this plan step by step. Use the document tools "
+            f"{_plan_intro}"
+            "Use the document tools "
             "to retrieve information. When you have gathered all the "
             "information you need, provide your final answer WITHOUT "
             "calling any more tools.\n\n"

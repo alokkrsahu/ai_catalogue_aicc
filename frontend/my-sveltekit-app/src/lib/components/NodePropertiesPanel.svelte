@@ -156,6 +156,10 @@
       if (['AssistantAgent', 'DelegateAgent'].includes(node.type) && !nodeConfig.hasOwnProperty('doc_tool_calling')) {
         nodeConfig.doc_tool_calling = false;
       }
+      // Initialize plan_mode default (enabled = planning LLM call runs before tool execution)
+      if (['AssistantAgent', 'DelegateAgent'].includes(node.type) && !nodeConfig.hasOwnProperty('plan_mode')) {
+        nodeConfig.plan_mode = true;
+      }
       // Initialize doc_tool_calling_documents only for new nodes (not for existing nodes that
       // already have doc_tool_calling enabled but no selection — those fall back to all docs)
       if (['AssistantAgent', 'DelegateAgent'].includes(node.type)
@@ -2806,6 +2810,22 @@
         <p class="text-xs text-gray-500 mt-1">Agent analyzes project documents using tool calls with a plan-and-execute approach</p>
 
         {#if nodeConfig.doc_tool_calling}
+          <!-- Plan Mode toggle -->
+          <div class="mt-3 flex items-center gap-3 px-1">
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                bind:checked={nodeConfig.plan_mode}
+                class="sr-only peer"
+              />
+              <div class="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600"></div>
+            </label>
+            <div>
+              <span class="text-sm font-medium text-gray-700">Plan Mode</span>
+              <p class="text-xs text-gray-500">{nodeConfig.plan_mode ? 'Agent plans which documents to consult before executing' : 'Disabled — agent executes tools directly (faster, saves 1 LLM call)'}</p>
+            </div>
+          </div>
+
           <div class="mt-3 border border-purple-200 rounded-lg p-3 bg-purple-50/30">
             <label class="text-xs font-medium text-gray-700 mb-2 block">Select Documents for Tool Calling</label>
             {#if !uploadedDocumentPathsLoaded}
