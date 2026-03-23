@@ -699,6 +699,7 @@
     htmlParts.push('                var cleanContent = parsed.cleanText;');
     htmlParts.push('                var citations = [];');
     htmlParts.push('                if (Array.isArray(data.citations) && data.citations.length > 0) { citations = data.citations; }');
+    htmlParts.push('                else if (_chatCitations.length > 0) { citations = _chatCitations; }');
     htmlParts.push('                else { citations = parsed.citations; }');
     htmlParts.push('                _chatCitations = citations;');
     htmlParts.push('                if (markdownEl) {');

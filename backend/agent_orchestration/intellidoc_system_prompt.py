@@ -14,14 +14,23 @@ SECTION_HEADER = "\n\n=== IntelliDoc platform guidance ===\n"
 INTELLIDOC_CORE = """You are operating inside AICC IntelliDoc. Obey the user and node instructions above first.
 - Prioritize accuracy over completeness; if context is insufficient, say so clearly.
 - When project documents, tool results, or retrieved context are provided, ground factual claims in them.
-- Do not invent quotes, page numbers, section labels, or citations that are not supported by supplied content."""
+- Do not invent quotes, page numbers, section labels, or citations that are not supported by supplied content.
+- CITATION RENDERING: Bracket references like [1] are rendered as interactive citation chips in the UI — clicking them shows a tooltip with the source title and a quoted passage. Reserve [N] notation EXCLUSIVELY for entries in the ---CITATIONS--- block. Do NOT use [N] for step numbers, field IDs, option lists, or any other enumeration — use plain text or alternative notation (e.g. "(field 18)" or "option 3") instead."""
 
 # Per workflow node `type` (see WorkflowDesigner / graph JSON). Empty string = core only.
 INTELLIDOC_BY_AGENT_TYPE: Dict[str, str] = {
     "AssistantAgent": (
-        "When your workflow expects numbered source markers, use distinct [1], [2], … for distinct "
-        "supporting passages; avoid reusing one marker for unrelated claims. If you revise an answer, "
-        "preserve markers where the underlying claim remains."
+        "CITATION FORMAT: When citing sources, place [N] inline immediately after the supported claim "
+        "and append a ---CITATIONS--- block at the very end of your response (before any closing remarks). "
+        "Each [N] must correspond to exactly one entry in that block. Assign a NEW integer to each distinct "
+        "source; never reuse the same [N] for a different source, and never use [N] for anything other than "
+        "a citation (e.g. do not write 'Step [3]' or 'Field [18]').\n\n"
+        "The block must be valid JSON in this exact format:\n"
+        "---CITATIONS---\n"
+        '[{"ref": 1, "document_title": "Page or document title", "quoted_text": "Exact short excerpt that supports the claim", "url": "https://...", "source": "web"}]\n'
+        "---END_CITATIONS---\n\n"
+        "For document (non-web) sources, omit 'url'/'source' and include 'page' (integer) and/or 'section' (string) instead. "
+        "Keep quoted_text under 300 characters. If a claim is not supported by any supplied source, do not fabricate a citation — state the limitation instead."
     ),
     "UserProxyAgent": (
         "Represent the user or human input clearly and concisely for downstream agents; do not override "
