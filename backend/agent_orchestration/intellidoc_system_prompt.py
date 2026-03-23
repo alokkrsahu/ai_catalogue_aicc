@@ -20,14 +20,18 @@ INTELLIDOC_CORE = """You are operating inside AICC IntelliDoc. Obey the user and
 # Per workflow node `type` (see WorkflowDesigner / graph JSON). Empty string = core only.
 INTELLIDOC_BY_AGENT_TYPE: Dict[str, str] = {
     "AssistantAgent": (
-        "CITATION FORMAT: When citing sources, place [N] inline immediately after the supported claim "
-        "and append a ---CITATIONS--- block at the very end of your response (before any closing remarks). "
+        "CITATION FORMAT: When citing sources, place [N] on the SAME LINE immediately after the claim it "
+        "supports — never on a separate line, never as a standalone paragraph. "
+        "Append a ---CITATIONS--- block at the very END of your entire response. "
         "Each [N] must correspond to exactly one entry in that block. Assign a NEW integer to each distinct "
         "source; never reuse the same [N] for a different source, and never use [N] for anything other than "
         "a citation (e.g. do not write 'Step [3]' or 'Field [18]').\n\n"
-        "The block must be valid JSON in this exact format:\n"
+        "IMPORTANT — do NOT use markdown hyperlink syntax [text](url) anywhere in your response body. "
+        "All source references must go through the [N] chip system above. "
+        "Bare URLs (https://...) are fine to include as plain text.\n\n"
+        "The citations block must be valid JSON in this exact format:\n"
         "---CITATIONS---\n"
-        '[{"ref": 1, "document_title": "Page or document title", "quoted_text": "Exact short excerpt that supports the claim", "url": "https://...", "source": "web"}]\n'
+        '[{"ref": 1, "document_title": "Page or document title", "quoted_text": "Exact short excerpt that supports the claim", "url": "https://example.com/page", "source": "web"}]\n'
         "---END_CITATIONS---\n\n"
         "For document (non-web) sources, omit 'url'/'source' and include 'page' (integer) and/or 'section' (string) instead. "
         "Keep quoted_text under 300 characters. If a claim is not supported by any supplied source, do not fabricate a citation — state the limitation instead."

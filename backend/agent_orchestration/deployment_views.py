@@ -3167,6 +3167,8 @@ def embed_chatbot_html(request, project_id):
                 let citations = [];
                 if (Array.isArray(data.citations) && data.citations.length > 0) {{
                   citations = data.citations;
+                }} else if (_chatCitations.length > 0) {{
+                  citations = _chatCitations;
                 }} else {{
                   citations = parsed.citations;
                 }}
