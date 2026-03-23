@@ -1871,11 +1871,13 @@ class WorkflowExecutor:
         # ---- Build document tools ----
         node_data = node.get("data", {})
         tools, tool_map, title_map = [], {}, {}
+        doc_tool_selected = None
         if node_data.get("doc_tool_calling"):
             doc_tool_selected = node_data.get("doc_tool_calling_documents")
             tools, tool_map, title_map = await document_tool_service.build_document_tools(
                 project_id, selected_filenames=doc_tool_selected
             )
+            tools.extend(document_tool_service.build_document_info_tools())
 
         # ---- Pre-warm: upload all tool documents to LLM provider in parallel ----
         if tool_map:
@@ -2124,6 +2126,33 @@ class WorkflowExecutor:
                         return tc, "[Document search handler not available]", []
                     _limit = tc["arguments"].get("limit", 5)
                     _result = await _da.execute_docaware_tool(node, _query, project_id, limit=_limit)
+                    return tc, _result, []
+
+                # --- Document info tools ---
+                if tc["name"] == document_tool_service.LIST_FILES_TOOL_NAME:
+                    _result = await document_tool_service.execute_list_files_tool(project_id, doc_tool_selected)
+                    return tc, _result, []
+
+                if tc["name"] == document_tool_service.COUNT_FILES_TOOL_NAME:
+                    _result = await document_tool_service.execute_count_files_tool(project_id, doc_tool_selected)
+                    return tc, _result, []
+
+                if tc["name"] == document_tool_service.GET_SUMMARIES_TOOL_NAME:
+                    _result = await document_tool_service.execute_get_summaries_tool(project_id, doc_tool_selected)
+                    return tc, _result, []
+
+                if tc["name"] == document_tool_service.FIND_RELEVANT_TOOL_NAME:
+                    _limit = tc["arguments"].get("limit", 5)
+                    _result = await document_tool_service.execute_find_relevant_documents_tool(
+                        project_id, _query, limit=_limit, selected_filenames=doc_tool_selected
+                    )
+                    return tc, _result, []
+
+                if tc["name"] == document_tool_service.GET_METADATA_TOOL_NAME:
+                    _fname = tc["arguments"].get("filename", "")
+                    _result = await document_tool_service.execute_get_document_metadata_tool(
+                        project_id, _fname, selected_filenames=doc_tool_selected
+                    )
                     return tc, _result, []
 
                 # --- Document tool ---

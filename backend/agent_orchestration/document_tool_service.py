@@ -41,6 +41,13 @@ KEEP_RECENT_ENTRIES = 5
 # Cap overview text in execute_document_tool system prompt (long_summary / short fallback).
 MAX_DOCUMENT_OVERVIEW_CHARS = 14000
 
+# Tool names for document-info tools (added alongside read_doc_* when doc_tool_calling is enabled)
+LIST_FILES_TOOL_NAME        = "list_project_files"
+COUNT_FILES_TOOL_NAME       = "count_project_files"
+GET_SUMMARIES_TOOL_NAME     = "get_document_summaries"
+FIND_RELEVANT_TOOL_NAME     = "find_relevant_documents"
+GET_METADATA_TOOL_NAME      = "get_document_metadata"
+
 
 def _maybe_truncate_document_overview(text: str, max_chars: int = MAX_DOCUMENT_OVERVIEW_CHARS) -> str:
     """Truncate very long summaries so small-model context is not dominated."""
@@ -385,6 +392,363 @@ async def build_document_tools(
         f"🔧 DOC TOOLS: Built {len(tools)} document tools for project {project_id}"
     )
     return tools, tool_map, title_map
+
+
+# ── build_document_info_tools ─────────────────────────────────────────
+
+def build_document_info_tools() -> List[Dict[str, Any]]:
+    """
+    Returns the three document-info tool schemas added alongside ``read_doc_*``
+    tools whenever ``doc_tool_calling`` is enabled on a node.
+
+    These tools give agents the ability to introspect the document set before
+    deciding which documents to query in detail.
+    """
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": LIST_FILES_TOOL_NAME,
+                "description": (
+                    "List all files available to you in this project. "
+                    "Returns the filename and document title (if known) for each file."
+                ),
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": COUNT_FILES_TOOL_NAME,
+                "description": (
+                    "Return the total number of files available to you in this project."
+                ),
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": GET_SUMMARIES_TOOL_NAME,
+                "description": (
+                    "Return a high-level summary of every file available to you in this "
+                    "project. Each summary is a broad overview of that document's content "
+                    "and purpose — not a verbatim excerpt. Use this to understand what each "
+                    "document is about before deciding which to query in detail."
+                ),
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": FIND_RELEVANT_TOOL_NAME,
+                "description": (
+                    "Search across all project documents and return the ones most relevant "
+                    "to a query, ranked by relevance. Use this to identify which documents "
+                    "to read in detail before calling their individual read_doc_* tools."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The topic or question to find relevant documents for",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of documents to return (default: 5, max: 10)",
+                            "minimum": 1,
+                            "maximum": 10,
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": GET_METADATA_TOOL_NAME,
+                "description": (
+                    "Return structured metadata for a specific file: size, type, upload date, "
+                    "processing status, and whether a summary is available."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "filename": {
+                            "type": "string",
+                            "description": "The exact filename as returned by list_project_files",
+                        },
+                    },
+                    "required": ["filename"],
+                },
+            },
+        },
+    ]
+
+
+# ── execute_list_files_tool ───────────────────────────────────────────
+
+async def execute_list_files_tool(
+    project_id: str,
+    selected_filenames: Optional[List[str]] = None,
+) -> str:
+    """
+    Return a numbered list of filenames (and citation titles where available)
+    that the agent can access.
+    """
+    from users.models import IntelliDocProject, ProjectDocument
+
+    try:
+        project = await sync_to_async(IntelliDocProject.objects.get)(project_id=project_id)
+        qs = ProjectDocument.objects.filter(
+            project=project,
+            upload_status__in=("completed", "ready"),
+        )
+        if isinstance(selected_filenames, list) and selected_filenames:
+            qs = qs.filter(original_filename__in=selected_filenames)
+        docs = await sync_to_async(list)(
+            qs.select_related("document_summary").order_by("original_filename")
+        )
+    except Exception as e:
+        logger.error(f"list_project_files error: {e}")
+        return "[Error retrieving file list]"
+
+    if not docs:
+        return "No files are currently available in this project."
+
+    lines = []
+    for i, doc in enumerate(docs, start=1):
+        title = ""
+        try:
+            summary = doc.document_summary
+            citation = summary.citation if summary else {}
+            title = (citation or {}).get("title", "")
+        except Exception:
+            pass
+        if title:
+            lines.append(f"{i}. {doc.original_filename} ({title})")
+        else:
+            lines.append(f"{i}. {doc.original_filename}")
+
+    return "\n".join(lines)
+
+
+# ── execute_count_files_tool ──────────────────────────────────────────
+
+async def execute_count_files_tool(
+    project_id: str,
+    selected_filenames: Optional[List[str]] = None,
+) -> str:
+    """Return the count of accessible project files as a plain string."""
+    from users.models import IntelliDocProject, ProjectDocument
+
+    try:
+        project = await sync_to_async(IntelliDocProject.objects.get)(project_id=project_id)
+        qs = ProjectDocument.objects.filter(
+            project=project,
+            upload_status__in=("completed", "ready"),
+        )
+        if isinstance(selected_filenames, list) and selected_filenames:
+            qs = qs.filter(original_filename__in=selected_filenames)
+        count = await sync_to_async(qs.count)()
+    except Exception as e:
+        logger.error(f"count_project_files error: {e}")
+        return "[Error counting files]"
+
+    return str(count)
+
+
+# ── execute_get_summaries_tool ────────────────────────────────────────
+
+async def execute_get_summaries_tool(
+    project_id: str,
+    selected_filenames: Optional[List[str]] = None,
+) -> str:
+    """
+    Return the high-level (long) summary for every accessible project file.
+    Falls back to ``short_summary`` when ``long_summary`` is absent.
+    """
+    from users.models import IntelliDocProject, ProjectDocument
+
+    try:
+        project = await sync_to_async(IntelliDocProject.objects.get)(project_id=project_id)
+        qs = ProjectDocument.objects.filter(
+            project=project,
+            upload_status__in=("completed", "ready"),
+        )
+        if isinstance(selected_filenames, list) and selected_filenames:
+            qs = qs.filter(original_filename__in=selected_filenames)
+        docs = await sync_to_async(list)(
+            qs.select_related("document_summary").order_by("original_filename")
+        )
+    except Exception as e:
+        logger.error(f"get_document_summaries error: {e}")
+        return "[Error retrieving document summaries]"
+
+    if not docs:
+        return "No files are currently available in this project."
+
+    blocks = []
+    for doc in docs:
+        title_line = ""
+        summary_text = "No summary available."
+        try:
+            summary = doc.document_summary
+            if summary:
+                summary_text = (
+                    (summary.long_summary or summary.short_summary or "").strip()
+                    or "No summary available."
+                )
+                citation = summary.citation or {}
+                ct = citation.get("title", "")
+                if ct:
+                    title_line = f"Title: {ct}\n"
+        except Exception:
+            pass
+        blocks.append(f"--- {doc.original_filename} ---\n{title_line}{summary_text}")
+
+    return "\n\n".join(blocks)
+
+
+# ── execute_find_relevant_documents_tool ─────────────────────────────
+
+async def execute_find_relevant_documents_tool(
+    project_id: str,
+    query: str,
+    limit: int = 5,
+    selected_filenames: Optional[List[str]] = None,
+) -> str:
+    """
+    Run a semantic search and return the top-N documents ranked by relevance.
+
+    Performs a hybrid search against the project's Milvus collection, groups
+    chunk-level hits by document, and returns a ranked list with a qualitative
+    relevance label (high / medium / low) and matching-passage count.
+    """
+    from .docaware import EnhancedDocAwareAgentService, SearchMethod
+
+    limit = max(1, min(limit, 10))
+    chunk_limit = max(limit * 6, 30)  # fetch more chunks to get good document coverage
+
+    try:
+        service = EnhancedDocAwareAgentService(project_id)
+        results = await sync_to_async(service.search_documents)(
+            query,
+            search_method=SearchMethod.HYBRID_SEARCH,
+            method_parameters={"search_limit": chunk_limit},
+        )
+    except Exception as e:
+        logger.error(f"find_relevant_documents error: {e}")
+        return "[Error searching documents — ensure the project has been processed]"
+
+    if not results:
+        return "No relevant documents found for this query."
+
+    # Group chunk-level hits by document source name
+    from collections import defaultdict
+    doc_scores: Dict[str, List[float]] = defaultdict(list)
+    doc_passages: Dict[str, int] = defaultdict(int)
+
+    for hit in results:
+        meta = hit.get("metadata", {})
+        source = (
+            meta.get("source")
+            or meta.get("filename")
+            or meta.get("file_name")
+            or hit.get("source")
+            or "Unknown"
+        )
+        score = float(meta.get("score", 0.0))
+        doc_scores[source].append(score)
+        doc_passages[source] += 1
+
+    # Apply selected_filenames scope if set
+    if isinstance(selected_filenames, list) and selected_filenames:
+        doc_scores = {k: v for k, v in doc_scores.items() if k in selected_filenames}
+        doc_passages = {k: v for k, v in doc_passages.items() if k in selected_filenames}
+
+    if not doc_scores:
+        return "No relevant documents found for this query."
+
+    # Rank by best (max) chunk score per document
+    ranked = sorted(doc_scores.items(), key=lambda x: max(x[1]), reverse=True)[:limit]
+
+    lines = []
+    for i, (source, scores) in enumerate(ranked, start=1):
+        best = max(scores)
+        if best >= 0.7:
+            label = "high"
+        elif best >= 0.4:
+            label = "medium"
+        else:
+            label = "low"
+        n = doc_passages[source]
+        lines.append(
+            f"{i}. {source} (relevance: {label}) — {n} matching passage{'s' if n != 1 else ''}"
+        )
+
+    return "\n".join(lines)
+
+
+# ── execute_get_document_metadata_tool ───────────────────────────────
+
+async def execute_get_document_metadata_tool(
+    project_id: str,
+    filename: str,
+    selected_filenames: Optional[List[str]] = None,
+) -> str:
+    """
+    Return structured metadata for a specific project document.
+    """
+    from users.models import IntelliDocProject, ProjectDocument
+
+    # Enforce scope if agent has a restricted document set
+    if isinstance(selected_filenames, list) and selected_filenames:
+        if filename not in selected_filenames:
+            return f"[Access denied: '{filename}' is not in your accessible document set]"
+
+    try:
+        project = await sync_to_async(IntelliDocProject.objects.get)(project_id=project_id)
+        doc = await sync_to_async(
+            ProjectDocument.objects.select_related("document_summary").get
+        )(project=project, original_filename=filename, upload_status__in=("completed", "ready"))
+    except Exception as lookup_err:
+        if "DoesNotExist" in type(lookup_err).__name__ or "matching query" in str(lookup_err):
+            return f"File not found: '{filename}'"
+        logger.error(f"get_document_metadata error: {lookup_err}")
+        return "[Error retrieving document metadata]"
+
+    uploaded = doc.uploaded_at.strftime("%Y-%m-%d %H:%M") if doc.uploaded_at else "unknown"
+    processed = doc.processed_at.strftime("%Y-%m-%d %H:%M") if doc.processed_at else "not processed"
+
+    lines = [
+        f"filename:  {doc.original_filename}",
+        f"type:      {doc.file_type or doc.file_extension or 'unknown'}",
+        f"size:      {doc.file_size_formatted}",
+        f"uploaded:  {uploaded}",
+        f"processed: {processed}",
+        f"status:    {doc.upload_status}",
+    ]
+
+    # Summary availability
+    summary_info = "none"
+    try:
+        summary = doc.document_summary
+        if summary:
+            if summary.long_summary:
+                summary_info = "full summary available"
+            elif summary.short_summary:
+                summary_info = "short summary available"
+            else:
+                summary_info = "summary record exists (empty)"
+    except Exception:
+        pass
+    lines.append(f"summary:   {summary_info}")
+
+    return "\n".join(lines)
 
 
 # ── execute_document_tool ────────────────────────────────────────────

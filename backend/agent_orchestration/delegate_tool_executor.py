@@ -205,11 +205,13 @@ async def run_delegate_doc_tool_loop(
         return resp.text.strip()
 
     tools, tool_map, title_map = [], {}, {}
+    doc_tool_selected = None
     if doc_tool_calling_enabled:
         doc_tool_selected = data.get("doc_tool_calling_documents")
         tools, tool_map, title_map = await document_tool_service.build_document_tools(
             project_id, selected_filenames=doc_tool_selected
         )
+        tools.extend(document_tool_service.build_document_info_tools())
 
     # Pre-warm: upload all tool documents to LLM provider in parallel
     if tool_map:
@@ -401,6 +403,52 @@ async def run_delegate_doc_tool_loop(
                 except Exception as exc:
                     logger.error(f"DocAware search failed in delegate {delegate_name}: {exc}")
                     result = f"[Document search error: {exc}]"
+                return tc, result
+
+            if tc["name"] == document_tool_service.LIST_FILES_TOOL_NAME:
+                try:
+                    result = await document_tool_service.execute_list_files_tool(project_id, doc_tool_selected)
+                except Exception as exc:
+                    logger.error(f"list_project_files failed in delegate {delegate_name}: {exc}")
+                    result = f"[Error listing files: {exc}]"
+                return tc, result
+
+            if tc["name"] == document_tool_service.COUNT_FILES_TOOL_NAME:
+                try:
+                    result = await document_tool_service.execute_count_files_tool(project_id, doc_tool_selected)
+                except Exception as exc:
+                    logger.error(f"count_project_files failed in delegate {delegate_name}: {exc}")
+                    result = f"[Error counting files: {exc}]"
+                return tc, result
+
+            if tc["name"] == document_tool_service.GET_SUMMARIES_TOOL_NAME:
+                try:
+                    result = await document_tool_service.execute_get_summaries_tool(project_id, doc_tool_selected)
+                except Exception as exc:
+                    logger.error(f"get_document_summaries failed in delegate {delegate_name}: {exc}")
+                    result = f"[Error retrieving summaries: {exc}]"
+                return tc, result
+
+            if tc["name"] == document_tool_service.FIND_RELEVANT_TOOL_NAME:
+                try:
+                    _limit = tc["arguments"].get("limit", 5)
+                    result = await document_tool_service.execute_find_relevant_documents_tool(
+                        project_id, query, limit=_limit, selected_filenames=doc_tool_selected
+                    )
+                except Exception as exc:
+                    logger.error(f"find_relevant_documents failed in delegate {delegate_name}: {exc}")
+                    result = f"[Error finding relevant documents: {exc}]"
+                return tc, result
+
+            if tc["name"] == document_tool_service.GET_METADATA_TOOL_NAME:
+                try:
+                    _fname = tc["arguments"].get("filename", "")
+                    result = await document_tool_service.execute_get_document_metadata_tool(
+                        project_id, _fname, selected_filenames=doc_tool_selected
+                    )
+                except Exception as exc:
+                    logger.error(f"get_document_metadata failed in delegate {delegate_name}: {exc}")
+                    result = f"[Error retrieving metadata: {exc}]"
                 return tc, result
 
             doc_id = tool_map.get(tc["name"])
