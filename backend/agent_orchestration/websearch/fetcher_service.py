@@ -83,16 +83,51 @@ class WebsiteFetcherService:
     
     # Tags to remove from content (only for derived text, not raw_html)
     REMOVE_TAGS = [
-        'script', 'style', 'noscript'
+        'script', 'style', 'noscript',
+        # Structural chrome — never contain primary article content
+        'nav', 'header', 'footer', 'aside',
+        'form',        # search boxes, login forms
+        'menu',
+        'figure',      # image captions fragment LLM context
+        'figcaption',
     ]
-    
-    # CSS classes/IDs often associated with non-content elements
+
+    # CSS classes/IDs often associated with non-content elements.
+    # Rules:
+    #  - Use \b word-boundaries to avoid mid-word false positives
+    #    (e.g. r'ad[-_]' without \b matched "tdb-autoload-article")
+    #  - Keep patterns specific — r'widget' alone matched Elementor's
+    #    elementor-widget-container (the actual content wrapper)
     REMOVE_PATTERNS = [
-        'advertisement',
-        'ad-', 'ads-',
-        'cookie',
-        'popup'
+        r'advertisement', r'\bad[-_]', r'\bads[-_]', r'[-_]ads\b',
+        r'cookie', r'popup', r'modal', r'overlay',
+        r'nav(igation|bar)?[-_\s]', r'[-_]nav\b',
+        r'sidebar', r'side[-_]bar',
+        r'widget[-_](area|zone|section|sidebar)',  # scoped — r'widget' alone was too broad
+        r'breadcrumb', r'site[-_]header', r'site[-_]footer',
+        r'social[-_]', r'share[-_]', r'sharing',
+        r'related[-_]', r'recommended[-_]', r'also[-_]read',
+        r'comment(s)?[-_]', r'discussion[-_]',
+        r'menu[-_]', r'[-_]menu\b',
+        r'banner[-_]', r'promo[-_]',
+        r'toc\b', r'table[-_]of[-_]contents',
     ]
+
+    # Minimum heading text length — filters single nav labels like "Home" or "More"
+    MIN_HEADING_LEN = 20
+
+    # Regex patterns for main-content container detection
+    _CONTENT_ID_RE = re.compile(
+        r'\b(content|main|article|post[-_]?body|entry[-_]?content'
+        r'|story[-_]?body|article[-_]?body|page[-_]?content)\b',
+        re.I,
+    )
+    _CONTENT_CLASS_RE = re.compile(
+        r'(^|\s)(article|entry|post|story|prose|richtext'
+        r'|article[-_]body|post[-_]body|entry[-_]content'
+        r'|main[-_]content|page[-_]content|content[-_]body)(\s|$)',
+        re.I,
+    )
     
     def __init__(self):
         """Initialize fetcher with settings from Django config."""
@@ -291,25 +326,67 @@ class WebsiteFetcherService:
                 meta_description = meta_tag['content']
             capture.meta_description = meta_description[:500] if meta_description else None
             
-            # Remove only obviously non-content tags globally
+            # Remove only obviously non-content tags globally (safe: semantic chrome)
             for tag_name in self.REMOVE_TAGS:
                 for tag in soup.find_all(tag_name):
                     tag.decompose()
-            
-            # Remove elements with known junk patterns (ad/cookie/popups)
+
+            # Isolate main content BEFORE pattern-based removal.
+            # REMOVE_PATTERNS runs after so it cannot accidentally decompose
+            # legitimate content containers (e.g. Elementor's
+            # `elementor-widget-container` matched the old broad r'widget' pattern).
+            content_root = (
+                soup.find('article')
+                or soup.find('main')
+                or soup.find(attrs={'role': 'main'})
+                or soup.find(id=self._CONTENT_ID_RE)
+                or soup.find(class_=self._CONTENT_CLASS_RE)
+                or soup.body
+                or soup
+            )
+            logger.debug(
+                f"🔍 CONTENT EXTRACT: content_root=<{getattr(content_root, 'name', '?')}> "
+                f"for {capture.url}"
+            )
+
+            # Remove junk elements (ads, nav, widgets) but protect content_root
+            # and its entire ancestor + descendant chain:
+            #  - Ancestors: decomposing a parent of content_root would remove it
+            #    (e.g. a wrapper div with "autoload-article" in its id)
+            #  - content_root itself: never decompose it
+            #  - Descendants: legitimate content containers inside the article
+            # When content_root is the full body (fallback), apply everywhere.
+            _full_body_fallback = content_root is soup.body or content_root is soup
+            # Build O(1) set of ancestor element ids (typically 5-10 items)
+            _protected_ids: set = {id(content_root)}
+            for _anc in content_root.parents:
+                if _anc.name:
+                    _protected_ids.add(id(_anc))
+
             for pattern in self.REMOVE_PATTERNS:
-                for element in soup.find_all(class_=re.compile(pattern, re.I)):
-                    element.decompose()
-                for element in soup.find_all(id=re.compile(pattern, re.I)):
-                    element.decompose()
-            
+                pat = re.compile(pattern, re.I)
+                for element in list(soup.find_all(class_=pat)):
+                    if _full_body_fallback:
+                        element.decompose()
+                    elif id(element) in _protected_ids:
+                        pass  # protect content_root and its ancestors
+                    elif not element.find_parent(lambda t: t is content_root):  # noqa: B023
+                        element.decompose()
+                for element in list(soup.find_all(id=pat)):
+                    if _full_body_fallback:
+                        element.decompose()
+                    elif id(element) in _protected_ids:
+                        pass
+                    elif not element.find_parent(lambda t: t is content_root):  # noqa: B023
+                        element.decompose()
+
             sections: List[PageSection] = []
-            
+
             # Headings
             for level in range(1, 7):
-                for h in soup.find_all(f'h{level}'):
+                for h in content_root.find_all(f'h{level}'):
                     text = h.get_text(strip=True)
-                    if not text:
+                    if not text or len(text) < self.MIN_HEADING_LEN:
                         continue
                     sections.append(
                         PageSection(
@@ -319,9 +396,9 @@ class WebsiteFetcherService:
                             html_snippet=str(h)[:1000],
                         )
                     )
-            
+
             # Paragraphs
-            for p in soup.find_all('p'):
+            for p in content_root.find_all('p'):
                 text = p.get_text(strip=True)
                 if not text:
                     continue
@@ -332,9 +409,9 @@ class WebsiteFetcherService:
                         html_snippet=str(p)[:1000],
                     )
                 )
-            
+
             # Lists (ul/ol)
-            for lst in soup.find_all(['ul', 'ol']):
+            for lst in content_root.find_all(['ul', 'ol']):
                 items = [li.get_text(strip=True) for li in lst.find_all('li')]
                 items = [i for i in items if i]
                 if not items:
@@ -347,9 +424,9 @@ class WebsiteFetcherService:
                         metadata={'item_count': len(items)},
                     )
                 )
-            
+
             # Tables
-            for tbl in soup.find_all('table'):
+            for tbl in content_root.find_all('table'):
                 rows = []
                 for tr in tbl.find_all('tr'):
                     cells = [c.get_text(strip=True) for c in tr.find_all(['th', 'td'])]
@@ -365,9 +442,9 @@ class WebsiteFetcherService:
                         metadata={'row_count': len(rows)},
                     )
                 )
-            
+
             # Code/pre blocks
-            for code_block in soup.find_all(['pre', 'code']):
+            for code_block in content_root.find_all(['pre', 'code']):
                 text = code_block.get_text('\n', strip=True)
                 if not text:
                     continue
