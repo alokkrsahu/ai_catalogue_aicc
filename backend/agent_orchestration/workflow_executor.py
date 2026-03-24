@@ -2314,8 +2314,11 @@ class WorkflowExecutor:
                 "Based on your research notebook below, provide a comprehensive "
                 "answer to the original query.\n\n"
                 "IMPORTANT — grounded citations:\n"
-                "- Use [1], [2], [3], … in the text. Each DISTINCT claim needs its own "
-                "number unless the same verbatim passage supports it.\n"
+                "- Number citations SEQUENTIALLY starting from [1]. Do NOT reuse passage "
+                "numbers from the research notes — renumber them starting from 1.\n"
+                "- EVERY [N] marker in your text MUST have a corresponding entry in the "
+                "JSON citations block below.\n"
+                "- Each DISTINCT claim needs its own number unless the same verbatim passage supports it.\n"
                 "- In the JSON block, each ref N must pair with a quoted_text that is the "
                 "specific excerpt backing the sentence where [N] appears (not one generic "
                 "quote reused for every marker).\n"
@@ -2346,13 +2349,102 @@ class WorkflowExecutor:
             _append_citations_block,
             _parse_citations_block,
         )
-        clean_text, citations = _parse_citations_block(synthesis_resp.text.strip())
+        clean_text, raw_citations = _parse_citations_block(synthesis_resp.text.strip())
         title_to_docid = {title_map.get(tn, ""): did for tn, did in tool_map.items() if title_map.get(tn)}
-        for cit in citations:
-            dt = cit.get("document_title", "")
-            if dt and dt in title_to_docid and not cit.get("url"):
-                cit["document_id"] = title_to_docid[dt]
-        return _append_citations_block(clean_text, citations), citations
+
+        # ── Complete citation normalization ──────────────────────────
+        # The LLM often uses arbitrary [N] numbers copied from tool-result
+        # passage IDs instead of sequential refs, and omits many from the
+        # JSON block. We renumber everything sequentially and ensure every
+        # inline [N] has a matching structured citation with tooltip data.
+
+        import re as _re
+
+        # Build lookup from whatever the LLM put in its citations block
+        _raw_cit_map: Dict[int, Dict[str, Any]] = {}
+        for _c in raw_citations:
+            _r = _c.get("ref")
+            if _r is not None:
+                _raw_cit_map[int(_r)] = _c
+
+        # Collect all [N] in text, in order of first appearance
+        _seen: set = set()
+        _ordered_refs: List[int] = []
+        for _m in _re.finditer(r'\[(\d+)\]', clean_text):
+            _n = int(_m.group(1))
+            if _n not in _seen:
+                _seen.add(_n)
+                _ordered_refs.append(_n)
+
+        def _find_citation_in_notebook(_ref_num: int) -> Dict[str, Any]:
+            """Reconstruct a citation entry from notebook tool results."""
+            # Try [N] "quote" pattern in notebook result text
+            for _entry in notebook:
+                _result_text = _entry.get("result", "")
+                _pat = rf'\[{_ref_num}\]\s*"([^"]+)"'
+                _match = _re.search(_pat, _result_text)
+                if _match:
+                    return {
+                        "document_title": title_map.get(_entry["tool_name"], _entry["tool_name"]),
+                        "quoted_text": _match.group(1)[:250],
+                        "document_id": tool_map.get(_entry["tool_name"]),
+                        "source": "document",
+                    }
+            # Try [N] followed by any descriptive text
+            for _entry in notebook:
+                _result_text = _entry.get("result", "")
+                _pat2 = rf'\[{_ref_num}\]\s*([^\[\n]+)'
+                _match2 = _re.search(_pat2, _result_text)
+                if _match2:
+                    return {
+                        "document_title": title_map.get(_entry["tool_name"], _entry["tool_name"]),
+                        "quoted_text": _match2.group(1).strip()[:250],
+                        "document_id": tool_map.get(_entry["tool_name"]),
+                        "source": "document",
+                    }
+            # Fallback: use first notebook entry's document title
+            if notebook:
+                _entry = notebook[0]
+                return {
+                    "document_title": title_map.get(_entry["tool_name"], _entry["tool_name"]),
+                    "quoted_text": f"Reference from {title_map.get(_entry['tool_name'], _entry['tool_name'])}",
+                    "source": "document",
+                    "document_id": tool_map.get(_entry["tool_name"]),
+                }
+            return {"quoted_text": "Reference", "source": "document"}
+
+        # Build renumbered citations: [old_num] → [new_num]
+        _new_citations: List[Dict[str, Any]] = []
+        _old_to_new: Dict[int, int] = {}
+        for _new_num, _old_num in enumerate(_ordered_refs, start=1):
+            _old_to_new[_old_num] = _new_num
+            if _old_num in _raw_cit_map:
+                _entry = dict(_raw_cit_map[_old_num])
+                _entry["ref"] = _new_num
+            else:
+                _entry = _find_citation_in_notebook(_old_num)
+                _entry["ref"] = _new_num
+            _new_citations.append(_entry)
+
+        # Renumber refs in the text using placeholder to avoid collisions
+        for _old_num in sorted(_old_to_new.keys(), reverse=True):
+            clean_text = clean_text.replace(f"[{_old_num}]", f"[__CITE_{_old_to_new[_old_num]}__]")
+        for _new_num in range(1, len(_ordered_refs) + 1):
+            clean_text = clean_text.replace(f"[__CITE_{_new_num}__]", f"[{_new_num}]")
+
+        # Enrich with document_id
+        for _cit in _new_citations:
+            _dt = _cit.get("document_title", "")
+            if _dt and _dt in title_to_docid and not _cit.get("url"):
+                _cit["document_id"] = title_to_docid[_dt]
+
+        if _ordered_refs:
+            logger.info(
+                f"📎 CITATION NORMALIZE: {len(_ordered_refs)} refs renumbered [1..{len(_ordered_refs)}], "
+                f"{len(_raw_cit_map)} from LLM block, {len(_ordered_refs) - len(set(_ordered_refs) & set(_raw_cit_map.keys()))} recovered from notebook"
+            )
+
+        return _append_citations_block(clean_text, _new_citations), _new_citations
 
     async def _save_messages_to_database(self, messages, execution_record):
         """

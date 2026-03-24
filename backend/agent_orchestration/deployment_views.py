@@ -2403,6 +2403,14 @@ def embed_chatbot_html(request, project_id):
     .cite-chip:hover {{
       filter: brightness(0.85);
     }}
+    .cite-chip-secondary {{
+      background: #e5e7eb;
+      color: #374151;
+      cursor: default;
+    }}
+    .cite-chip-secondary:hover {{
+      filter: none;
+    }}
     .cite-tooltip {{
       position: fixed;
       max-width: 340px;
@@ -2733,7 +2741,7 @@ def embed_chatbot_html(request, project_id):
     return html.replace(/\\[(\\d+)\\]/g, function(match, num) {{
       const ref = parseInt(num, 10);
       const cit = citations.find(function(c) {{ return Number(c.ref) === ref; }});
-      if (!cit) return match;
+      if (!cit) return '<span class="cite-chip cite-chip-secondary" data-ref="' + ref + '">' + ref + '</span>';
       return '<span class="cite-chip" data-ref="' + ref + '">' + ref + '</span>';
     }});
   }}
