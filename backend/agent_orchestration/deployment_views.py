@@ -610,6 +610,93 @@ class DeploymentViewSet(viewsets.ViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
+    @action(detail=False, methods=['post'], url_path='projects/(?P<project_id>[^/.]+)/summarize-urls')
+    def summarize_urls(self, request, project_id=None):
+        """
+        Generate LLM summaries for a list of web search URLs.
+
+        POST /api/agent-orchestration/projects/{project_id}/summarize-urls/
+        Body: { "urls": ["https://..."], "llm_provider": "openai", "llm_model": "gpt-4o-mini" }
+        """
+        import asyncio
+        from .websearch_handler import WebSearchHandler
+        from .chat_manager import ChatManager
+
+        try:
+            project = get_object_or_404(IntelliDocProject, project_id=project_id)
+            if not project.has_user_access(request.user):
+                return Response(
+                    {'error': 'You do not have permission to access this project'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            body = request.data
+            urls = body.get('urls', [])
+            if not urls or not isinstance(urls, list):
+                return Response(
+                    {'error': 'urls must be a non-empty list'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            urls = [u.strip() for u in urls if isinstance(u, str) and u.strip()]
+            if not urls:
+                return Response(
+                    {'error': 'No valid URLs provided'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            force = body.get('force', True)
+            original_count = len(urls)
+            if not force:
+                from users.models import WebSearchUrlSummary
+                existing = set(
+                    WebSearchUrlSummary.objects.filter(
+                        project=project, url__in=urls
+                    ).values_list('url', flat=True)
+                )
+                urls = [u for u in urls if u not in existing]
+                if not urls:
+                    return Response(
+                        {'summarized': 0, 'skipped': original_count, 'failed': 0, 'results': []},
+                        status=status.HTTP_200_OK,
+                    )
+
+            provider_name = body.get('llm_provider', 'openai')
+            model_name = body.get('llm_model', '')
+
+            handler = WebSearchHandler()
+
+            async def _run():
+                from .llm_provider_manager import LLMProviderManager
+                mgr = LLMProviderManager()
+                agent_config = {
+                    'llm_provider': provider_name,
+                    'llm_model': model_name or 'gpt-4o-mini',
+                }
+                llm = await mgr.get_llm_provider(agent_config, project=project)
+                if not llm:
+                    raise ValueError(
+                        f'No {provider_name} API key configured for this project. '
+                        'Add one in Project Settings → API Keys.'
+                    )
+                return await handler.summarize_urls_for_project(
+                    urls=urls,
+                    project_id=str(project_id),
+                    llm_provider=llm,
+                )
+
+            try:
+                result = asyncio.run(_run())
+            except ValueError as e:
+                return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(result, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"❌ SUMMARIZE URLS: {e}", exc_info=True)
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
     @action(detail=False, methods=['get'], url_path='projects/(?P<project_id>[^/.]+)/deployment/activity')
     def get_deployment_activity(self, request, project_id=None):
         """

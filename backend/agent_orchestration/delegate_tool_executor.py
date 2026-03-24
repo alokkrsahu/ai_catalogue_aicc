@@ -229,10 +229,24 @@ async def run_delegate_doc_tool_loop(
         except Exception as pw_err:
             logger.warning(f"⚠️ PRE-WARM (delegate): Failed: {pw_err}")
 
-    ws_tool = websearch_handler.build_websearch_tool(delegate_node) if websearch_handler else None
-    if ws_tool:
-        tools.append(ws_tool)
-        title_map[ws_tool["function"]["name"]] = "Web Search"
+    url_tool_map: Dict[str, str] = {}
+    if websearch_handler:
+        if websearch_handler.get_websearch_mode(delegate_node) == 'urls':
+            _ws_url_tools, url_tool_map = await websearch_handler.build_websearch_url_tools_with_summaries(delegate_node, project_id)
+            if _ws_url_tools:
+                tools.extend(_ws_url_tools)
+                for _t in _ws_url_tools:
+                    title_map[_t["function"]["name"]] = "Web Search (URL)"
+            else:
+                ws_tool = websearch_handler.build_websearch_tool(delegate_node)
+                if ws_tool:
+                    tools.append(ws_tool)
+                    title_map[ws_tool["function"]["name"]] = "Web Search"
+        else:
+            ws_tool = websearch_handler.build_websearch_tool(delegate_node)
+            if ws_tool:
+                tools.append(ws_tool)
+                title_map[ws_tool["function"]["name"]] = "Web Search"
 
     da_tool = docaware_handler.build_docaware_tool(delegate_node) if docaware_handler else None
     if da_tool:
@@ -379,6 +393,20 @@ async def run_delegate_doc_tool_loop(
             query = tc["arguments"].get("query", "")
 
             from .websearch_handler import WebSearchHandler
+            if tc["name"].startswith(WebSearchHandler.URL_TOOL_PREFIX):
+                if not websearch_handler:
+                    return tc, "[Web search handler not available]"
+                _target_url = url_tool_map.get(tc["name"], "")
+                if not _target_url:
+                    return tc, f"[Unknown URL tool: {tc['name']}]"
+                _ttl = delegate_node.get('data', {}).get('web_search_cache_ttl', 3600)
+                try:
+                    result = await websearch_handler._get_url_context([_target_url], _ttl, project_id)
+                except Exception as exc:
+                    logger.error(f"URL fetch failed in delegate {delegate_name}: {exc}")
+                    result = f"[URL fetch error: {exc}]"
+                return tc, result
+
             if tc["name"] == WebSearchHandler.WEB_SEARCH_TOOL_NAME:
                 if not websearch_handler:
                     return tc, "[Web search handler not available]"

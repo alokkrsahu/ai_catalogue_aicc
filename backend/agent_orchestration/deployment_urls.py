@@ -61,5 +61,10 @@ urlpatterns = [
         DeploymentViewSet.as_view({'get': 'get_deployment_activity'}),
         name='deployment-activity'
     ),
+    path(
+        'api/agent-orchestration/projects/<uuid:project_id>/summarize-urls/',
+        DeploymentViewSet.as_view({'post': 'summarize_urls'}),
+        name='summarize-urls'
+    ),
 ]
 

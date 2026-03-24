@@ -664,6 +664,7 @@ class WebSearchHandler:
     # =========================================================================
 
     WEB_SEARCH_TOOL_NAME = "web_search"
+    URL_TOOL_PREFIX = "wsurl_"
 
     def build_websearch_tool(self, agent_node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -792,3 +793,189 @@ class WebSearchHandler:
         except Exception as e:
             logger.error(f"❌ WEBSEARCH TOOL: Error: {e}")
             return f"Web search failed: {str(e)}"
+
+    # =========================================================================
+    # Per-URL Tool Support (URL mode with summaries)
+    # =========================================================================
+
+    @staticmethod
+    def _url_tool_name(url: str) -> str:
+        """Return deterministic tool name for a URL: wsurl_<md5hex>."""
+        import hashlib
+        return WebSearchHandler.URL_TOOL_PREFIX + hashlib.md5(url.encode()).hexdigest()
+
+    async def build_websearch_url_tools_with_summaries(
+        self,
+        agent_node: Dict[str, Any],
+        project_id: str,
+    ) -> tuple:
+        """
+        Build per-URL tool dicts using stored summaries as descriptions.
+
+        Returns (tools_list, url_tool_map) where url_tool_map maps
+        tool_name → url.  Returns ([], {}) when no summaries exist yet,
+        signalling callers to fall back to the legacy single-tool behaviour.
+        """
+        from asgiref.sync import sync_to_async
+        from users.models import WebSearchUrlSummary, IntelliDocProject
+
+        agent_data = agent_node.get('data', {})
+        urls = agent_data.get('web_search_urls', [])
+        if not urls:
+            return [], {}
+
+        try:
+            project = await sync_to_async(IntelliDocProject.objects.get)(project_id=project_id)
+            rows = await sync_to_async(list)(
+                WebSearchUrlSummary.objects.filter(
+                    project=project,
+                    url__in=urls,
+                ).values_list('url', 'short_summary')
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ WEBSEARCH URL TOOLS: DB lookup failed: {e}")
+            return [], {}
+
+        summary_map = {url: short for url, short in rows}
+        if not summary_map:
+            return [], {}
+
+        tools: List[Dict[str, Any]] = []
+        url_tool_map: Dict[str, str] = {}
+
+        for url in urls:
+            tool_name = self._url_tool_name(url)
+            description = summary_map.get(url, "").strip() or url
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "description": description[:1024],
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Optional question or topic to focus on when reading this page",
+                            }
+                        },
+                        "required": [],
+                    },
+                },
+            })
+            url_tool_map[tool_name] = url
+
+        logger.info(
+            f"🌐 WEBSEARCH URL TOOLS: Built {len(tools)} per-URL tools "
+            f"({len(summary_map)} with summaries) for project {project_id}"
+        )
+        return tools, url_tool_map
+
+    async def summarize_urls_for_project(
+        self,
+        urls: List[str],
+        project_id: str,
+        llm_provider,
+    ) -> Dict[str, Any]:
+        """
+        Fetch each URL, generate an LLM summary, and upsert into WebSearchUrlSummary.
+
+        Args:
+            urls: List of URLs to summarise.
+            project_id: Project UUID string.
+            llm_provider: An instantiated LLM provider with generate_response().
+
+        Returns:
+            { "summarized": N, "skipped": N, "failed": N, "results": [...] }
+        """
+        from asgiref.sync import sync_to_async
+        from users.models import WebSearchUrlSummary, IntelliDocProject
+
+        results = []
+        summarized = skipped = failed = 0
+
+        try:
+            project = await sync_to_async(IntelliDocProject.objects.get)(project_id=project_id)
+        except Exception as e:
+            logger.error(f"❌ URL SUMMARIZE: Project not found {project_id}: {e}")
+            return {"summarized": 0, "skipped": 0, "failed": len(urls), "results": []}
+
+        for url in urls:
+            try:
+                # Fetch page content (uses Redis cache if available, TTL 1h)
+                fetch_results = await self.fetcher_service.fetch_urls_parallel([url])
+                if not fetch_results:
+                    raise ValueError("Fetcher returned no results")
+
+                page = fetch_results[0]
+                if page.get('extraction_error'):
+                    raise ValueError(f"Fetch error: {page['extraction_error']}")
+                # Reconstruct plain text from PageCapture sections
+                sections = page.get('sections') or []
+                raw_text = '\n\n'.join(
+                    s.get('text') or '' for s in sections if s.get('text')
+                ).strip()
+                if not raw_text:
+                    # Fall back to title + meta description if sections empty
+                    raw_text = ' '.join(filter(None, [page.get('title'), page.get('meta_description')]))
+                if not raw_text:
+                    raise ValueError("Empty page content")
+
+                # Trim to ~8000 chars to stay within LLM context
+                raw_text = raw_text[:8000]
+
+                short_prompt = (
+                    f"Summarise the following web page content in approximately 200 words. "
+                    f"Focus on what this page is about, its key topics, and when it would be "
+                    f"most useful to consult it. Be concise and factual.\n\n"
+                    f"URL: {url}\n\nContent:\n{raw_text}"
+                )
+                long_prompt = (
+                    f"Write a detailed summary (up to 3000 words) of the following web page. "
+                    f"Include the main topics, key facts, data, and any notable details.\n\n"
+                    f"URL: {url}\n\nContent:\n{raw_text}"
+                )
+
+                short_resp = await llm_provider.generate_response(
+                    messages=[{"role": "user", "content": short_prompt}]
+                )
+                short_summary = short_resp.text.strip() if not short_resp.error else ""
+
+                long_resp = await llm_provider.generate_response(
+                    messages=[{"role": "user", "content": long_prompt}]
+                )
+                long_summary = long_resp.text.strip() if not long_resp.error else ""
+
+                if not short_summary:
+                    raise ValueError(f"LLM returned empty short summary: {short_resp.error}")
+
+                # Upsert
+                provider_name = getattr(llm_provider, 'provider_name', 'openai')
+                model_name = getattr(llm_provider, 'model', '')
+
+                await sync_to_async(WebSearchUrlSummary.objects.update_or_create)(
+                    project=project,
+                    url=url,
+                    defaults={
+                        'short_summary': short_summary,
+                        'long_summary': long_summary,
+                        'llm_provider': provider_name,
+                        'llm_model': model_name,
+                    },
+                )
+
+                results.append({"url": url, "status": "ok", "short_summary": short_summary[:300]})
+                summarized += 1
+                logger.info(f"✅ URL SUMMARIZE: {url[:60]}")
+
+            except Exception as e:
+                logger.warning(f"⚠️ URL SUMMARIZE: Failed for {url[:60]}: {e}")
+                results.append({"url": url, "status": "failed", "error": str(e)})
+                failed += 1
+
+        return {
+            "summarized": summarized,
+            "skipped": skipped,
+            "failed": failed,
+            "results": results,
+        }

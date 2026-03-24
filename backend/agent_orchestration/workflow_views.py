@@ -115,13 +115,38 @@ class AgentWorkflowViewSet(viewsets.ModelViewSet):
     def partial_update(self, request, *args, **kwargs):
         """Partial update workflow with logging"""
         workflow = self.get_object()
-        
+
         logger.info(f"📝 WORKFLOW PARTIAL UPDATE: {workflow.workflow_id} by {request.user.email}")
-        
+
         # Update the timestamp
         workflow.updated_at = timezone.now()
-        
-        return super().partial_update(request, *args, **kwargs)
+
+        response = super().partial_update(request, *args, **kwargs)
+
+        # Cleanup orphaned URL summaries: delete rows whose URL is no longer
+        # referenced in any node of any workflow in this project.
+        try:
+            from users.models import WebSearchUrlSummary
+            all_workflows = AgentWorkflow.objects.filter(project=workflow.project)
+            active_urls: set = set()
+            for wf in all_workflows:
+                graph = wf.graph_json or {}
+                for node in (graph.get('nodes') or []):
+                    data = node.get('data') or {}
+                    if data.get('web_search_mode') == 'urls':
+                        active_urls.update(u for u in (data.get('web_search_urls') or []) if u)
+            deleted_count, _ = WebSearchUrlSummary.objects.filter(
+                project=workflow.project
+            ).exclude(url__in=active_urls).delete()
+            if deleted_count:
+                logger.info(
+                    f"🗑️ URL SUMMARY CLEANUP: Deleted {deleted_count} orphaned summaries "
+                    f"for project {workflow.project.project_id}"
+                )
+        except Exception as cleanup_err:
+            logger.warning(f"⚠️ URL SUMMARY CLEANUP: {cleanup_err}")
+
+        return response
     
     def destroy(self, request, *args, **kwargs):
         """Delete workflow with logging"""

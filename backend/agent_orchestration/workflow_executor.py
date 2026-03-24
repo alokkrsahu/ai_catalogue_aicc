@@ -1895,12 +1895,27 @@ class WorkflowExecutor:
             except Exception as pw_err:
                 logger.warning(f"⚠️ PRE-WARM: Failed to pre-warm uploads: {pw_err}")
 
-        # ---- Build web search tool ----
+        # ---- Build web search tool(s) ----
         _ws_handler = getattr(self.chat_manager, 'websearch_handler', None)
-        ws_tool = _ws_handler.build_websearch_tool(node) if _ws_handler else None
-        if ws_tool:
-            tools.append(ws_tool)
-            title_map[ws_tool["function"]["name"]] = "Web Search"
+        url_tool_map: Dict[str, str] = {}
+        if _ws_handler:
+            if _ws_handler.get_websearch_mode(node) == 'urls':
+                _ws_url_tools, url_tool_map = await _ws_handler.build_websearch_url_tools_with_summaries(node, project_id)
+                if _ws_url_tools:
+                    tools.extend(_ws_url_tools)
+                    for _t in _ws_url_tools:
+                        title_map[_t["function"]["name"]] = "Web Search (URL)"
+                else:
+                    # No summaries yet — fall back to single legacy tool
+                    ws_tool = _ws_handler.build_websearch_tool(node)
+                    if ws_tool:
+                        tools.append(ws_tool)
+                        title_map[ws_tool["function"]["name"]] = "Web Search"
+            else:
+                ws_tool = _ws_handler.build_websearch_tool(node)
+                if ws_tool:
+                    tools.append(ws_tool)
+                    title_map[ws_tool["function"]["name"]] = "Web Search"
 
         # ---- Build DocAware search tool ----
         _da_handler = getattr(self.chat_manager, 'docaware_handler', None)
@@ -2109,8 +2124,20 @@ class WorkflowExecutor:
                 """Execute one tool call; returns (tc, result_text, source_passages)."""
                 _query = tc["arguments"].get("query", "")
 
-                # --- Web search tool ---
+                # --- Per-URL web search tool (URL mode with summaries) ---
                 from .websearch_handler import WebSearchHandler
+                if tc["name"].startswith(WebSearchHandler.URL_TOOL_PREFIX):
+                    _ws = getattr(self.chat_manager, 'websearch_handler', None)
+                    if not _ws:
+                        return tc, "[Web search handler not available]", []
+                    _target_url = url_tool_map.get(tc["name"], "")
+                    if not _target_url:
+                        return tc, f"[Unknown URL tool: {tc['name']}]", []
+                    _ttl = node.get('data', {}).get('web_search_cache_ttl', 3600)
+                    _result = await _ws._get_url_context([_target_url], _ttl, project_id)
+                    return tc, _result, []
+
+                # --- Web search tool ---
                 if tc["name"] == WebSearchHandler.WEB_SEARCH_TOOL_NAME:
                     _ws = getattr(self.chat_manager, 'websearch_handler', None)
                     if not _ws:

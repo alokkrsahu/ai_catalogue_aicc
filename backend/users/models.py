@@ -615,6 +615,43 @@ class ProjectDocumentSummary(models.Model):
         return f"Summary: {self.document.original_filename}"
 
 
+class WebSearchUrlSummary(models.Model):
+    """
+    LLM-generated summaries for web search URLs configured on agent nodes.
+
+    One row per (project, url) pair. Used to build per-URL tool descriptions
+    so the LLM can selectively call only the most relevant URL instead of
+    fetching all configured URLs at once.
+
+    Project isolation: enforced via the FK to IntelliDocProject.
+    """
+
+    project = models.ForeignKey(
+        'IntelliDocProject',
+        on_delete=models.CASCADE,
+        related_name='url_summaries',
+    )
+    url = models.URLField(max_length=2000)
+
+    # ~200-word summary used as the tool description
+    short_summary = models.TextField(blank=True)
+    # ~3000-word detailed summary stored for future use
+    long_summary = models.TextField(blank=True)
+
+    llm_provider = models.CharField(max_length=20, default='openai')
+    llm_model = models.CharField(max_length=100, blank=True)
+
+    generated_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [('project', 'url')]
+        ordering = ['url']
+
+    def __str__(self):
+        return f"URLSummary: {self.url[:80]}"
+
+
 class ProjectDocumentFolderOrganization(models.Model):
     """
     Stores a per-project mapping of each document to an LLM-chosen folder path
