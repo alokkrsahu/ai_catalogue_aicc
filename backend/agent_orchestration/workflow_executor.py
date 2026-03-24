@@ -2102,13 +2102,83 @@ class WorkflowExecutor:
                     _append_citations_block,
                     _parse_citations_block,
                 )
-                clean_text, citations = _parse_citations_block(response.text.strip())
+                clean_text, raw_citations = _parse_citations_block(response.text.strip())
                 title_to_docid = {title_map.get(tn, ""): did for tn, did in tool_map.items() if title_map.get(tn)}
-                for cit in citations:
-                    dt = cit.get("document_title", "")
-                    if dt and dt in title_to_docid and not cit.get("url"):
-                        cit["document_id"] = title_to_docid[dt]
-                return _append_citations_block(clean_text, citations), citations
+
+                # ── Citation normalization (same logic as explicit synthesis) ──
+                import re as _re
+                _raw_cit_map: Dict[int, Dict[str, Any]] = {}
+                for _c in raw_citations:
+                    _r = _c.get("ref")
+                    if _r is not None:
+                        _raw_cit_map[int(_r)] = _c
+
+                _seen: set = set()
+                _ordered_refs: List[int] = []
+                for _m in _re.finditer(r'\[(\d+)\]', clean_text):
+                    _n = int(_m.group(1))
+                    if _n not in _seen:
+                        _seen.add(_n)
+                        _ordered_refs.append(_n)
+
+                def _find_cit_nb(_ref_num: int) -> Dict[str, Any]:
+                    for _entry in notebook:
+                        _rt = _entry.get("result", "")
+                        _match = _re.search(rf'\[{_ref_num}\]\s*"([^"]+)"', _rt)
+                        if _match:
+                            return {
+                                "document_title": title_map.get(_entry["tool_name"], _entry["tool_name"]),
+                                "quoted_text": _match.group(1)[:250],
+                                "document_id": tool_map.get(_entry["tool_name"]),
+                                "source": "document",
+                            }
+                        _match2 = _re.search(rf'\[{_ref_num}\]\s*([^\[\n]+)', _rt)
+                        if _match2:
+                            return {
+                                "document_title": title_map.get(_entry["tool_name"], _entry["tool_name"]),
+                                "quoted_text": _match2.group(1).strip()[:250],
+                                "document_id": tool_map.get(_entry["tool_name"]),
+                                "source": "document",
+                            }
+                    if notebook:
+                        _e = notebook[0]
+                        return {
+                            "document_title": title_map.get(_e["tool_name"], _e["tool_name"]),
+                            "quoted_text": f"Reference from {title_map.get(_e['tool_name'], _e['tool_name'])}",
+                            "source": "document",
+                            "document_id": tool_map.get(_e["tool_name"]),
+                        }
+                    return {"quoted_text": "Reference", "source": "document"}
+
+                _new_citations: List[Dict[str, Any]] = []
+                _old_to_new: Dict[int, int] = {}
+                for _new_num, _old_num in enumerate(_ordered_refs, start=1):
+                    _old_to_new[_old_num] = _new_num
+                    if _old_num in _raw_cit_map:
+                        _entry = dict(_raw_cit_map[_old_num])
+                        _entry["ref"] = _new_num
+                    else:
+                        _entry = _find_cit_nb(_old_num)
+                        _entry["ref"] = _new_num
+                    _new_citations.append(_entry)
+
+                for _old_num in sorted(_old_to_new.keys(), reverse=True):
+                    clean_text = clean_text.replace(f"[{_old_num}]", f"[__CITE_{_old_to_new[_old_num]}__]")
+                for _new_num in range(1, len(_ordered_refs) + 1):
+                    clean_text = clean_text.replace(f"[__CITE_{_new_num}__]", f"[{_new_num}]")
+
+                for _cit in _new_citations:
+                    _dt = _cit.get("document_title", "")
+                    if _dt and _dt in title_to_docid and not _cit.get("url"):
+                        _cit["document_id"] = title_to_docid[_dt]
+
+                if _ordered_refs:
+                    logger.info(
+                        f"📎 CITATION NORMALIZE: {len(_ordered_refs)} refs renumbered [1..{len(_ordered_refs)}], "
+                        f"{len(_raw_cit_map)} from LLM block, {len(_ordered_refs) - len(set(_ordered_refs) & set(_raw_cit_map.keys()))} recovered"
+                    )
+
+                return _append_citations_block(clean_text, _new_citations), _new_citations
 
             # Record the assistant's tool-call turn in the conversation
             tool_conv.append(
