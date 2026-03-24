@@ -595,7 +595,7 @@
       // Extract capabilities from cloned project data (not template files)
       projectCapabilities = project.processing_capabilities || {};
       hasNavigation = project.has_navigation || false;
-      navigationPages = project.navigation_pages || [];
+      navigationPages = (project.navigation_pages || []).sort((a: any, b: any) => (a.page_number ?? 99) - (b.page_number ?? 99));
       
       // Load folder structure preservation setting
       preserveOriginalFolderStructure = project.preserve_original_folder_structure || false;
@@ -2337,7 +2337,42 @@
     {/if}
     
     {#if hasNavigation && currentPage === 6}
-      <!-- Page 6: System Performance Analysis -->
+      <!-- Page 6: Analytics -->
+      <div class="analytics-page h-full flex-1 w-full px-6 py-8">
+        {#key projectId}
+          {#await import('$lib/components/ProjectAnalytics.svelte')}
+          <div class="flex items-center justify-center min-h-96">
+            <div class="text-center">
+              <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
+              <p class="text-oxford-blue">Loading Analytics...</p>
+            </div>
+          </div>
+          {:then AnalyticsModule}
+            <svelte:component this={AnalyticsModule.default} {projectId} />
+          {:catch error}
+            <div class="flex items-center justify-center min-h-96">
+              <div class="text-center">
+                <div class="w-16 h-16 bg-red-100 text-red-600 rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
+                  <i class="fas fa-exclamation-triangle text-2xl"></i>
+                </div>
+                <h3 class="text-xl font-bold text-gray-900 mb-2">Loading Error</h3>
+                <p class="text-gray-600">Failed to load Analytics component.</p>
+                <button
+                  class="mt-4 px-4 py-2 bg-oxford-blue text-white rounded-lg hover:bg-blue-700 transition-colors"
+                  on:click={() => window.location.reload()}
+                >
+                  <i class="fas fa-refresh mr-2"></i>
+                  Reload Page
+                </button>
+              </div>
+            </div>
+          {/await}
+        {/key}
+      </div>
+    {/if}
+
+    {#if hasNavigation && currentPage === 7}
+      <!-- Page 7: System Performance Analysis -->
       <div class="system-performance-analysis-page h-full flex-1 w-full px-6 py-8">
         <!-- SECURITY: key={projectId} forces full component remount on project switch -->
         {#key projectId}

@@ -1248,6 +1248,23 @@ export class CleanUniversalApiService {
     console.log(`✅ PERFORMANCE: Retrieved experiment metrics`);
     return result;
   }
+
+  /**
+   * Get agent timing analytics for the Analytics page
+   */
+  async getAnalytics(projectId: string): Promise<any> {
+    const response = await this.handleAuthenticatedRequest(`${API_BASE}/projects/${projectId}/analytics/`, {
+      method: 'GET',
+      headers: this.getAuthHeaders(),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Get analytics failed: ${response.status}`);
+    }
+
+    return response.json();
+  }
 }
 
 // Export singleton instance

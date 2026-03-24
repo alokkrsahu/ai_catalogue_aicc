@@ -10,12 +10,8 @@
   let experimentData: any = null;
   
   // Experiment metrics state
-  let intelligentDelegation: any = null;
-  let delegationOverhead: any = null;
   let sequentialVsParallel: any = null;
   let docawareImpact: any = null;
-  let perAgentVsWorkflowRAG: any = null;
-  let concurrentLoad: any = null;
   let agentStatistics: any[] = [];
   let configurations: any = {};
   
@@ -33,18 +29,6 @@
     
     // Format based on experiment type using actual stored configuration
     switch(expType) {
-      case 'intelligent_delegation':
-        const delegateCount = config.delegate_count;
-        const threshold = config.confidence_threshold;
-        if (delegateCount !== undefined && threshold !== undefined) {
-          return `${delegateCount} delegates, θ=${threshold}`;
-        }
-        return 'N/A';
-      case 'delegation_overhead':
-        if (config.delegate_count !== undefined) {
-          return `${config.delegate_count} delegates`;
-        }
-        return 'N/A';
       case 'sequential_vs_parallel':
         const agentCount = config.agent_count;
         const ragStatus = config.has_rag !== undefined ? (config.has_rag ? 'RAG' : 'No RAG') : '';
@@ -54,10 +38,6 @@
         return 'N/A';
       case 'docaware_impact':
         return '2 agents, RAG on vs off';
-      case 'per_agent_vs_workflow_rag':
-        return 'Legal+Technical agents';
-      case 'concurrent_load':
-        return 'Full system';
       default:
         return JSON.stringify(config);
     }
@@ -77,14 +57,10 @@
       
       // Parse and organize metrics by experiment type
       if (experimentData) {
-        intelligentDelegation = experimentData.intelligent_delegation || null;
-        delegationOverhead = experimentData.delegation_overhead || null;
         sequentialVsParallel = experimentData.sequential_vs_parallel || null;
         docawareImpact = experimentData.docaware_impact || null;
-        perAgentVsWorkflowRAG = experimentData.per_agent_vs_workflow_rag || null;
-        concurrentLoad = experimentData.concurrent_load || null;
         agentStatistics = experimentData.agent_statistics || [];
-        
+
         // Store configurations for display
         configurations = experimentData.configurations || {};
       }
@@ -139,113 +115,11 @@
     </div>
   {:else}
     <div class="space-y-6">
-      <!-- Experiment 1: Intelligent Delegation Accuracy -->
-      <div class="bg-white rounded-lg shadow-md p-6">
-        <h3 class="text-xl font-bold text-gray-900 mb-4 flex items-center">
-          <i class="fas fa-route mr-2 text-oxford-blue"></i>
-          Experiment 1: Intelligent Delegation Accuracy
-        </h3>
-        <div class="mb-4">
-          <p class="text-sm text-gray-600 mb-2"><strong>Configuration:</strong> {formatConfiguration('intelligent_delegation', intelligentDelegation !== null && intelligentDelegation.routing_accuracy !== undefined)}</p>
-          {#if intelligentDelegation?.message}
-            <div class="mt-2 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-              <p class="text-sm text-yellow-800">
-                <i class="fas fa-info-circle mr-2"></i>
-                {intelligentDelegation.message}
-              </p>
-            </div>
-          {/if}
-        </div>
-        <div class="overflow-x-auto">
-          <table class="min-w-full divide-y divide-gray-200">
-            <thead class="bg-gray-50">
-              <tr>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Metric</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Value</th>
-              </tr>
-            </thead>
-            <tbody class="bg-white divide-y divide-gray-200">
-              <tr>
-                <td class="px-4 py-3 text-sm text-gray-900">Routing Accuracy (%)</td>
-                <td class="px-4 py-3 text-sm font-semibold text-oxford-blue">
-                  {#if intelligentDelegation?.routing_accuracy !== undefined && intelligentDelegation.routing_accuracy !== null}
-                    {formatPercentage(intelligentDelegation.routing_accuracy)}
-                  {:else}
-                    <span class="text-gray-400">No data</span>
-                  {/if}
-                </td>
-              </tr>
-              <tr>
-                <td class="px-4 py-3 text-sm text-gray-900">Broadcast Rate (%)</td>
-                <td class="px-4 py-3 text-sm font-semibold text-oxford-blue">
-                  {#if intelligentDelegation?.broadcast_rate !== undefined && intelligentDelegation.broadcast_rate !== null}
-                    {formatPercentage(intelligentDelegation.broadcast_rate)}
-                  {:else}
-                    <span class="text-gray-400">No data</span>
-                  {/if}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-      
-      <!-- Experiment 2: Delegation Processing Overhead -->
-      <div class="bg-white rounded-lg shadow-md p-6">
-        <h3 class="text-xl font-bold text-gray-900 mb-4 flex items-center">
-          <i class="fas fa-clock mr-2 text-oxford-blue"></i>
-          Experiment 2: Delegation Processing Overhead
-        </h3>
-        <div class="mb-4">
-          <p class="text-sm text-gray-600 mb-2"><strong>Configuration:</strong> {formatConfiguration('delegation_overhead', delegationOverhead !== null && delegationOverhead.query_analysis_time_ms !== undefined)}</p>
-          {#if delegationOverhead?.message}
-            <div class="mt-2 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-              <p class="text-sm text-yellow-800">
-                <i class="fas fa-info-circle mr-2"></i>
-                {delegationOverhead.message}
-              </p>
-            </div>
-          {/if}
-        </div>
-        <div class="overflow-x-auto">
-          <table class="min-w-full divide-y divide-gray-200">
-            <thead class="bg-gray-50">
-              <tr>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Metric</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Value</th>
-              </tr>
-            </thead>
-            <tbody class="bg-white divide-y divide-gray-200">
-              <tr>
-                <td class="px-4 py-3 text-sm text-gray-900">Query Analysis Time (ms)</td>
-                <td class="px-4 py-3 text-sm font-semibold text-oxford-blue">
-                  {#if delegationOverhead?.query_analysis_time_ms !== undefined && delegationOverhead.query_analysis_time_ms !== null}
-                    {formatNumber(delegationOverhead.query_analysis_time_ms, 1)} ms
-                  {:else}
-                    <span class="text-gray-400">No data</span>
-                  {/if}
-                </td>
-              </tr>
-              <tr>
-                <td class="px-4 py-3 text-sm text-gray-900">Matching Time (ms)</td>
-                <td class="px-4 py-3 text-sm font-semibold text-oxford-blue">
-                  {#if delegationOverhead?.matching_time_ms !== undefined && delegationOverhead.matching_time_ms !== null}
-                    {formatNumber(delegationOverhead.matching_time_ms, 1)} ms
-                  {:else}
-                    <span class="text-gray-400">No data</span>
-                  {/if}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-      
-      <!-- Experiment 3: Sequential vs Parallel Execution -->
+      <!-- Experiment 1: Sequential vs Parallel Execution -->
       <div class="bg-white rounded-lg shadow-md p-6">
         <h3 class="text-xl font-bold text-gray-900 mb-4 flex items-center">
           <i class="fas fa-tasks mr-2 text-oxford-blue"></i>
-          Experiment 3: Sequential vs Parallel Execution
+          Experiment 1: Sequential vs Parallel Execution
         </h3>
         <div class="mb-4">
           <p class="text-sm text-gray-600 mb-2"><strong>Configuration:</strong> {formatConfiguration('sequential_vs_parallel', sequentialVsParallel !== null && sequentialVsParallel.sequential_time_s !== undefined)}</p>
@@ -294,11 +168,11 @@
         </div>
       </div>
       
-      <!-- Experiment 4: DocAware Impact -->
+      <!-- Experiment 2: DocAware Impact -->
       <div class="bg-white rounded-lg shadow-md p-6">
         <h3 class="text-xl font-bold text-gray-900 mb-4 flex items-center">
           <i class="fas fa-book-reader mr-2 text-oxford-blue"></i>
-          Experiment 4: DocAware Impact
+          Experiment 2: DocAware Impact
         </h3>
         <div class="mb-4">
           <p class="text-sm text-gray-600 mb-2"><strong>Configuration:</strong> {formatConfiguration('docaware_impact')}</p>
@@ -345,97 +219,11 @@
         </div>
       </div>
       
-      <!-- Experiment 5: Per-Agent vs Workflow-Level RAG -->
-      <div class="bg-white rounded-lg shadow-md p-6">
-        <h3 class="text-xl font-bold text-gray-900 mb-4 flex items-center">
-          <i class="fas fa-layer-group mr-2 text-oxford-blue"></i>
-          Experiment 5: Per-Agent vs Workflow-Level RAG
-        </h3>
-        <div class="mb-4">
-          <p class="text-sm text-gray-600 mb-2"><strong>Configuration:</strong> {formatConfiguration('per_agent_vs_workflow_rag')}</p>
-        </div>
-        <div class="overflow-x-auto">
-          <table class="min-w-full divide-y divide-gray-200">
-            <thead class="bg-gray-50">
-              <tr>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Metric</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Value</th>
-              </tr>
-            </thead>
-            <tbody class="bg-white divide-y divide-gray-200">
-              <tr>
-                <td class="px-4 py-3 text-sm text-gray-900">Response Relevance (%)</td>
-                <td class="px-4 py-3 text-sm font-semibold text-oxford-blue">
-                  {#if perAgentVsWorkflowRAG?.response_relevance !== undefined}
-                    {formatPercentage(perAgentVsWorkflowRAG.response_relevance)}
-                  {:else}
-                    <span class="text-gray-400">No data</span>
-                  {/if}
-                </td>
-              </tr>
-              <tr>
-                <td class="px-4 py-3 text-sm text-gray-900">Cross-contamination Rate (%)</td>
-                <td class="px-4 py-3 text-sm font-semibold text-oxford-blue">
-                  {#if perAgentVsWorkflowRAG?.cross_contamination_rate !== undefined}
-                    {formatPercentage(perAgentVsWorkflowRAG.cross_contamination_rate)}
-                  {:else}
-                    <span class="text-gray-400">No data</span>
-                  {/if}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-      
-      <!-- Experiment 6: Concurrent Load (10 users) -->
-      <div class="bg-white rounded-lg shadow-md p-6">
-        <h3 class="text-xl font-bold text-gray-900 mb-4 flex items-center">
-          <i class="fas fa-users mr-2 text-oxford-blue"></i>
-          Experiment 6: Concurrent Load (10 users)
-        </h3>
-        <div class="mb-4">
-          <p class="text-sm text-gray-600 mb-2"><strong>Configuration:</strong> {formatConfiguration('concurrent_load')}</p>
-        </div>
-        <div class="overflow-x-auto">
-          <table class="min-w-full divide-y divide-gray-200">
-            <thead class="bg-gray-50">
-              <tr>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Metric</th>
-                <th class="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">Value</th>
-              </tr>
-            </thead>
-            <tbody class="bg-white divide-y divide-gray-200">
-              <tr>
-                <td class="px-4 py-3 text-sm text-gray-900">P95 Latency (s)</td>
-                <td class="px-4 py-3 text-sm font-semibold text-oxford-blue">
-                  {#if concurrentLoad?.p95_latency_s !== undefined}
-                    {formatNumber(concurrentLoad.p95_latency_s, 3)} s
-                  {:else}
-                    <span class="text-gray-400">No data</span>
-                  {/if}
-                </td>
-              </tr>
-              <tr>
-                <td class="px-4 py-3 text-sm text-gray-900">Throughput (req/min)</td>
-                <td class="px-4 py-3 text-sm font-semibold text-oxford-blue">
-                  {#if concurrentLoad?.throughput_req_min !== undefined}
-                    {formatNumber(concurrentLoad.throughput_req_min, 1)} req/min
-                  {:else}
-                    <span class="text-gray-400">No data</span>
-                  {/if}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-      
-      <!-- Experiment 7: Agent Statistics -->
+      <!-- Experiment 3: Agent Statistics -->
       <div class="bg-white rounded-lg shadow-md p-6">
         <h3 class="text-xl font-bold text-gray-900 mb-4 flex items-center">
           <i class="fas fa-robot mr-2 text-oxford-blue"></i>
-          Agent Performance Statistics
+          Experiment 3: Agent Performance Statistics
         </h3>
         <div class="mb-4">
           <p class="text-sm text-gray-600 mb-2">Performance metrics for each agent orchestrated in workflows</p>

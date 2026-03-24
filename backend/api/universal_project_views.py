@@ -416,7 +416,7 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                 # Log breakdown by experiment type for debugging
                 if total_count > 0:
                     type_counts = {}
-                    for exp_type in ['intelligent_delegation', 'workflow_execution', 'docaware_single', 'docaware_context']:
+                    for exp_type in ['workflow_execution', 'docaware_single', 'docaware_context']:
                         count = experiment_metrics.filter(experiment_type=exp_type).count()
                         if count > 0:
                             type_counts[exp_type] = count
@@ -448,57 +448,7 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
             ).exclude(evaluation_id__isnull=True).exclude(evaluation_id='').count()
             logger.info(f"📊 PERFORMANCE: Found {deployment_metrics_count} deployment metrics, {evaluation_metrics_count} evaluation metrics")
             
-            # 1. Intelligent Delegation Accuracy
-            delegation_metrics = experiment_metrics.filter(experiment_type='intelligent_delegation')
-            if delegation_metrics.exists():
-                # Aggregate metrics
-                total_subqueries = sum(m.metric_data.get('total_subqueries', 0) for m in delegation_metrics)
-                successful = sum(m.metric_data.get('successful_delegations', 0) for m in delegation_metrics)
-                broadcast = sum(m.metric_data.get('broadcast_subqueries', 0) for m in delegation_metrics)
-                
-                # Get configuration from most recent metric
-                latest_config = delegation_metrics.first().configuration
-                configurations['intelligent_delegation'] = latest_config
-                
-                result_data['intelligent_delegation'] = {
-                    'routing_accuracy': (successful / total_subqueries * 100) if total_subqueries > 0 else 0,
-                    'broadcast_rate': (broadcast / total_subqueries * 100) if total_subqueries > 0 else 0,
-                    'configuration': latest_config
-                }
-            else:
-                # No delegation metrics found
-                result_data['intelligent_delegation'] = {
-                    'routing_accuracy': None,
-                    'broadcast_rate': None,
-                    'configuration': {},
-                    'message': 'Requires workflow with Group Chat Manager using intelligent delegation mode'
-                }
-            
-            # 2. Delegation Processing Overhead
-            if delegation_metrics.exists():
-                query_splitting_times = []
-                matching_times = []
-                for m in delegation_metrics:
-                    metric_data = m.metric_data
-                    if metric_data.get('query_splitting_time_s'):
-                        query_splitting_times.append(metric_data.get('query_splitting_time_s', 0) * 1000)
-                    if metric_data.get('matching_time_s'):
-                        matching_times.append(metric_data.get('matching_time_s', 0) * 1000)
-                
-                result_data['delegation_overhead'] = {
-                    'query_analysis_time_ms': sum(query_splitting_times) / len(query_splitting_times) if query_splitting_times else None,
-                    'matching_time_ms': sum(matching_times) / len(matching_times) if matching_times else None,
-                    'message': None
-                }
-            else:
-                # No delegation metrics found
-                result_data['delegation_overhead'] = {
-                    'query_analysis_time_ms': None,
-                    'matching_time_ms': None,
-                    'message': 'Requires workflow with Group Chat Manager using intelligent delegation mode'
-                }
-            
-            # 3. Sequential vs Parallel Execution
+            # 1. Sequential vs Parallel Execution
             workflow_metrics = experiment_metrics.filter(experiment_type='workflow_execution')
             
             # Log deployment vs evaluation breakdown
@@ -547,7 +497,7 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                         'speedup_factor': None
                     }
             
-            # 4. DocAware Impact - Check workflow configuration for RAG status
+            # 2. DocAware Impact - Check workflow configuration for RAG status
             # Filter metrics by evaluation_id if available to get evaluation-specific metrics
             docaware_metrics = experiment_metrics.filter(experiment_type__in=['docaware_single', 'docaware_context'])
             
@@ -646,21 +596,7 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                         'message': 'Requires two evaluations: one with RAG enabled and one without'
                     }
             
-            # 5. Per-Agent vs Workflow-Level RAG (placeholder - requires domain analysis)
-            result_data['per_agent_vs_workflow_rag'] = {
-                'response_relevance': None,
-                'cross_contamination_rate': None
-            }
-            configurations['per_agent_vs_workflow_rag'] = {}
-            
-            # 6. Concurrent Load (placeholder - requires load testing)
-            result_data['concurrent_load'] = {
-                'p95_latency_s': None,
-                'throughput_req_min': None
-            }
-            configurations['concurrent_load'] = {}
-            
-            # 7. Agent Statistics - Per-agent performance metrics
+            # 3. Agent Statistics - Per-agent performance metrics
             from users.models import WorkflowExecutionMessage, WorkflowExecution
             
             # Get all workflow executions for this project
@@ -710,6 +646,219 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                 'error': f'Failed to retrieve experiment metrics: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
+    @action(detail=True, methods=['get'], url_path='analytics')
+    def analytics(self, request, project_id=None):
+        """
+        Agent timing analytics for the dedicated Analytics page.
+
+        Returns four sections built from existing models (no new DB tables):
+          planning_time   — from tool_plan messages
+          tool_breakdown  — per-tool-type avg/count from tool_notebook messages
+          websearch       — from ExperimentMetric websearch records
+          execution_volume — daily execution counts + status breakdown
+        """
+        from users.models import WorkflowExecutionMessage, WorkflowExecution, ExperimentMetric
+        from django.db.models import Avg, Count, Sum, Min, Max, Q
+        from django.db.models.functions import TruncDate
+
+        project = self.get_object()
+        project_workflows = AgentWorkflow.objects.filter(project=project)
+        project_executions = WorkflowExecution.objects.filter(workflow__in=project_workflows)
+
+        try:
+            # ── 1. Planning time ──────────────────────────────────────
+            plan_qs = WorkflowExecutionMessage.objects.filter(
+                execution__in=project_executions,
+                message_type='tool_plan',
+            )
+            plan_agg = plan_qs.aggregate(
+                avg_ms=Avg('response_time_ms'),
+                max_ms=Max('response_time_ms'),
+                min_ms=Min('response_time_ms'),
+                total_count=Count('id'),
+            )
+
+            # Daily trend (last 30 days)
+            plan_daily = list(
+                plan_qs.annotate(day=TruncDate('timestamp'))
+                .values('day')
+                .annotate(avg_ms=Avg('response_time_ms'), count=Count('id'))
+                .order_by('day')[:30]
+            )
+            plan_trend = [
+                {'date': str(r['day']), 'avg_ms': round(r['avg_ms'] or 0, 1), 'count': r['count']}
+                for r in plan_daily
+            ]
+
+            planning_time = {
+                'avg_ms': round(plan_agg['avg_ms'] or 0, 1),
+                'max_ms': plan_agg['max_ms'] or 0,
+                'min_ms': plan_agg['min_ms'] or 0,
+                'total_count': plan_agg['total_count'],
+                'trend': plan_trend,
+            }
+
+            # ── 2. Tool call breakdown ────────────────────────────────
+            notebook_qs = WorkflowExecutionMessage.objects.filter(
+                execution__in=project_executions,
+                message_type='tool_notebook',
+            )
+
+            # Group by metadata tool_type (PostgreSQL JSONB field)
+            try:
+                tool_rows = list(
+                    notebook_qs
+                    .exclude(metadata__tool_type=None)
+                    .values('metadata__tool_type')
+                    .annotate(
+                        avg_ms=Avg('response_time_ms'),
+                        total_count=Count('id'),
+                        max_ms=Max('response_time_ms'),
+                    )
+                    .order_by('-total_count')
+                )
+                tool_breakdown = [
+                    {
+                        'tool_type': r['metadata__tool_type'] or 'unknown',
+                        'avg_ms': round(r['avg_ms'] or 0, 1),
+                        'max_ms': r['max_ms'] or 0,
+                        'count': r['total_count'],
+                    }
+                    for r in tool_rows
+                ]
+                # Fallback totals for rows without tool_type metadata (legacy 0-ms records)
+                legacy_count = notebook_qs.filter(metadata__tool_type=None).count()
+                if legacy_count:
+                    tool_breakdown.append({
+                        'tool_type': 'legacy (no timing)',
+                        'avg_ms': 0,
+                        'max_ms': 0,
+                        'count': legacy_count,
+                    })
+            except Exception:
+                tool_breakdown = []
+
+            # ── 3. WebSearch latency ──────────────────────────────────
+            ws_metrics = list(
+                ExperimentMetric.objects.filter(
+                    project=project,
+                    experiment_type__in=['websearch_performance', 'web_search'],
+                ).order_by('-created_at')[:50]
+            )
+
+            ws_durations = []
+            ws_cache_hits = 0
+            ws_cache_total = 0
+            for m in ws_metrics:
+                md = m.metric_data or {}
+                dur = md.get('duration_ms') or md.get('total_duration_ms')
+                if dur is not None:
+                    ws_durations.append(float(dur))
+                cache_hit = md.get('cache_hit')
+                if cache_hit is not None:
+                    ws_cache_total += 1
+                    if cache_hit:
+                        ws_cache_hits += 1
+
+            websearch = {
+                'avg_ms': round(sum(ws_durations) / len(ws_durations), 1) if ws_durations else None,
+                'max_ms': max(ws_durations) if ws_durations else None,
+                'min_ms': min(ws_durations) if ws_durations else None,
+                'sample_count': len(ws_durations),
+                'cache_hit_rate': round(ws_cache_hits / ws_cache_total * 100, 1) if ws_cache_total else None,
+                'recent': [
+                    {
+                        'date': str(m.created_at.date()),
+                        'duration_ms': (m.metric_data or {}).get('duration_ms'),
+                        'cache_hit': (m.metric_data or {}).get('cache_hit'),
+                        'query': (m.metric_data or {}).get('query', '')[:80],
+                    }
+                    for m in ws_metrics[:20]
+                ],
+            }
+
+            # ── 4. Execution volume ───────────────────────────────────
+            exec_daily = list(
+                project_executions
+                .annotate(day=TruncDate('start_time'))
+                .values('day')
+                .annotate(
+                    total=Count('id'),
+                    completed=Count('id', filter=Q(status='completed')),
+                    failed=Count('id', filter=Q(status='failed')),
+                )
+                .order_by('day')[:60]
+            )
+            execution_volume = {
+                'total_executions': project_executions.count(),
+                'daily': [
+                    {
+                        'date': str(r['day']),
+                        'total': r['total'],
+                        'completed': r['completed'],
+                        'failed': r['failed'],
+                    }
+                    for r in exec_daily
+                ],
+            }
+
+            # ── 5. Query word cloud ───────────────────────────────────
+            import re as _re
+            from users.models import HumanInputInteraction
+
+            STOPWORDS = {
+                'the','a','an','and','or','but','in','on','at','to','for','of','with',
+                'is','it','its','be','are','was','were','has','have','had','do','does',
+                'did','will','would','could','should','may','might','can','i','you',
+                'he','she','we','they','me','him','her','us','them','my','your','his',
+                'our','their','this','that','these','those','what','how','why','when',
+                'where','who','which','so','if','then','than','as','by','from','into',
+                'about','up','out','no','not','all','more','also','just','get','like',
+                'use','used','using','please','need','want','make','know','tell',
+                'user','assistant',
+            }
+
+            raw_texts = list(
+                WorkflowExecutionMessage.objects.filter(
+                    execution__in=project_executions,
+                    message_type__in=['workflow_start', 'human_input'],
+                ).values_list('content', flat=True)[:2000]
+            )
+
+            human_texts = list(
+                HumanInputInteraction.objects.filter(
+                    execution__in=project_executions,
+                ).values_list('human_response', flat=True)[:500]
+            )
+
+            all_text = ' '.join(t for t in (raw_texts + human_texts) if t)
+            raw_words = _re.findall(r"[a-zA-Z']{3,}", all_text.lower())
+            word_freq: dict = {}
+            for w in raw_words:
+                w = w.strip("'")
+                if len(w) >= 3 and w not in STOPWORDS:
+                    word_freq[w] = word_freq.get(w, 0) + 1
+
+            top_words = sorted(word_freq.items(), key=lambda x: -x[1])[:80]
+            query_wordcloud = [{'word': w, 'count': c} for w, c in top_words]
+
+            return Response({
+                'planning_time': planning_time,
+                'tool_breakdown': tool_breakdown,
+                'websearch': websearch,
+                'execution_volume': execution_volume,
+                'query_wordcloud': query_wordcloud,
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Failed to retrieve analytics: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return Response(
+                {'error': f'Failed to retrieve analytics: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
     @action(detail=True, methods=['get'])
     def documents(self, request, project_id=None):
         """Get project documents"""

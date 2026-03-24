@@ -2211,8 +2211,14 @@ class WorkflowExecutor:
 
                 return tc, _result, _passages
 
+            async def _timed_tool(tc):
+                _t0 = time.time()
+                res = await _run_single_tool(tc)
+                _ms = int((time.time() - _t0) * 1000)
+                return (*res, _ms)
+
             gather_results = await asyncio.gather(
-                *[_run_single_tool(tc) for tc in pending_calls],
+                *[_timed_tool(tc) for tc in pending_calls],
                 return_exceptions=True,
             )
 
@@ -2223,7 +2229,7 @@ class WorkflowExecutor:
                     logger.error(f"Tool call failed: {raw_result}")
                     continue
 
-                tc, result_text, source_passages = raw_result
+                tc, result_text, source_passages, tool_call_ms = raw_result
                 query = tc["arguments"].get("query", "")
 
                 calls_with_results.append({**tc, "result": result_text})
@@ -2259,13 +2265,23 @@ class WorkflowExecutor:
                     "content": _json.dumps(notebook[-1]),
                     "message_type": "tool_notebook",
                     "timestamp": timezone.now().isoformat(),
-                    "response_time_ms": 0,
+                    "response_time_ms": tool_call_ms,
                     "token_count": None,
                     "metadata": {
                         "llm_provider": provider_name,
                         "llm_model": model_name,
                         "phase": "tool_execution",
                         "iteration": iteration,
+                        "tool_type": (
+                            "web_search" if (
+                                tc["name"].startswith("wsurl_")
+                                or tc["name"] == "web_search"
+                            )
+                            else "docaware" if tc["name"] == "document_search"
+                            else "document_read" if tc["name"] in tool_map
+                            else "other"
+                        ),
+                        "tool_name": tc["name"],
                     },
                 })
                 message_sequence += 1
