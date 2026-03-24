@@ -825,13 +825,27 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                 ).values_list('content', flat=True)[:2000]
             )
 
+            # Extract only user-authored text.
+            # Deployment workflow_start messages contain a full conversation string
+            # like "Assistant: ...\nUser: query\nAssistant: ...". Extract only
+            # the User: lines. Plain StartNode prompts (admin workflows) have no
+            # role prefix and are included as-is.
+            user_only_texts = []
+            for text in raw_texts:
+                if text and ('User:' in text or 'Assistant:' in text):
+                    for line in text.split('\n'):
+                        if line.startswith('User:'):
+                            user_only_texts.append(line[5:].strip())
+                elif text:
+                    user_only_texts.append(text)
+
             human_texts = list(
                 HumanInputInteraction.objects.filter(
                     execution__in=project_executions,
                 ).values_list('human_response', flat=True)[:500]
             )
 
-            all_text = ' '.join(t for t in (raw_texts + human_texts) if t)
+            all_text = ' '.join(t for t in (user_only_texts + human_texts) if t)
             raw_words = _re.findall(r"[a-zA-Z']{3,}", all_text.lower())
             word_freq: dict = {}
             for w in raw_words:
