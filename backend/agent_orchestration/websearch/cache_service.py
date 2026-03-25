@@ -298,17 +298,48 @@ class WebSearchCacheService:
     def clear_all_websearch_cache(self, project_id: str) -> bool:
         """
         Clear all websearch cache entries for a single project.
-        Uses pattern matching (e.g. Redis delete_pattern) so only this project's keys are removed.
+
+        Two-path implementation:
+          Fast path  — django-redis: uses delete_pattern()
+          Fallback   — Django built-in Redis backend: uses low-level SCAN + DELETE
+                       via the redis-py client so only this project's keys are removed.
         """
         pid = _normalize_project_id(project_id)
         try:
+            # Fast path: django-redis exposes delete_pattern()
             if hasattr(cache, 'delete_pattern'):
                 cache.delete_pattern(f"{self.URL_PREFIX}{pid}_*")
                 cache.delete_pattern(f"{self.SEARCH_PREFIX}{pid}_*")
                 logger.info(f"🗑️ WEBSEARCH CACHE: Cleared all websearch cache for project {project_id[:8]}")
                 return True
-            else:
-                logger.warning("⚠️ WEBSEARCH CACHE: Pattern-based deletion not supported by cache backend")
+
+            # Fallback: Django's built-in RedisCache (Django >= 4.0) exposes the
+            # underlying redis-py client through cache._cache.get_client().
+            # Django key format: {key_prefix}:{version}:{cache_key}
+            try:
+                client = cache._cache.get_client()
+                key_prefix = getattr(cache, 'key_prefix', '')
+                version = getattr(cache, 'version', 1)
+                deleted = 0
+                for prefix in (self.URL_PREFIX, self.SEARCH_PREFIX):
+                    full_pattern = f"{key_prefix}:{version}:{prefix}{pid}_*"
+                    cursor = 0
+                    while True:
+                        cursor, keys = client.scan(cursor, match=full_pattern, count=200)
+                        if keys:
+                            client.delete(*keys)
+                            deleted += len(keys)
+                        if cursor == 0:
+                            break
+                logger.info(
+                    f"🗑️ WEBSEARCH CACHE: Cleared {deleted} cache keys for project {project_id[:8]}"
+                )
+                return True
+            except AttributeError:
+                logger.warning(
+                    "⚠️ WEBSEARCH CACHE: Cache backend does not support pattern deletion "
+                    "or direct Redis client access. Cache was not cleared."
+                )
                 return False
         except Exception as e:
             logger.error(f"❌ WEBSEARCH CACHE: Failed to clear cache: {e}")
