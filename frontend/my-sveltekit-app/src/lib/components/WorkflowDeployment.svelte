@@ -156,6 +156,8 @@
     // Citation chips & tooltips
     htmlParts.push('    .cite-chip { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 4px; background: var(--primary-color, #0ea5e9); color: white; font-size: 11px; font-weight: 600; cursor: pointer; vertical-align: super; margin: 0 1px; line-height: 1; transition: background 0.15s; }');
     htmlParts.push('    .cite-chip:hover { filter: brightness(0.85); }');
+    htmlParts.push('    .cite-chip-secondary { background: #e5e7eb; color: #374151; cursor: default; }');
+    htmlParts.push('    .cite-chip-secondary:hover { filter: none; }');
     htmlParts.push('    .cite-tooltip { position: fixed; max-width: 340px; background: #1e293b; color: #e2e8f0; border-radius: 8px; padding: 10px 14px; font-size: 13px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); z-index: 9999; animation: citeIn 0.15s ease-out; }');
     htmlParts.push('    .cite-tooltip-title { font-weight: 600; color: #38bdf8; margin-bottom: 6px; font-size: 12px; }');
     htmlParts.push('    .cite-tooltip-link { color: #38bdf8; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; transition: color 0.15s; }');
@@ -322,7 +324,7 @@
     htmlParts.push('    return html.replace(/\\[(\\d+)\\]/g, function(match, num) {');
     htmlParts.push('      var ref = parseInt(num, 10);');
     htmlParts.push('      var cit = citations.find(function(c) { return Number(c.ref) === ref; });');
-    htmlParts.push('      if (!cit) return match;');
+    htmlParts.push("      if (!cit) return '<span class=\"cite-chip cite-chip-secondary\" data-ref=\"' + ref + '\">' + ref + '</span>';");
     htmlParts.push("      return '<span class=\"cite-chip\" data-ref=\"' + ref + '\">' + ref + '</span>';");
     htmlParts.push('    });');
     htmlParts.push('  }');
@@ -604,7 +606,7 @@
     htmlParts.push('        currentExecutionId = data.execution_id;');
     htmlParts.push("      } else if (data.status === 'success') {");
     htmlParts.push("        const reply = data.response || '(No response)';");
-    htmlParts.push("        appendMessage('assistant', reply);");
+    htmlParts.push("        appendMessage('assistant', reply, false, data.citations);");
     htmlParts.push("        messages.push({ role: 'assistant', content: reply });");
     htmlParts.push("        statusEl.textContent = '';");
     htmlParts.push('        currentExecutionId = null;');
@@ -656,8 +658,8 @@
     htmlParts.push('            try {');
     htmlParts.push('              const data = JSON.parse(line.slice(6));');
     htmlParts.push("              if (data.type === 'content') {");
-    htmlParts.push('                collapseActivityPanel();');
     htmlParts.push('                if (!thinkingHidden) {');
+    htmlParts.push('                  collapseActivityPanel();');
     htmlParts.push('                  hideThinkingIndicator();');
     htmlParts.push('                  thinkingHidden = true;');
     htmlParts.push("                  msg = document.createElement('div');");
@@ -691,7 +693,6 @@
     htmlParts.push('                hideThinkingIndicator();');
     htmlParts.push('                if (msg) msg.remove();');
     htmlParts.push("                appendMessage('assistant', 'Error: ' + (data.error || 'Unexpected error'));");
-    htmlParts.push('                resetActivityPanel();');
     htmlParts.push('                return;');
     htmlParts.push("              } else if (data.type === 'done') {");
     htmlParts.push('                collapseActivityPanel();');
@@ -717,9 +718,10 @@
     htmlParts.push('    } catch (e) {');
     htmlParts.push("      console.error('Chat error:', e);");
     htmlParts.push('      hideThinkingIndicator();');
+    htmlParts.push('      collapseActivityPanel();');
+    htmlParts.push('      resetActivityPanel();');
     htmlParts.push("      appendMessage('assistant', 'Sorry, there was a connection problem.');");
     htmlParts.push("      statusEl.textContent = '';");
-    htmlParts.push('      resetActivityPanel();');
     htmlParts.push('    } finally {');
     htmlParts.push('      if (!awaitingHumanInput) sendBtn.disabled = false;');
     htmlParts.push('    }');
