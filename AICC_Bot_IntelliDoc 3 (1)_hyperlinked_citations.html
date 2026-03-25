@@ -283,6 +283,28 @@
     .message.bot .cite-chip-secondary:hover {
       filter: none;
     }
+    .message.bot .cite-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 18px;
+      height: 18px;
+      padding: 0 4px;
+      border-radius: 4px;
+      background: var(--oxford-blue);
+      color: var(--oxford-white);
+      font-size: 11px;
+      font-weight: 600;
+      vertical-align: super;
+      margin: 0 1px;
+      line-height: 1;
+      text-decoration: none;
+      transition: filter 0.15s;
+    }
+    .message.bot .cite-link:hover {
+      filter: brightness(0.88);
+      text-decoration: none;
+    }
     .cite-tooltip {
       position: fixed;
       max-width: 340px;
@@ -915,6 +937,13 @@
         var ref = parseInt(num, 10);
         var cit = citations.find(function (c) { return Number(c.ref) === ref; });
         if (!cit) return '<span class="cite-chip cite-chip-secondary" data-ref="' + ref + '">' + ref + '</span>';
+        // Web citation with a URL → direct hyperlink
+        if (cit.url) {
+          var safeUrl = cit.url.replace(/"/g, '&quot;').replace(/</g, '&lt;');
+          var titleAttr = (cit.document_title || cit.url).replace(/"/g, '&quot;').replace(/</g, '&lt;');
+          return '<a class="cite-link" href="' + safeUrl + '" target="_blank" rel="noopener" title="' + titleAttr + '">' + ref + '</a>';
+        }
+        // Document citation (no public URL) → keep chip+tooltip for authenticated download
         return '<span class="cite-chip" data-ref="' + ref + '">' + ref + '</span>';
       });
     }
