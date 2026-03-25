@@ -436,39 +436,97 @@ class WebsiteFetcherService:
         soup: BeautifulSoup,
         content_root,
         fragment: str,
-    ) -> Tuple[Optional[Any], Optional[int]]:
+    ) -> Tuple[Optional[Any], Optional[int], Optional[Any]]:
         """
-        Locate the element identified by #fragment and return a (start_node, stop_level)
-        tuple that controls the single-pass traversal scope.
+        Locate the element identified by #fragment and return a 3-tuple
+        (start_node, stop_level, sibling_anchor_parent) that controls the
+        single-pass traversal scope.
+
+        Cases handled:
+          1. Anchor IS a heading: <h2 id="...">Title</h2>
+          2. Anchor inside a heading: <h2>Title <a id="...">¶</a></h2>  (Sphinx/Hugo)
+          3. Non-empty container: <div id="..."><h2>...</h2><p>...</p></div>
+          4. Empty anchor marker (Oxford/CMS): <a id="..."></a> before content block
+          5. No heading in siblings — use first non-empty sibling as content_root
+          6. Fallback to anchor's parent
+          7. Fragment not found — full-page fallback
 
         Returns:
-            (heading_element, heading_level) — traverse from that heading until the
-                next sibling at the same or higher level.
-            (non_heading_element, None) — use that element directly as the new content_root
-                (caller replaces content_root before calling _single_pass_traverse).
-            (None, None) — fragment not found; fall back to full-page extraction.
+            (start_node, stop_level, sibling_anchor_parent)
+            - stop_level=None + start_node set → replace content_root with start_node
+            - stop_level set → traverse from start_node, stop at heading of that level
+            - sibling_anchor_parent set → also stop at next empty <a id=...> at that parent
+            - (None, None, None) → fragment not found, fall back to full page
         """
-        # Try id= attribute first (most common in modern docs)
+        # 1. Find by id= (most common)
         anchor = soup.find(id=fragment)
-
-        # Fallback: legacy <a name="fragment"> pattern
         if anchor is None:
+            # Legacy: <a name="fragment"> — use a_tag itself (NOT a_tag.parent)
             a_tag = soup.find('a', attrs={'name': fragment})
-            anchor = a_tag.parent if a_tag else None
-
+            anchor = a_tag if a_tag else None
         if anchor is None:
             logger.debug(f"🔍 FRAGMENT: #{fragment} not found in page, using full page")
-            return None, None
+            return None, None, None
 
+        # 2. Anchor IS a heading: <h2 id="...">Title</h2>
         if anchor.name in self.HEADING_TAGS:
             level = int(anchor.name[1])
-            logger.debug(f"🔍 FRAGMENT: #{fragment} found as heading h{level}")
-            return anchor, level
-        else:
-            # Non-heading container (e.g. <section id="configuration">, <div id="api-ref">)
-            # Use the element itself as the new content_root
-            logger.debug(f"🔍 FRAGMENT: #{fragment} found as <{anchor.name}>, using as content_root")
-            return anchor, None
+            logger.debug(f"🔍 FRAGMENT: #{fragment} is heading h{level}")
+            return anchor, level, None
+
+        # 3. Anchor INSIDE a heading: <h2>Title <a id="...">¶</a></h2>  (Sphinx/Hugo)
+        parent = anchor.parent
+        if parent and parent.name in self.HEADING_TAGS:
+            level = int(parent.name[1])
+            logger.debug(f"🔍 FRAGMENT: #{fragment} is inside heading h{level}")
+            return parent, level, None
+
+        # 4. Non-empty container: <div id="..."><h2>...</h2><p>...</p></div>
+        if anchor.get_text(strip=True):
+            logger.debug(f"🔍 FRAGMENT: #{fragment} is non-empty <{anchor.name}>, using as content_root")
+            return anchor, None, None
+
+        # 5. Empty anchor marker (Oxford/CMS pattern):
+        #    <a id="Section"></a> placed BEFORE the content block.
+        #    Search following siblings for the first heading, stopping at the next marker.
+        sibling_anchor_parent = anchor.parent
+        for sibling in anchor.next_siblings:
+            if not isinstance(sibling, Tag):
+                continue
+            # Stop searching at the next empty anchor marker (next section boundary)
+            if (sibling.name == 'a'
+                    and sibling.get('id')
+                    and not sibling.get_text(strip=True)):
+                break
+            # Direct heading sibling
+            if sibling.name in self.HEADING_TAGS:
+                logger.debug(
+                    f"🔍 FRAGMENT: #{fragment} is empty marker, "
+                    f"found direct heading <{sibling.name}>"
+                )
+                return sibling, int(sibling.name[1]), sibling_anchor_parent
+            # Heading nested inside a sibling container (e.g. <div class="faqmodule"><h2>)
+            h = sibling.find(list(self.HEADING_TAGS))
+            if h:
+                logger.debug(
+                    f"🔍 FRAGMENT: #{fragment} is empty marker, "
+                    f"found nested heading <{h.name}> inside <{sibling.name}>"
+                )
+                return h, int(h.name[1]), sibling_anchor_parent
+
+        # 6. No heading found in siblings — use first non-empty sibling as new content_root
+        for sibling in anchor.next_siblings:
+            if isinstance(sibling, Tag) and sibling.get_text(strip=True):
+                logger.debug(f"🔍 FRAGMENT: #{fragment} no heading found, using first content sibling")
+                return sibling, None, None
+
+        # 7. Fallback: use anchor's parent if it has content
+        if parent and parent.get_text(strip=True):
+            logger.debug(f"🔍 FRAGMENT: #{fragment} fallback to parent <{parent.name}>")
+            return parent, None, None
+
+        logger.debug(f"🔍 FRAGMENT: #{fragment} no usable anchor found, using full page")
+        return None, None, None
 
     # =========================================================================
     # Block Extraction Helper
@@ -527,6 +585,7 @@ class WebsiteFetcherService:
         content_root,
         start_node: Optional[Tag] = None,
         stop_at_heading_level: Optional[int] = None,
+        stop_at_sibling_parent: Optional[Any] = None,
     ) -> List[PageSection]:
         """
         Walk content_root's descendants in document order, extracting PageSections
@@ -537,6 +596,9 @@ class WebsiteFetcherService:
             start_node: If set, skip all nodes before this one (anchor fragment support)
             stop_at_heading_level: If set, stop when a heading at this level or
                 higher is encountered (used together with start_node for heading anchors)
+            stop_at_sibling_parent: If set, stop when an empty <a id=...> whose
+                .parent is this element is encountered — detects the next CMS-style
+                section boundary (e.g. the next <a id="Codex"></a> marker)
 
         Returns:
             List of PageSection in document order — no type-grouping, no duplicates
@@ -568,6 +630,17 @@ class WebsiteFetcherService:
                 level = int(tag[1])
                 if level <= stop_at_heading_level and node is not start_node:
                     break
+
+            # --- Fragment: stop at the next CMS-style empty anchor marker ---
+            # e.g. <a id="Codex"></a> placed at the same parent level as the
+            # original <a id="AdvancedFeatures"></a> that started this traversal
+            if (stop_at_sibling_parent is not None
+                    and tag == 'a'
+                    and node is not start_node
+                    and node.get('id')
+                    and not node.get_text(strip=True)
+                    and node.parent is stop_at_sibling_parent):
+                break
 
             # --- Skip already-processed subtrees ---
             if id(node) in processed_ids:
@@ -725,23 +798,28 @@ class WebsiteFetcherService:
             # --- Anchor fragment narrowing ---
             traverse_start: Optional[Tag] = None
             traverse_stop_level: Optional[int] = None
+            traverse_stop_sibling_parent = None
 
             if fragment:
-                start_node, stop_level = self._find_fragment_root(soup, content_root, fragment)
+                start_node, stop_level, sibling_anchor_parent = self._find_fragment_root(
+                    soup, content_root, fragment
+                )
                 if start_node is not None:
                     if stop_level is None:
-                        # Non-heading anchor: replace content_root with the anchor element
+                        # Non-empty container or headingless sibling: replace content_root
                         content_root = start_node
                     else:
-                        # Heading anchor: traverse from this heading with a stop condition
+                        # Heading anchor or empty-marker anchor: traverse mode
                         traverse_start = start_node
                         traverse_stop_level = stop_level
+                        traverse_stop_sibling_parent = sibling_anchor_parent  # may be None
 
             # --- Single-pass document-order traversal ---
             sections = self._single_pass_traverse(
                 content_root,
                 start_node=traverse_start,
                 stop_at_heading_level=traverse_stop_level,
+                stop_at_sibling_parent=traverse_stop_sibling_parent,
             )
 
             capture.sections = sections
