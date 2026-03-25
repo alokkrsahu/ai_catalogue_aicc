@@ -117,12 +117,13 @@
     urlSummaryStatus = 'Summarising new URLs…';
     try {
       const resp = await api.post(
-        `/api/agent-orchestration/projects/${projectId}/summarize-urls/`,
+        `/agent-orchestration/projects/${projectId}/summarize-urls/`,
         {
           urls,
           llm_provider: nodeConfig.llm_provider || 'openai',
           llm_model: nodeConfig.llm_model || '',
           force: false,
+          cache_ttl: nodeConfig.web_search_cache_ttl || 2592000,
         }
       );
       const { summarized, failed } = resp.data;
@@ -1148,6 +1149,17 @@
           await autoGenerateGroupChatManagerPrompt();
         }
       }, 500);
+    }
+
+    // Auto-trigger URL summarization on panel open if URLs are configured
+    if (
+      nodeConfig.web_search_enabled &&
+      nodeConfig.web_search_mode === 'urls' &&
+      nodeConfig.web_search_urls?.length > 0 &&
+      projectId
+    ) {
+      console.log('🌐 AUTO-SUMMARIZE: Triggering URL summarization for', nodeConfig.web_search_urls.length, 'URLs');
+      scheduleUrlSummarise(nodeConfig.web_search_urls);
     }
   });
 
@@ -2492,7 +2504,7 @@
                     nodeConfig.web_search_mode = 'general';
                   }
                   if (!nodeConfig.web_search_cache_ttl) {
-                    nodeConfig.web_search_cache_ttl = 3600; // 1 hour default
+                    nodeConfig.web_search_cache_ttl = 2592000; // 30 days default
                   }
                   if (!nodeConfig.web_search_max_results) {
                     nodeConfig.web_search_max_results = 5;
@@ -2618,20 +2630,25 @@
             </div>
           {/if}
           
-          <!-- Cache TTL -->
+          <!-- Cache TTL (input in days, stored as seconds) -->
           <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-700 mb-2">Cache Duration (seconds)</label>
+            <label class="block text-sm font-medium text-gray-700 mb-2">Cache Duration (days)</label>
             <input
               type="number"
-              bind:value={nodeConfig.web_search_cache_ttl}
-              on:input={updateNodeData}
+              value={Math.round((nodeConfig.web_search_cache_ttl ?? 2592000) / 86400)}
+              on:change={(e) => {
+                const days = Math.max(0, Math.min(365, parseInt(e.target.value) || 0));
+                nodeConfig.web_search_cache_ttl = days * 86400;
+                e.target.value = days;
+                updateNodeData();
+              }}
               min="0"
-              max="86400"
-              step="300"
+              max="365"
+              step="1"
               class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
             />
             <p class="text-xs text-gray-500 mt-1">
-              How long to cache results before re-fetching. 0 = no caching, 3600 = 1 hour, 86400 = 24 hours
+              How long to cache fetched page content. 0 = no caching, 30 = 30 days (recommended)
             </p>
           </div>
           
@@ -2646,7 +2663,7 @@
             {:else}
               <strong>Max Results:</strong> {nodeConfig.web_search_max_results || 5}
             {/if}
-            | <strong>Cache:</strong> {nodeConfig.web_search_cache_ttl || 3600}s
+            | <strong>Cache:</strong> {Math.round((nodeConfig.web_search_cache_ttl || 2592000) / 86400)} day(s)
           </div>
         </div>
       {/if}
@@ -3001,7 +3018,7 @@
                     nodeConfig.web_search_mode = 'general';
                   }
                   if (!nodeConfig.web_search_cache_ttl) {
-                    nodeConfig.web_search_cache_ttl = 3600; // 1 hour default
+                    nodeConfig.web_search_cache_ttl = 2592000; // 30 days default
                   }
                   if (!nodeConfig.web_search_max_results) {
                     nodeConfig.web_search_max_results = 5;
@@ -3130,20 +3147,25 @@
             </div>
           {/if}
           
-          <!-- Cache TTL -->
+          <!-- Cache TTL (input in days, stored as seconds) -->
           <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-700 mb-2">Cache Duration (seconds)</label>
+            <label class="block text-sm font-medium text-gray-700 mb-2">Cache Duration (days)</label>
             <input
               type="number"
-              bind:value={nodeConfig.web_search_cache_ttl}
-              on:input={updateNodeData}
+              value={Math.round((nodeConfig.web_search_cache_ttl ?? 2592000) / 86400)}
+              on:change={(e) => {
+                const days = Math.max(0, Math.min(365, parseInt(e.target.value) || 0));
+                nodeConfig.web_search_cache_ttl = days * 86400;
+                e.target.value = days;
+                updateNodeData();
+              }}
               min="0"
-              max="86400"
-              step="300"
+              max="365"
+              step="1"
               class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
             />
             <p class="text-xs text-gray-500 mt-1">
-              How long to cache results before re-fetching. 0 = no caching, 3600 = 1 hour, 86400 = 24 hours
+              How long to cache fetched page content. 0 = no caching, 30 = 30 days (recommended)
             </p>
           </div>
           
@@ -3158,7 +3180,7 @@
             {:else}
               <strong>Max Results:</strong> {nodeConfig.web_search_max_results || 5}
             {/if}
-            | <strong>Cache:</strong> {nodeConfig.web_search_cache_ttl || 3600}s
+            | <strong>Cache:</strong> {Math.round((nodeConfig.web_search_cache_ttl || 2592000) / 86400)} day(s)
           </div>
         </div>
       {/if}

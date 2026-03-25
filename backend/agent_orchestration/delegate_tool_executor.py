@@ -230,23 +230,31 @@ async def run_delegate_doc_tool_loop(
             logger.warning(f"⚠️ PRE-WARM (delegate): Failed: {pw_err}")
 
     url_tool_map: Dict[str, str] = {}
+    ws_tool = None
+    has_web_tools = False
     if websearch_handler:
         if websearch_handler.get_websearch_mode(delegate_node) == 'urls':
             _ws_url_tools, url_tool_map = await websearch_handler.build_websearch_url_tools_with_summaries(delegate_node, project_id)
             if _ws_url_tools:
                 tools.extend(_ws_url_tools)
                 for _t in _ws_url_tools:
-                    title_map[_t["function"]["name"]] = "Web Search (URL)"
+                    _url = url_tool_map.get(_t["function"]["name"], "")
+                    _domain = _url.split("//")[-1].split("/")[0] if "://" in _url else "URL"
+                    title_map[_t["function"]["name"]] = f"Web: {_domain}"
+                has_web_tools = True
+                logger.info(f"🌐 WEB TOOLS (delegate): Built {len(_ws_url_tools)} per-URL tools with summaries")
             else:
                 ws_tool = websearch_handler.build_websearch_tool(delegate_node)
                 if ws_tool:
                     tools.append(ws_tool)
                     title_map[ws_tool["function"]["name"]] = "Web Search"
+                    has_web_tools = True
         else:
             ws_tool = websearch_handler.build_websearch_tool(delegate_node)
             if ws_tool:
                 tools.append(ws_tool)
                 title_map[ws_tool["function"]["name"]] = "Web Search"
+                has_web_tools = True
 
     da_tool = docaware_handler.build_docaware_tool(delegate_node) if docaware_handler else None
     if da_tool:
@@ -354,7 +362,7 @@ async def run_delegate_doc_tool_loop(
             "  [N] \"quoted passage text\" (p.X, Section Name) — Document Title\n"
             + (
                 "  For web search sources use: [N] \"quoted passage\" — Page Title — URL: https://example.com/...\n"
-                if ws_tool else ""
+                if has_web_tools else ""
             ) +
             "- Copy the quoted text verbatim from the source passages provided in the tool results.\n"
             "- Reference documents by their title (not tool name or filename)."

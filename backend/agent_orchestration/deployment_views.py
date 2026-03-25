@@ -662,6 +662,7 @@ class DeploymentViewSet(viewsets.ViewSet):
 
             provider_name = body.get('llm_provider', 'openai')
             model_name = body.get('llm_model', '')
+            cache_ttl = int(body.get('cache_ttl', 2592000))  # default 30 days
 
             handler = WebSearchHandler()
 
@@ -682,6 +683,7 @@ class DeploymentViewSet(viewsets.ViewSet):
                     urls=urls,
                     project_id=str(project_id),
                     llm_provider=llm,
+                    cache_ttl=cache_ttl,
                 )
 
             try:

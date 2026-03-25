@@ -876,6 +876,7 @@ class WebSearchHandler:
         urls: List[str],
         project_id: str,
         llm_provider,
+        cache_ttl: int = 2592000,
     ) -> Dict[str, Any]:
         """
         Fetch each URL, generate an LLM summary, and upsert into WebSearchUrlSummary.
@@ -902,12 +903,18 @@ class WebSearchHandler:
 
         for url in urls:
             try:
-                # Fetch page content (uses Redis cache if available, TTL 1h)
-                fetch_results = await self.fetcher_service.fetch_urls_parallel([url])
-                if not fetch_results:
-                    raise ValueError("Fetcher returned no results")
+                # Check Redis cache first, then fetch if needed
+                cached = self.cache_service.get_cached_urls_batch([url], project_id)
+                page = cached.get(url)
+                if not page:
+                    fetch_results = await self.fetcher_service.fetch_urls_parallel([url])
+                    if not fetch_results:
+                        raise ValueError("Fetcher returned no results")
+                    page = fetch_results[0]
+                    # Cache the fetched content in Redis
+                    if page and not page.get('extraction_error'):
+                        self.cache_service.cache_urls_batch({url: page}, project_id, ttl=cache_ttl)
 
-                page = fetch_results[0]
                 if page.get('extraction_error'):
                     raise ValueError(f"Fetch error: {page['extraction_error']}")
                 # Reconstruct plain text from PageCapture sections

@@ -1898,24 +1898,32 @@ class WorkflowExecutor:
         # ---- Build web search tool(s) ----
         _ws_handler = getattr(self.chat_manager, 'websearch_handler', None)
         url_tool_map: Dict[str, str] = {}
+        ws_tool = None
+        has_web_tools = False
         if _ws_handler:
             if _ws_handler.get_websearch_mode(node) == 'urls':
                 _ws_url_tools, url_tool_map = await _ws_handler.build_websearch_url_tools_with_summaries(node, project_id)
                 if _ws_url_tools:
                     tools.extend(_ws_url_tools)
                     for _t in _ws_url_tools:
-                        title_map[_t["function"]["name"]] = "Web Search (URL)"
+                        _url = url_tool_map.get(_t["function"]["name"], "")
+                        _domain = _url.split("//")[-1].split("/")[0] if "://" in _url else "URL"
+                        title_map[_t["function"]["name"]] = f"Web: {_domain}"
+                    has_web_tools = True
+                    logger.info(f"🌐 WEB TOOLS: Built {len(_ws_url_tools)} per-URL tools with summaries")
                 else:
                     # No summaries yet — fall back to single legacy tool
                     ws_tool = _ws_handler.build_websearch_tool(node)
                     if ws_tool:
                         tools.append(ws_tool)
                         title_map[ws_tool["function"]["name"]] = "Web Search"
+                        has_web_tools = True
             else:
                 ws_tool = _ws_handler.build_websearch_tool(node)
                 if ws_tool:
                     tools.append(ws_tool)
                     title_map[ws_tool["function"]["name"]] = "Web Search"
+                    has_web_tools = True
 
         # ---- Build DocAware search tool ----
         _da_handler = getattr(self.chat_manager, 'docaware_handler', None)
@@ -2069,14 +2077,14 @@ class WorkflowExecutor:
                     "\"url\" field and set \"source\": \"web\". For citations from "
                     "project documents, set \"source\": \"document\" (page/section "
                     "are only relevant for document citations).\n"
-                    if ws_tool else ""
+                    if has_web_tools else ""
                 ) +
                 "\nAt the END of your response, include a structured citations block (valid JSON array):\n"
                 "---CITATIONS---\n"
                 + (
                     '[{"ref": 1, "document_title": "Page Title", "quoted_text": "excerpt from web page…", "url": "https://example.com/article", "source": "web"}, '
                     '{"ref": 2, "document_title": "Paper A", "quoted_text": "exact excerpt from document…", "page": 2, "section": "Intro", "source": "document"}]\n'
-                    if ws_tool else
+                    if has_web_tools else
                     '[{"ref": 1, "document_title": "Paper A", "quoted_text": "first exact excerpt…", "page": 2, "section": "Intro"}, '
                     '{"ref": 2, "document_title": "Paper A", "quoted_text": "different excerpt for claim two…", "page": 4, "section": "Methods"}]\n'
                 ) +
@@ -2413,14 +2421,14 @@ class WorkflowExecutor:
                     "- For citations from web search results, include the source "
                     "\"url\" field and set \"source\": \"web\". For citations from "
                     "project documents, set \"source\": \"document\".\n"
-                    if ws_tool else ""
+                    if has_web_tools else ""
                 ) +
                 "\nAt the END of your response, include a structured citations block (valid JSON array), e.g.:\n"
                 "---CITATIONS---\n"
                 + (
                     '[{"ref": 1, "document_title": "Page Title", "quoted_text": "excerpt from web…", "url": "https://example.com/article", "source": "web"}, '
                     '{"ref": 2, "document_title": "Title", "quoted_text": "excerpt from document…", "page": 1, "section": "1", "source": "document"}]\n'
-                    if ws_tool else
+                    if has_web_tools else
                     '[{"ref": 1, "document_title": "Title", "quoted_text": "excerpt for first claim…", "page": 1, "section": "1"}, '
                     '{"ref": 2, "document_title": "Title", "quoted_text": "different excerpt for second claim…", "page": 3, "section": "2"}]\n'
                 ) +
