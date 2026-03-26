@@ -66,5 +66,10 @@ urlpatterns = [
         DeploymentViewSet.as_view({'post': 'summarize_urls'}),
         name='summarize-urls'
     ),
+    path(
+        'api/agent-orchestration/projects/<uuid:project_id>/clear-websearch-cache/',
+        DeploymentViewSet.as_view({'post': 'clear_websearch_cache'}),
+        name='clear-websearch-cache'
+    ),
 ]
 

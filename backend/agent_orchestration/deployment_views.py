@@ -644,7 +644,7 @@ class DeploymentViewSet(viewsets.ViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            force = body.get('force', True)
+            force = body.get('force', False)
             original_count = len(urls)
             if not force:
                 from users.models import WebSearchUrlSummary
@@ -694,6 +694,43 @@ class DeploymentViewSet(viewsets.ViewSet):
 
         except Exception as e:
             logger.error(f"❌ SUMMARIZE URLS: {e}", exc_info=True)
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    @action(detail=False, methods=['post'], url_path='projects/(?P<project_id>[^/.]+)/clear-websearch-cache')
+    def clear_websearch_cache(self, request, project_id=None):
+        """
+        Clear all Redis-cached websearch content (URL fetches and search results) for a project.
+
+        POST /api/agent-orchestration/projects/{project_id}/clear-websearch-cache/
+
+        Returns: { "cleared": true }
+        """
+        from .websearch import WebSearchCacheService
+
+        try:
+            project = get_object_or_404(IntelliDocProject, project_id=project_id)
+            if not project.has_user_access(request.user):
+                return Response(
+                    {'error': 'You do not have permission to access this project'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            cache_service = WebSearchCacheService()
+            success = cache_service.clear_all_websearch_cache(str(project_id))
+            if success:
+                logger.info(f"🗑️ CLEAR WEBSEARCH CACHE: Cleared cache for project {str(project_id)[:8]}")
+                return Response({'cleared': True}, status=status.HTTP_200_OK)
+            else:
+                return Response(
+                    {'error': 'Cache backend does not support pattern deletion'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+        except Exception as e:
+            logger.error(f"❌ CLEAR WEBSEARCH CACHE: {e}", exc_info=True)
             return Response(
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,

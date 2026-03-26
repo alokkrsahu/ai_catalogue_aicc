@@ -105,8 +105,18 @@
   let urlSummaryStatus = '';
   let urlSummarizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Track which URLs already have summaries so we skip redundant API calls on panel open
+  let summarisedUrlsCache: Set<string> = new Set();
+
+  // Clear web cache state
+  let clearingWebCache = false;
+  let webCacheCleared = false;
+
   function scheduleUrlSummarise(urls: string[]) {
     if (!urls.length || !projectId) return;
+    // Only fire if there are URLs we haven't summarised yet in this session
+    const newUrls = urls.filter(u => !summarisedUrlsCache.has(u));
+    if (!newUrls.length) return;
     if (urlSummarizeDebounceTimer) clearTimeout(urlSummarizeDebounceTimer);
     urlSummarizeDebounceTimer = setTimeout(() => doSummariseUrls(urls), 3000);
   }
@@ -126,7 +136,9 @@
           cache_ttl: nodeConfig.web_search_cache_ttl || 2592000,
         }
       );
-      const { summarized, failed } = resp.data;
+      const { summarized, failed, skipped } = resp.data;
+      // Mark all non-failed URLs as summarised so we don't re-call on next panel open
+      urls.forEach(u => summarisedUrlsCache.add(u));
       if (summarized > 0 || failed > 0) {
         urlSummaryStatus = `${summarized} URL${summarized !== 1 ? 's' : ''} summarised` +
           (failed ? `, ${failed} failed` : '');
@@ -138,6 +150,23 @@
       console.warn('URL auto-summarise failed:', err);
     } finally {
       summarizingUrls = false;
+    }
+  }
+
+  async function doClearWebCache() {
+    if (!projectId || clearingWebCache) return;
+    clearingWebCache = true;
+    webCacheCleared = false;
+    try {
+      await api.post(`/agent-orchestration/projects/${projectId}/clear-websearch-cache/`, {});
+      webCacheCleared = true;
+      // Reset local summary tracking so URLs are re-summarised on next run
+      summarisedUrlsCache = new Set();
+      setTimeout(() => { webCacheCleared = false; }, 3000);
+    } catch (err: any) {
+      console.warn('Clear web cache failed:', err);
+    } finally {
+      clearingWebCache = false;
     }
   }
 
@@ -2665,11 +2694,26 @@
             {/if}
             | <strong>Cache:</strong> {Math.round((nodeConfig.web_search_cache_ttl || 2592000) / 86400)} day(s)
           </div>
+
+          <!-- Clear Web Cache -->
+          <div class="mt-2 flex items-center gap-2">
+            <button
+              on:click={doClearWebCache}
+              disabled={clearingWebCache}
+              class="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded border border-red-300 text-red-600 bg-white hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              <i class="fas {clearingWebCache ? 'fa-spinner fa-spin' : 'fa-trash-alt'}"></i>
+              {clearingWebCache ? 'Clearing…' : 'Clear Web Cache'}
+            </button>
+            {#if webCacheCleared}
+              <span class="text-xs text-green-600"><i class="fas fa-check mr-1"></i>Cache cleared — pages will be re-fetched on next run</span>
+            {/if}
+          </div>
         </div>
       {/if}
-      
+
     {/if}
-    
+
     <!-- FILE ATTACHMENTS - Standalone section for sending entire files via LLM File API -->
     {#if ['AssistantAgent', 'DelegateAgent'].includes(node.type)}
       <div>
@@ -3182,10 +3226,25 @@
             {/if}
             | <strong>Cache:</strong> {Math.round((nodeConfig.web_search_cache_ttl || 2592000) / 86400)} day(s)
           </div>
+
+          <!-- Clear Web Cache -->
+          <div class="mt-2 flex items-center gap-2">
+            <button
+              on:click={doClearWebCache}
+              disabled={clearingWebCache}
+              class="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded border border-red-300 text-red-600 bg-white hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              <i class="fas {clearingWebCache ? 'fa-spinner fa-spin' : 'fa-trash-alt'}"></i>
+              {clearingWebCache ? 'Clearing…' : 'Clear Web Cache'}
+            </button>
+            {#if webCacheCleared}
+              <span class="text-xs text-green-600"><i class="fas fa-check mr-1"></i>Cache cleared — pages will be re-fetched on next run</span>
+            {/if}
+          </div>
         </div>
       {/if}
     {/if}
-    
+
     <!-- DELEGATE-SPECIFIC FIELDS -->
     {#if node.type === 'DelegateAgent'}
       <div class="p-3 bg-orange-50 border border-orange-200 rounded-lg">
