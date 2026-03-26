@@ -119,13 +119,20 @@
   let navigationPages: any[] = [];
   let sidebarCollapsed = false;
 
-  /** 1-based index of the nav page that hosts the in-app chatbot, or null */
-  $: chatbotPageNumber = (() => {
+  /** Helper: find 1-based page number by feature name, or null if not present */
+  function findPageByFeature(feature: string): number | null {
     const idx = navigationPages.findIndex(
-      (p: any) => Array.isArray(p.features) && p.features.includes('in_app_chatbot')
+      (p: any) => Array.isArray(p.features) && p.features.includes(feature)
     );
     return idx >= 0 ? idx + 1 : null;
-  })();
+  }
+
+  /** 1-based index of the nav page that hosts the in-app chatbot, or null */
+  $: chatbotPageNumber = findPageByFeature('in_app_chatbot');
+  /** 1-based index of the Analytics page, or null */
+  $: analyticsPageNumber = findPageByFeature('agent_analytics');
+  /** 1-based index of the System Performance Analysis page, or null */
+  $: systemPerfPageNumber = findPageByFeature('experiment_metrics');
   
   // Capability-based UI state
   let projectCapabilities: any = {};
@@ -2336,8 +2343,8 @@
       </div>
     {/if}
     
-    {#if hasNavigation && currentPage === 6}
-      <!-- Page 6: Analytics -->
+    {#if hasNavigation && analyticsPageNumber != null && currentPage === analyticsPageNumber}
+      <!-- Analytics -->
       <div class="analytics-page h-full flex-1 w-full px-6 py-8">
         {#key projectId}
           {#await import('$lib/components/ProjectAnalytics.svelte')}
@@ -2371,8 +2378,8 @@
       </div>
     {/if}
 
-    {#if hasNavigation && currentPage === 7}
-      <!-- Page 7: System Performance Analysis -->
+    {#if hasNavigation && systemPerfPageNumber != null && currentPage === systemPerfPageNumber}
+      <!-- System Performance Analysis -->
       <div class="system-performance-analysis-page h-full flex-1 w-full px-6 py-8">
         <!-- SECURITY: key={projectId} forces full component remount on project switch -->
         {#key projectId}
