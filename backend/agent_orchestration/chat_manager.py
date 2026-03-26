@@ -499,13 +499,15 @@ class ChatManager:
             system_parts.append("\nAnalyze the full document content provided in the attachments to complete your task.")
         
         # 🌐 WEBSEARCH INTEGRATION: Add web search context if enabled
-        # Skip context augmentation when the agent will enter the tool-calling
-        # path (doc_tool_calling or web_search_enabled) -- the LLM will invoke
-        # the web_search tool on-demand instead.
+        # URL mode: always inject fetched content directly into the context window
+        # (no tool-call loop). General/domain modes still use the tool-calling path.
         agent_data_ws = agent_node.get('data', {})
-        _will_use_tool_path = agent_data_ws.get('doc_tool_calling') or agent_data_ws.get('web_search_enabled')
+        _ws_mode = agent_data_ws.get('web_search_mode', 'general')
+        _will_use_tool_path = agent_data_ws.get('doc_tool_calling') or (
+            agent_data_ws.get('web_search_enabled') and _ws_mode != 'urls'
+        )
         websearch_context = ""
-        if self.websearch_handler and self.websearch_handler.is_websearch_enabled(agent_node) and project_id and not _will_use_tool_path:
+        if self.websearch_handler and self.websearch_handler.is_websearch_enabled(agent_node) and project_id and (not _will_use_tool_path or _ws_mode == 'urls'):
             try:
                 logger.info(f"🌐 WEBSEARCH: Single agent {agent_name} - WebSearch enabled (context augmentation)")
                 websearch_context = await self.websearch_handler.get_websearch_context(
@@ -700,22 +702,31 @@ class ChatManager:
             system_parts.append("\nAnalyze the full document content provided in the attachments to complete your task.")
         
         # 🌐 WEBSEARCH INTEGRATION: Add web search context if enabled
-        # Skip when the agent enters the tool-calling path (LLM will call the tool instead)
+        # URL mode: always inject fetched content directly into the context window.
+        # General/domain modes still use the tool-calling path.
         agent_data_ws = agent_node.get('data', {})
-        _will_use_tool_path = agent_data_ws.get('doc_tool_calling') or agent_data_ws.get('web_search_enabled')
+        _ws_mode = agent_data_ws.get('web_search_mode', 'general')
+        _will_use_tool_path = agent_data_ws.get('doc_tool_calling') or (
+            agent_data_ws.get('web_search_enabled') and _ws_mode != 'urls'
+        )
         websearch_context = ""
-        if self.websearch_handler and self.websearch_handler.is_websearch_enabled(agent_node) and project_id and not _will_use_tool_path:
+        if self.websearch_handler and self.websearch_handler.is_websearch_enabled(agent_node) and project_id and (not _will_use_tool_path or _ws_mode == 'urls'):
             try:
-                logger.info(f"🌐 WEBSEARCH: Agent {agent_name} with aggregated input - WebSearch enabled (context augmentation)")
-                search_query = self.websearch_handler.extract_search_query_from_aggregated_input(aggregated_context)
-                
-                if search_query:
-                    websearch_context = await self.websearch_handler.get_websearch_context_from_query(
-                        agent_node, search_query, project_id
+                logger.info(f"🌐 WEBSEARCH: Agent {agent_name} with aggregated input - WebSearch enabled (context augmentation, mode={_ws_mode})")
+                if _ws_mode == 'urls':
+                    # URL mode: fetch configured URLs directly — no query extraction needed
+                    websearch_context = await self.websearch_handler.get_websearch_context(
+                        agent_node, "", project_id
                     )
-                    
-                    if websearch_context:
-                        logger.info(f"🌐 WEBSEARCH: Added web context to agent {agent_name} ({len(websearch_context)} chars)")
+                else:
+                    search_query = self.websearch_handler.extract_search_query_from_aggregated_input(aggregated_context)
+                    if search_query:
+                        websearch_context = await self.websearch_handler.get_websearch_context_from_query(
+                            agent_node, search_query, project_id
+                        )
+
+                if websearch_context:
+                    logger.info(f"🌐 WEBSEARCH: Added web context to agent {agent_name} ({len(websearch_context)} chars)")
                     
             except Exception as e:
                 logger.error(f"❌ WEBSEARCH: Failed to get web context for agent {agent_name}: {e}")

@@ -648,9 +648,11 @@ class WorkflowExecutor:
                             _synthesis_citations = []
                             _ws_handler = getattr(self.chat_manager, 'websearch_handler', None)
                             _ws_enabled = _ws_handler and _ws_handler.is_websearch_enabled(node)
+                            # URL mode injects content into the context window — no tool loop needed
+                            _ws_needs_tool_loop = _ws_enabled and _ws_handler.get_websearch_mode(node) != 'urls'
                             _da_handler = getattr(self.chat_manager, 'docaware_handler', None)
                             _da_enabled = _da_handler and _da_handler.is_docaware_enabled(node)
-                            if node_data.get('doc_tool_calling') or _ws_enabled or _da_enabled:
+                            if node_data.get('doc_tool_calling') or _ws_needs_tool_loop or _da_enabled:
                                 agent_response_text, _synthesis_citations = await self._execute_doc_tool_calling(
                                     node=node,
                                     node_name=node_name,
@@ -1896,28 +1898,15 @@ class WorkflowExecutor:
                 logger.warning(f"⚠️ PRE-WARM: Failed to pre-warm uploads: {pw_err}")
 
         # ---- Build web search tool(s) ----
+        # URL mode: content is already injected into the context window by
+        # chat_manager — no tool registration needed here.
         _ws_handler = getattr(self.chat_manager, 'websearch_handler', None)
         url_tool_map: Dict[str, str] = {}
         ws_tool = None
         has_web_tools = False
         if _ws_handler:
             if _ws_handler.get_websearch_mode(node) == 'urls':
-                _ws_url_tools, url_tool_map = await _ws_handler.build_websearch_url_tools_with_summaries(node, project_id)
-                if _ws_url_tools:
-                    tools.extend(_ws_url_tools)
-                    for _t in _ws_url_tools:
-                        _url = url_tool_map.get(_t["function"]["name"], "")
-                        _domain = _url.split("//")[-1].split("/")[0] if "://" in _url else "URL"
-                        title_map[_t["function"]["name"]] = f"Web: {_domain}"
-                    has_web_tools = True
-                    logger.info(f"🌐 WEB TOOLS: Built {len(_ws_url_tools)} per-URL tools with summaries")
-                else:
-                    # No summaries yet — fall back to single legacy tool
-                    ws_tool = _ws_handler.build_websearch_tool(node)
-                    if ws_tool:
-                        tools.append(ws_tool)
-                        title_map[ws_tool["function"]["name"]] = "Web Search"
-                        has_web_tools = True
+                logger.info("🌐 WEB TOOLS: URL mode — content injected into context window, no tool needed")
             else:
                 ws_tool = _ws_handler.build_websearch_tool(node)
                 if ws_tool:
