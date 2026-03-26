@@ -458,10 +458,10 @@
     htmlParts.push("    const bubble = document.createElement('div');");
     htmlParts.push("    bubble.className = 'bubble';");
     htmlParts.push("    if (role === 'assistant' && !isStreaming) {");
-    htmlParts.push('      var cleanText = text;');
+    htmlParts.push('      var parsed = parseCitations(text); var cleanText = parsed.cleanText;');
     htmlParts.push('      var citations = [];');
     htmlParts.push('      if (Array.isArray(apiCitations) && apiCitations.length > 0) { citations = apiCitations; }');
-    htmlParts.push('      else { var parsed = parseCitations(text); cleanText = parsed.cleanText; citations = parsed.citations; }');
+    htmlParts.push('      else { citations = parsed.citations; }');
     htmlParts.push('      if (citations.length > 0) _chatCitations = citations;');
     htmlParts.push("      const markdownEl = document.createElement('markdown');");
     htmlParts.push('      var rendered = renderMarkdown(cleanText);');

@@ -2940,13 +2940,12 @@ def embed_chatbot_html(request, project_id):
     bubble.className = 'bubble';
     
     if (role === 'assistant' && !isStreaming) {{
-      let cleanText = text;
+      const parsed = parseCitations(text);
+      let cleanText = parsed.cleanText;
       let citations = [];
       if (Array.isArray(apiCitations) && apiCitations.length > 0) {{
         citations = apiCitations;
       }} else {{
-        const parsed = parseCitations(text);
-        cleanText = parsed.cleanText;
         citations = parsed.citations;
       }}
       if (citations.length > 0) _chatCitations = citations;
