@@ -127,12 +127,10 @@
     return idx >= 0 ? idx + 1 : null;
   }
 
-  /** 1-based index of the nav page that hosts the in-app chatbot, or null */
-  $: chatbotPageNumber = findPageByFeature('in_app_chatbot');
-  /** 1-based index of the Analytics page, or null */
-  $: analyticsPageNumber = findPageByFeature('agent_analytics');
-  /** 1-based index of the System Performance Analysis page, or null */
-  $: systemPerfPageNumber = findPageByFeature('experiment_metrics');
+  /** 1-based page numbers — reference navigationPages directly so Svelte tracks changes */
+  $: chatbotPageNumber = navigationPages ? findPageByFeature('in_app_chatbot') : null;
+  $: analyticsPageNumber = navigationPages ? findPageByFeature('agent_analytics') : null;
+  $: systemPerfPageNumber = navigationPages ? findPageByFeature('experiment_metrics') : null;
   
   // Capability-based UI state
   let projectCapabilities: any = {};
