@@ -100,58 +100,9 @@
   let descriptionDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   let promptGenerationMetadata: any = null;
 
-  // URL summarisation state (auto-triggered, debounced)
-  let summarizingUrls = false;
-  let urlSummaryStatus = '';
-  let urlSummarizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-
-  // Track which URLs already have summaries so we skip redundant API calls on panel open
-  let summarisedUrlsCache: Set<string> = new Set();
-
   // Clear web cache state
   let clearingWebCache = false;
   let webCacheCleared = false;
-
-  function scheduleUrlSummarise(urls: string[]) {
-    if (!urls.length || !projectId) return;
-    // Only fire if there are URLs we haven't summarised yet in this session
-    const newUrls = urls.filter(u => !summarisedUrlsCache.has(u));
-    if (!newUrls.length) return;
-    if (urlSummarizeDebounceTimer) clearTimeout(urlSummarizeDebounceTimer);
-    urlSummarizeDebounceTimer = setTimeout(() => doSummariseUrls(urls), 3000);
-  }
-
-  async function doSummariseUrls(urls: string[]) {
-    if (!urls.length || !projectId) return;
-    summarizingUrls = true;
-    urlSummaryStatus = 'Summarising new URLs…';
-    try {
-      const resp = await api.post(
-        `/agent-orchestration/projects/${projectId}/summarize-urls/`,
-        {
-          urls,
-          llm_provider: nodeConfig.llm_provider || 'openai',
-          llm_model: nodeConfig.llm_model || '',
-          force: false,
-          cache_ttl: nodeConfig.web_search_cache_ttl || 2592000,
-        }
-      );
-      const { summarized, failed, skipped } = resp.data;
-      // Mark all non-failed URLs as summarised so we don't re-call on next panel open
-      urls.forEach(u => summarisedUrlsCache.add(u));
-      if (summarized > 0 || failed > 0) {
-        urlSummaryStatus = `${summarized} URL${summarized !== 1 ? 's' : ''} summarised` +
-          (failed ? `, ${failed} failed` : '');
-      } else {
-        urlSummaryStatus = '';
-      }
-    } catch (err: any) {
-      urlSummaryStatus = '';
-      console.warn('URL auto-summarise failed:', err);
-    } finally {
-      summarizingUrls = false;
-    }
-  }
 
   async function doClearWebCache() {
     if (!projectId || clearingWebCache) return;
@@ -160,8 +111,6 @@
     try {
       await api.post(`/agent-orchestration/projects/${projectId}/clear-websearch-cache/`, {});
       webCacheCleared = true;
-      // Reset local summary tracking so URLs are re-summarised on next run
-      summarisedUrlsCache = new Set();
       setTimeout(() => { webCacheCleared = false; }, 3000);
     } catch (err: any) {
       console.warn('Clear web cache failed:', err);
@@ -1180,16 +1129,6 @@
       }, 500);
     }
 
-    // Auto-trigger URL summarization on panel open if URLs are configured
-    if (
-      nodeConfig.web_search_enabled &&
-      nodeConfig.web_search_mode === 'urls' &&
-      nodeConfig.web_search_urls?.length > 0 &&
-      projectId
-    ) {
-      console.log('🌐 AUTO-SUMMARIZE: Triggering URL summarization for', nodeConfig.web_search_urls.length, 'URLs');
-      scheduleUrlSummarise(nodeConfig.web_search_urls);
-    }
   });
 
   // Cleanup on component destroy
@@ -1203,11 +1142,6 @@
     if (descriptionDebounceTimer) {
       clearTimeout(descriptionDebounceTimer);
       descriptionDebounceTimer = null;
-    }
-    // Clear URL summarise debounce timer
-    if (urlSummarizeDebounceTimer) {
-      clearTimeout(urlSummarizeDebounceTimer);
-      urlSummarizeDebounceTimer = null;
     }
   });
   
@@ -2630,16 +2564,12 @@
                   const urls = e.target.value.split('\n').filter(u => u.trim());
                   nodeConfig.web_search_urls = urls;
                   updateNodeData();
-                  if (nodeConfig.web_search_mode === 'urls') scheduleUrlSummarise(urls);
                 }}
                 rows="4"
                 class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
                 placeholder="https://example.com/page1&#10;https://docs.example.com/api&#10;https://wiki.example.org/article"
               ></textarea>
               <p class="text-xs text-gray-500 mt-1">Enter full URLs (with https://) to fetch content from specific pages</p>
-              {#if summarizingUrls || urlSummaryStatus}
-                <p class="text-xs text-gray-400 mt-1 italic">{urlSummaryStatus || 'Summarising…'}</p>
-              {/if}
             </div>
           {/if}
           
@@ -3162,16 +3092,12 @@
                   const urls = e.target.value.split('\n').filter(u => u.trim());
                   nodeConfig.web_search_urls = urls;
                   updateNodeData();
-                  if (nodeConfig.web_search_mode === 'urls') scheduleUrlSummarise(urls);
                 }}
                 rows="4"
                 class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
                 placeholder="https://example.com/page1&#10;https://docs.example.com/api&#10;https://wiki.example.org/article"
               ></textarea>
               <p class="text-xs text-gray-500 mt-1">Enter full URLs (with https://) to fetch content from specific pages</p>
-              {#if summarizingUrls || urlSummaryStatus}
-                <p class="text-xs text-gray-400 mt-1 italic">{urlSummaryStatus || 'Summarising…'}</p>
-              {/if}
             </div>
           {/if}
           
