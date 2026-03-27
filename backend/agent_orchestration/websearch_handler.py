@@ -168,13 +168,10 @@ class WebSearchHandler:
         """
         Fetch content from specific URLs with per-project caching,
         then use Milvus RAG to return only the most relevant chunks.
-
-        Falls back to full content dump if Milvus is unavailable or
-        no query is provided.
         """
         logger.info(f"🌐 WEBSEARCH URL MODE: Fetching {len(urls)} URLs (RAG top_k={top_k})")
 
-        # 1. Fetch / cache URLs (unchanged)
+        # 1. Fetch / cache URLs
         cached_results = self.cache_service.get_cached_urls_batch(urls, project_id)
         urls_to_fetch = [url for url, content in cached_results.items() if content is None]
         cached_count = len(urls) - len(urls_to_fetch)
@@ -196,24 +193,19 @@ class WebSearchHandler:
                 if url:
                     cached_results[url] = result
 
-        # 2. Try RAG path: index + search
-        if query and self.web_rag_service.is_available():
-            try:
-                # Ensure all fetched URLs are indexed in Milvus
-                for url, page in cached_results.items():
-                    if page and not page.get('extraction_error'):
-                        await self.web_rag_service.ensure_indexed(url, page, project_id, cache_ttl)
+        # 2. Index all fetched URLs in Milvus
+        for url, page in cached_results.items():
+            if page and not page.get('extraction_error'):
+                await self.web_rag_service.ensure_indexed(url, page, project_id, cache_ttl)
 
-                # Search for relevant chunks
-                chunks = await self.web_rag_service.search(query, project_id, top_k=top_k)
-                if chunks:
-                    return self._format_rag_results(chunks)
-                logger.info("🌐 WEBSEARCH URL MODE: RAG returned no results, falling back to full content")
-            except Exception as e:
-                logger.warning(f"⚠️ WEBSEARCH URL MODE: RAG failed ({e}), falling back to full content")
+        # 3. Search Milvus for relevant chunks
+        if not query:
+            query = "general overview"  # minimal fallback query
+        chunks = await self.web_rag_service.search(query, project_id, top_k=top_k)
+        if chunks:
+            return self._format_rag_results(chunks)
 
-        # 3. Fallback: full content dump (original behavior)
-        return self._format_url_results(urls, cached_results)
+        return "No relevant content found in the configured web sources."
     
     async def _get_domain_search_context(
         self,
