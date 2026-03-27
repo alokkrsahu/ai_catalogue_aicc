@@ -720,6 +720,16 @@ class DeploymentViewSet(viewsets.ViewSet):
 
             cache_service = WebSearchCacheService()
             success = cache_service.clear_all_websearch_cache(str(project_id))
+
+            # Also drop the Milvus websearch RAG collection
+            try:
+                import asyncio
+                from .websearch import WebRAGService
+                rag_service = WebRAGService()
+                asyncio.run(rag_service.clear_project(str(project_id)))
+            except Exception as rag_err:
+                logger.warning(f"⚠️ CLEAR WEBSEARCH CACHE: Milvus cleanup failed (non-fatal): {rag_err}")
+
             if success:
                 logger.info(f"🗑️ CLEAR WEBSEARCH CACHE: Cleared cache for project {str(project_id)[:8]}")
                 return Response({'cleared': True}, status=status.HTTP_200_OK)

@@ -2570,6 +2570,23 @@
                 placeholder="https://example.com/page1&#10;https://docs.example.com/api&#10;https://wiki.example.org/article"
               ></textarea>
               <p class="text-xs text-gray-500 mt-1">Enter full URLs (with https://) to fetch content from specific pages</p>
+              <!-- Relevant Excerpts (RAG top-K) -->
+              <div class="mt-3">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Relevant Excerpts</label>
+                <input
+                  type="number"
+                  value={nodeConfig.web_search_top_k ?? 5}
+                  on:change={(e) => {
+                    nodeConfig.web_search_top_k = Math.max(1, Math.min(20, parseInt(e.target.value) || 5));
+                    e.target.value = nodeConfig.web_search_top_k;
+                    updateNodeData();
+                  }}
+                  min="1"
+                  max="20"
+                  class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
+                />
+                <p class="text-xs text-gray-500 mt-1">Number of most relevant text excerpts to send to the LLM (1-20). Lower = faster and cheaper.</p>
+              </div>
             </div>
           {/if}
           
@@ -3098,6 +3115,23 @@
                 placeholder="https://example.com/page1&#10;https://docs.example.com/api&#10;https://wiki.example.org/article"
               ></textarea>
               <p class="text-xs text-gray-500 mt-1">Enter full URLs (with https://) to fetch content from specific pages</p>
+              <!-- Relevant Excerpts (RAG top-K) -->
+              <div class="mt-3">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Relevant Excerpts</label>
+                <input
+                  type="number"
+                  value={nodeConfig.web_search_top_k ?? 5}
+                  on:change={(e) => {
+                    nodeConfig.web_search_top_k = Math.max(1, Math.min(20, parseInt(e.target.value) || 5));
+                    e.target.value = nodeConfig.web_search_top_k;
+                    updateNodeData();
+                  }}
+                  min="1"
+                  max="20"
+                  class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
+                />
+                <p class="text-xs text-gray-500 mt-1">Number of most relevant text excerpts to send to the LLM (1-20). Lower = faster and cheaper.</p>
+              </div>
             </div>
           {/if}
           

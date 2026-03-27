@@ -14,7 +14,7 @@ from typing import Dict, List, Any, Optional
 from asgiref.sync import sync_to_async
 
 # Import WebSearch services
-from .websearch import WebSearchCacheService, WebsiteFetcherService, DuckDuckGoService
+from .websearch import WebSearchCacheService, WebsiteFetcherService, DuckDuckGoService, WebRAGService
 
 logger = logging.getLogger('agent_orchestration')
 
@@ -39,7 +39,8 @@ class WebSearchHandler:
         self.cache_service = WebSearchCacheService()
         self.fetcher_service = WebsiteFetcherService()
         self.search_service = DuckDuckGoService()
-        logger.info("🌐 WEBSEARCH HANDLER: Initialized with cache, fetcher, and search services")
+        self.web_rag_service = WebRAGService()
+        logger.info("🌐 WEBSEARCH HANDLER: Initialized with cache, fetcher, search, and RAG services")
     
     # =========================================================================
     # Public API
@@ -105,12 +106,14 @@ class WebSearchHandler:
         
         try:
             if mode == 'urls':
-                # Direct URL fetching mode
+                # Direct URL fetching mode with RAG search
                 urls = agent_data.get('web_search_urls', [])
                 if not urls:
                     logger.warning("🌐 WEBSEARCH: URL mode enabled but no URLs configured")
                     return ""
-                context = await self._get_url_context(urls, cache_ttl, project_id)
+                query = self.extract_query_from_conversation(conversation_history)
+                top_k = agent_data.get('web_search_top_k', 5)
+                context = await self._get_url_context(urls, cache_ttl, project_id, query=query, top_k=top_k)
                 
             elif mode == 'domains':
                 # Domain-restricted search mode
@@ -154,51 +157,62 @@ class WebSearchHandler:
     # Search Mode Handlers
     # =========================================================================
     
-    async def _get_url_context(self, urls: List[str], cache_ttl: int, project_id: str) -> str:
+    async def _get_url_context(
+        self,
+        urls: List[str],
+        cache_ttl: int,
+        project_id: str,
+        query: str = "",
+        top_k: int = 5,
+    ) -> str:
         """
-        Fetch content from specific URLs with per-project caching.
-        
-        Args:
-            urls: List of URLs to fetch
-            cache_ttl: Cache time-to-live in seconds
-            project_id: Project ID for per-project cache isolation
-            
-        Returns:
-            Formatted context string from fetched URLs
+        Fetch content from specific URLs with per-project caching,
+        then use Milvus RAG to return only the most relevant chunks.
+
+        Falls back to full content dump if Milvus is unavailable or
+        no query is provided.
         """
-        logger.info(f"🌐 WEBSEARCH URL MODE: Fetching {len(urls)} URLs")
-        
-        # Check cache for each URL (per-project)
+        logger.info(f"🌐 WEBSEARCH URL MODE: Fetching {len(urls)} URLs (RAG top_k={top_k})")
+
+        # 1. Fetch / cache URLs (unchanged)
         cached_results = self.cache_service.get_cached_urls_batch(urls, project_id)
-        
-        # Identify URLs that need fetching
         urls_to_fetch = [url for url, content in cached_results.items() if content is None]
         cached_count = len(urls) - len(urls_to_fetch)
-        
+
         logger.info(f"🌐 WEBSEARCH URL MODE: {cached_count} cached, {len(urls_to_fetch)} to fetch")
-        
-        # Fetch uncached URLs in parallel
+
         if urls_to_fetch:
             fetch_results = await self.fetcher_service.fetch_urls_parallel(urls_to_fetch)
-            
-            # Cache all fetched PageCapture objects per project
             to_cache = {}
             for result in fetch_results:
                 url = result.get('url')
                 if not url:
                     continue
                 to_cache[url] = result
-            
             if to_cache:
                 self.cache_service.cache_urls_batch(to_cache, project_id, ttl=cache_ttl)
-            
-            # Merge fetched results with cached results
             for result in fetch_results:
                 url = result.get('url')
                 if url:
                     cached_results[url] = result
-        
-        # Format results for context (derived view over PageCapture)
+
+        # 2. Try RAG path: index + search
+        if query and self.web_rag_service.is_available():
+            try:
+                # Ensure all fetched URLs are indexed in Milvus
+                for url, page in cached_results.items():
+                    if page and not page.get('extraction_error'):
+                        await self.web_rag_service.ensure_indexed(url, page, project_id, cache_ttl)
+
+                # Search for relevant chunks
+                chunks = await self.web_rag_service.search(query, project_id, top_k=top_k)
+                if chunks:
+                    return self._format_rag_results(chunks)
+                logger.info("🌐 WEBSEARCH URL MODE: RAG returned no results, falling back to full content")
+            except Exception as e:
+                logger.warning(f"⚠️ WEBSEARCH URL MODE: RAG failed ({e}), falling back to full content")
+
+        # 3. Fallback: full content dump (original behavior)
         return self._format_url_results(urls, cached_results)
     
     async def _get_domain_search_context(
@@ -458,7 +472,35 @@ class WebSearchHandler:
         
         header = f"Retrieved content from {successful}/{len(urls)} URLs:\n\n"
         return header + "\n".join(parts)
-    
+
+    def _format_rag_results(self, chunks: List[Dict[str, Any]]) -> str:
+        """
+        Format RAG search results into a concise context string.
+        Each chunk includes source URL (for citations), section heading, and content.
+        """
+        if not chunks:
+            return "No relevant content found in the configured web sources."
+
+        # Deduplicate source URLs for the header
+        source_urls = list(dict.fromkeys(c.get('url', '') for c in chunks if c.get('url')))
+
+        parts: List[str] = []
+        for i, chunk in enumerate(chunks, 1):
+            url = chunk.get('url', '')
+            section = chunk.get('section_heading', '')
+            content = chunk.get('content', '')
+            score = chunk.get('score', 0)
+
+            parts.append(f"[{i}] Source: {url}")
+            if section:
+                parts.append(f"    Section: {section}")
+            parts.append(f"    Relevance: {score}")
+            parts.append(f"    {content}")
+            parts.append("")
+
+        header = f"Retrieved {len(chunks)} relevant excerpts from {len(source_urls)} web source(s):\n\n"
+        return header + "\n".join(parts)
+
     # =========================================================================
     # Metrics Logging
     # =========================================================================
@@ -629,11 +671,12 @@ class WebSearchHandler:
         
         try:
             if mode == 'urls':
-                # URL mode ignores the query and just fetches configured URLs
+                # URL mode fetches configured URLs and uses RAG search with the query
                 urls = agent_data.get('web_search_urls', [])
                 if not urls:
                     return ""
-                context = await self._get_url_context(urls, cache_ttl, project_id)
+                top_k = agent_data.get('web_search_top_k', 5)
+                context = await self._get_url_context(urls, cache_ttl, project_id, query=search_query, top_k=top_k)
                 
             elif mode == 'domains':
                 domains = agent_data.get('web_search_domains', [])
