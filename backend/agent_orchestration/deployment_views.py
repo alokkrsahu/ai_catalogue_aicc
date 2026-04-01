@@ -1982,7 +1982,20 @@ def embed_chatbot_html(request, project_id):
             base_url = 'https://' + base_url[len('http://'):]
         endpoint_url = f"{base_url}{deployment.endpoint_path}"
         initial_greeting = getattr(deployment, 'initial_greeting', 'Hi! I am your AI assistant.')
-        
+
+        # Server-side preload: inject conversation history so the iframe doesn't need auth
+        preloaded_history = []
+        session_id_param = request.GET.get('session_id', '').strip()
+        if session_id_param:
+            try:
+                existing_session = DeploymentSession.objects.filter(
+                    deployment=deployment, session_id=session_id_param
+                ).first()
+                if existing_session and existing_session.conversation_history:
+                    preloaded_history = existing_session.conversation_history[-100:]
+            except Exception:
+                pass
+
         # Get branding customization with defaults
         chatbot_title = getattr(deployment, 'chatbot_title', 'AI Assistant')
         chatbot_subtitle = getattr(deployment, 'chatbot_subtitle', 'Powered by AICC IntelliDoc')
@@ -2819,6 +2832,7 @@ def embed_chatbot_html(request, project_id):
   const STREAM_URL = ENDPOINT_URL.replace(/\\/$/, '') + '/stream/';
   const SUBMIT_INPUT_URL = ENDPOINT_URL.replace(/\\/$/, '') + '/submit-input/';
   const INITIAL_GREETING = {json.dumps(initial_greeting)};
+  const PRELOADED_HISTORY = {json.dumps(preloaded_history)};
   
   // Enhanced markdown renderer
   function renderMarkdown(text) {{
@@ -3045,7 +3059,7 @@ def embed_chatbot_html(request, project_id):
   function buildCopyText(plainText, citations) {{
     let out = plainText;
     if (citations && citations.length > 0) {{
-      out += '\n\nReferences:\n';
+      out += '\\n\\nReferences:\\n';
       citations.forEach(function(c) {{
         let line = '[' + c.ref + '] ';
         if (c.document_title) line += c.document_title;
@@ -3054,7 +3068,7 @@ def embed_chatbot_html(request, project_id):
         if (c.section) line += ', ' + c.section;
         if (c.url && c.document_title) line += ' (' + c.url + ')';
         if (c.quoted_text) line += ' — "' + c.quoted_text.slice(0, 200) + '"';
-        out += line + '\n';
+        out += line + '\\n';
       }});
     }}
     return out;
@@ -3116,55 +3130,6 @@ def embed_chatbot_html(request, project_id):
   const _pidIdx = _pathParts.indexOf('workflow-deploy') + 1;
   const projectId = _pidIdx > 0 && _pidIdx < _pathParts.length ? _pathParts[_pidIdx] : null;
 
-  // Preload existing conversation history for this session (if any)
-  const preloadPromise = (async function preloadConversation() {{
-    try {{
-      if (!projectId || !sessionId) {{
-        return;
-      }}
-
-      const activityUrl = `/api/agent-orchestration/projects/${{projectId}}/deployment/activity/?session_id=${{encodeURIComponent(sessionId)}}&limit=1`;
-      // SPA uses JWT in localStorage; REST_FRAMEWORK is JWT-only (no session auth for this API)
-      let _preloadHeaders = {{}};
-      try {{
-        const _rawAuth = localStorage.getItem('auth');
-        if (_rawAuth) {{
-          const _authParsed = JSON.parse(_rawAuth);
-          if (_authParsed && _authParsed.token) {{
-            _preloadHeaders = {{ 'Authorization': 'Bearer ' + _authParsed.token }};
-          }}
-        }}
-      }} catch (_e) {{}}
-      const resp = await fetch(activityUrl, {{
-        credentials: 'include',
-        headers: _preloadHeaders
-      }});
-      if (!resp.ok) {{
-        console.warn('Chatbot preload: activity request failed', resp.status);
-        return;
-      }}
-
-      const data = await resp.json().catch(() => null);
-      if (!data || !Array.isArray(data.sessions) || data.sessions.length === 0) {{
-        return;
-      }}
-
-      const session = data.sessions[0];
-      const history = Array.isArray(session.conversation_history) ? session.conversation_history : [];
-
-      // Optionally cap to last 100 messages
-      const recentHistory = history.slice(-100);
-      for (const msg of recentHistory) {{
-        if (!msg || !msg.role || typeof msg.content !== 'string') continue;
-        const msgCitations = Array.isArray(msg.citations) ? msg.citations : undefined;
-        appendMessage(msg.role === 'user' ? 'user' : 'assistant', msg.content, false, msgCitations);
-        messages.push({{ role: msg.role, content: msg.content }});
-      }}
-    }} catch (e) {{
-      console.warn('Chatbot preload failed:', e);
-    }}
-  }})();
-  
   // Auto-resize textarea
   function autoResize() {{
     inputEl.style.height = 'auto';
@@ -3558,13 +3523,19 @@ def embed_chatbot_html(request, project_id):
     }}
   }});
 
-  // Show default greeting only after preload — and only if this session has no stored history yet
-  preloadPromise.then(() => {{
-    if (messages.length === 0) {{
-      appendMessage('assistant', INITIAL_GREETING);
-      messages.push({{ role: 'assistant', content: INITIAL_GREETING }});
-    }}
-  }});
+  // Load server-side preloaded conversation history
+  for (const msg of PRELOADED_HISTORY) {{
+    if (!msg || !msg.role || typeof msg.content !== 'string') continue;
+    const msgCitations = Array.isArray(msg.citations) ? msg.citations : undefined;
+    appendMessage(msg.role === 'user' ? 'user' : 'assistant', msg.content, false, msgCitations);
+    messages.push({{ role: msg.role, content: msg.content }});
+  }}
+
+  // Show default greeting if no preloaded history
+  if (messages.length === 0) {{
+    appendMessage('assistant', INITIAL_GREETING);
+    messages.push({{ role: 'assistant', content: INITIAL_GREETING }});
+  }}
 </script>
 </body>
 </html>'''
