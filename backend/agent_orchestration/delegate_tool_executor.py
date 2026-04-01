@@ -265,16 +265,20 @@ async def run_delegate_doc_tool_loop(
 
     # Fetch prior memory context for the delegate's planning prompt
     memory_section = ""
+    summary_rows = []
     try:
         from asgiref.sync import sync_to_async
         from users.models import ProjectDocumentSummary
         summary_rows = await sync_to_async(list)(
             ProjectDocumentSummary.objects.filter(
                 document__project__project_id=project_id,
-            ).values_list("document__document_id", "memory", "citation")
+            ).values_list(
+                "document__document_id", "memory", "citation",
+                "short_summary", "document__original_filename",
+            )
         )
         memory_lines = []
-        for did, mem, cit in summary_rows:
+        for did, mem, cit, short_sum, orig_filename in summary_rows:
             if not mem or not isinstance(mem, list) or len(mem) == 0:
                 continue
             doc_label = str(did)[:8]
@@ -294,6 +298,32 @@ async def run_delegate_doc_tool_loop(
     except Exception as mem_err:
         logger.warning(f"⚠️ DELEGATE TOOL EXEC [{delegate_name}]: Could not fetch memory context: {mem_err}")
 
+    # Build document summary section for delegate planning
+    doc_summary_section = ""
+    if tool_map:
+        docid_to_toolname = {did: tname for tname, did in tool_map.items()}
+        summary_lines = []
+        for did, mem, cit, short_sum, orig_filename in summary_rows:
+            if not short_sum or not short_sum.strip():
+                continue
+            tool_name = docid_to_toolname.get(str(did))
+            if not tool_name:
+                continue
+            doc_title = (
+                cit.get("title") if cit and isinstance(cit, dict) and cit.get("title")
+                else orig_filename or str(did)[:8]
+            )
+            summary_lines.append(
+                f"  [{tool_name}] {doc_title}:\n    {short_sum.strip()}"
+            )
+            if len(summary_lines) >= 20:
+                break
+        if summary_lines:
+            doc_summary_section = (
+                "\n\nDOCUMENT SUMMARIES (use these to decide which documents to consult):\n"
+                + "\n\n".join(summary_lines)
+            )
+
     # Phase 1 — delegate-level planning (controlled by plan_mode toggle)
     plan_mode_enabled = data.get("plan_mode", True)  # default ON for backward compat
     plan_text = ""
@@ -306,6 +336,7 @@ async def run_delegate_doc_tool_loop(
                 "Before answering, create a numbered plan of which documents "
                 "you will consult and what information you need from each.\n\n"
                 f"Available documents (as tools you can call):\n{tool_descriptions}"
+                f"{doc_summary_section}"
                 f"{memory_section}\n\n"
                 "Output ONLY the plan as a numbered list."
             ),

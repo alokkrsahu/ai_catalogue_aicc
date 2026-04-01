@@ -1936,6 +1936,7 @@ class WorkflowExecutor:
         has_doc_tools = bool(tool_map)
 
         memory_section = ""
+        summary_rows = []
         if has_doc_tools:
             memory_context_lines = []
             try:
@@ -1943,9 +1944,12 @@ class WorkflowExecutor:
                 summary_rows = await sync_to_async(list)(
                     ProjectDocumentSummary.objects.filter(
                         document__project__project_id=project_id,
-                    ).values_list("document__document_id", "memory", "citation")
+                    ).values_list(
+                        "document__document_id", "memory", "citation",
+                        "short_summary", "document__original_filename",
+                    )
                 )
-                for did, mem, cit in summary_rows:
+                for did, mem, cit, short_sum, orig_filename in summary_rows:
                     if not mem or not isinstance(mem, list) or len(mem) == 0:
                         continue
                     doc_label = str(did)[:8]
@@ -1966,6 +1970,32 @@ class WorkflowExecutor:
                     "non-redundant questions."
                 )
 
+        # ---- Build document summary section for planning ----
+        doc_summary_section = ""
+        if has_doc_tools:
+            docid_to_toolname = {did: tname for tname, did in tool_map.items()}
+            summary_lines = []
+            for did, mem, cit, short_sum, orig_filename in summary_rows:
+                if not short_sum or not short_sum.strip():
+                    continue
+                tool_name = docid_to_toolname.get(str(did))
+                if not tool_name:
+                    continue  # not in active tool set
+                doc_title = (
+                    cit.get("title") if cit and isinstance(cit, dict) and cit.get("title")
+                    else orig_filename or str(did)[:8]
+                )
+                summary_lines.append(
+                    f"  [{tool_name}] {doc_title}:\n    {short_sum.strip()}"
+                )
+                if len(summary_lines) >= 20:
+                    break
+            if summary_lines:
+                doc_summary_section = (
+                    "\n\nDOCUMENT SUMMARIES (use these to decide which documents to consult):\n"
+                    + "\n\n".join(summary_lines)
+                )
+
         # ---- Phase 1: Planning (controlled by plan_mode toggle) ----
         plan_mode_enabled = node_data.get("plan_mode", True)  # default ON for backward compat
         plan_text = ""
@@ -1978,6 +2008,7 @@ class WorkflowExecutor:
                     "you will consult and what information you need from each.\n\n"
                     "Available documents (as tools you can call):\n"
                     f"{tool_descriptions}"
+                    f"{doc_summary_section}"
                     f"{memory_section}\n\n"
                     "Output ONLY the plan as a numbered list."
                 )
