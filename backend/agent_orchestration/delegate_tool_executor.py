@@ -284,7 +284,7 @@ async def run_delegate_doc_tool_loop(
             doc_label = str(did)[:8]
             if cit and isinstance(cit, dict) and cit.get("title"):
                 doc_label = cit["title"][:60]
-            topics = [e.get("query", "")[:50] for e in mem[-3:] if e.get("query")]
+            topics = [e.get("query", "")[:50] for e in mem if e.get("query")]
             memory_lines.append(
                 f"  - {doc_label}: {len(mem)} prior insights on: {'; '.join(topics)}"
             )

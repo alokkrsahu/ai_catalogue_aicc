@@ -1841,7 +1841,7 @@ class WorkflowExecutor:
     # Document Tool Calling — plan → tool loop → synthesise
     # ------------------------------------------------------------------
     MAX_TOOL_ITERATIONS = 20
-    MAX_TOOL_CALLS_PER_TURN = 10
+    MAX_TOOL_CALLS_PER_TURN = 50
 
     async def _execute_doc_tool_calling(
         self,
@@ -1955,7 +1955,7 @@ class WorkflowExecutor:
                     doc_label = str(did)[:8]
                     if cit and isinstance(cit, dict) and cit.get("title"):
                         doc_label = cit["title"][:60]
-                    topics = [e.get("query", "")[:50] for e in mem[-3:] if e.get("query")]
+                    topics = [e.get("query", "")[:50] for e in mem if e.get("query")]
                     memory_context_lines.append(
                         f"  - {doc_label}: {len(mem)} prior insights on: {'; '.join(topics)}"
                     )
@@ -2217,6 +2217,9 @@ class WorkflowExecutor:
 
             # Execute all tool calls concurrently
             pending_calls = response.tool_calls[: self.MAX_TOOL_CALLS_PER_TURN]
+            if len(response.tool_calls) > self.MAX_TOOL_CALLS_PER_TURN:
+                dropped = len(response.tool_calls) - self.MAX_TOOL_CALLS_PER_TURN
+                logger.warning(f"⚠️ TOOL CALLING [{node_name}]: {dropped} tool calls dropped (max {self.MAX_TOOL_CALLS_PER_TURN}/turn)")
 
             async def _run_single_tool(tc: Dict[str, Any]):
                 """Execute one tool call; returns (tc, result_text, source_passages)."""
@@ -2322,9 +2325,25 @@ class WorkflowExecutor:
 
             # Process results in original order
             calls_with_results: List[Dict[str, Any]] = []
-            for raw_result in gather_results:
+            for _ri, raw_result in enumerate(gather_results):
                 if isinstance(raw_result, BaseException):
                     logger.error(f"Tool call failed: {raw_result}")
+                    failed_tc = pending_calls[_ri] if _ri < len(pending_calls) else None
+                    if failed_tc:
+                        fail_doc = failed_tc["name"]
+                        for t in tools:
+                            if t["function"]["name"] == failed_tc["name"]:
+                                fail_doc = t["function"]["description"][:60]
+                                break
+                        notebook.append({
+                            "step": len(notebook) + 1,
+                            "tool_name": failed_tc["name"],
+                            "document_name": fail_doc,
+                            "query": failed_tc["arguments"].get("query", ""),
+                            "result": f"[TOOL CALL FAILED: {str(raw_result)[:300]}]",
+                            "source_passages": [],
+                            "status": "failed",
+                        })
                     continue
 
                 tc, result_text, source_passages, tool_call_ms = raw_result
@@ -2343,7 +2362,7 @@ class WorkflowExecutor:
                         "agent": node_name,
                         "tool": title_map.get(tc["name"], tc["name"]),
                         "chars": len(str(result_text)),
-                        "content": str(result_text)[:2000],
+                        "content": str(result_text)[:6000],
                     })
 
                 notebook.append({
@@ -2351,8 +2370,8 @@ class WorkflowExecutor:
                     "tool_name": tc["name"],
                     "document_name": doc_filename,
                     "query": query,
-                    "result": result_text[:2000],
-                    "source_passages": source_passages[:5],
+                    "result": result_text[:6000],
+                    "source_passages": source_passages[:15],
                     "status": "completed",
                 })
 
@@ -2453,7 +2472,13 @@ class WorkflowExecutor:
                     '{"ref": 2, "document_title": "Title", "quoted_text": "different excerpt for second claim…", "page": 3, "section": "2"}]\n'
                 ) +
                 "---END_CITATIONS---\n\n"
-                f"=== RESEARCH NOTEBOOK ===\n{notebook_summary}\n=== END NOTEBOOK ==="
+                + (
+                    f"=== ORIGINAL PLAN ===\n{plan_text}\n=== END PLAN ===\n\n"
+                    "Verify that your answer addresses each item in the original plan. "
+                    "If a planned step was not completed or a tool call failed, acknowledge the gap.\n\n"
+                    if plan_text else ""
+                )
+                + f"=== RESEARCH NOTEBOOK ===\n{notebook_summary}\n=== END NOTEBOOK ==="
             ),
         })
         synthesis_resp = await llm_provider.generate_response(messages=synthesis_messages)
