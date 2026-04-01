@@ -754,11 +754,36 @@ class ChatManager:
             user_parts.append(formatted_context)
             user_parts.append("=== END INPUT ===")
         
-        # Add conversation history if available
+        # Add conversation history if available.
+        # For multi-input nodes, direct-input agents are already in
+        # INPUT FROM CONNECTED AGENTS with proper citations.  Including
+        # them again here would duplicate content and leave orphaned [N]
+        # citation markers (no reference definitions).  Keep only the
+        # Start Node prompt and any intermediate agents.
         if conversation_history.strip():
-            user_parts.append("\n=== CONVERSATION HISTORY ===")
-            user_parts.append(conversation_history)
-            user_parts.append("=== END HISTORY ===")
+            filtered_history = conversation_history
+            if aggregated_context['input_count'] > 1:
+                direct_input_names = {
+                    inp['name'] for inp in aggregated_context.get('all_inputs', [])
+                }
+                if direct_input_names:
+                    cut_positions = []
+                    for name in direct_input_names:
+                        pos = conversation_history.find(f"\n{name}: ")
+                        if pos != -1:
+                            cut_positions.append(pos)
+                    if cut_positions:
+                        filtered_history = conversation_history[:min(cut_positions)]
+                        logger.info(
+                            f"🔀 MULTI-INPUT DEDUP: Filtered {len(direct_input_names)} "
+                            f"direct-input agents from conversation_history for {agent_name}, "
+                            f"preserved {len(filtered_history)}/{len(conversation_history)} chars"
+                        )
+
+            if filtered_history.strip():
+                user_parts.append("\n=== ORIGINAL USER REQUEST ===")
+                user_parts.append(filtered_history)
+                user_parts.append("=== END USER REQUEST ===")
         
         # Add final instruction
         user_parts.append(f"\n{agent_name}, please analyze the inputs and provide your response:")
