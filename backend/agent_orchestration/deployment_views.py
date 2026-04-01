@@ -2507,6 +2507,45 @@ def embed_chatbot_html(request, project_id):
       to {{ opacity: 1; transform: translateY(0); }}
     }}
 
+    /* ── Copy button ─────────────────────────────────────────── */
+    .bubble-actions {{
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 6px;
+      padding-top: 4px;
+      border-top: 1px solid rgba(0,0,0,0.04);
+      opacity: 0;
+      transition: opacity 0.15s;
+    }}
+    .msg.assistant:hover .bubble-actions {{
+      opacity: 1;
+    }}
+    .copy-btn {{
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: none;
+      border: none;
+      color: #94a3b8;
+      cursor: pointer;
+      font-size: 12px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      transition: color 0.15s, background 0.15s;
+    }}
+    .copy-btn:hover {{
+      color: #475569;
+      background: rgba(0,0,0,0.04);
+    }}
+    .copy-btn svg {{
+      width: 14px;
+      height: 14px;
+      flex-shrink: 0;
+    }}
+    .copy-btn.copied {{
+      color: #16a34a;
+    }}
+
     /* ── Activity / Planning panel ────────────────────────────── */
     .activity-panel {{
       background: #f1f5f9;
@@ -2892,6 +2931,49 @@ def embed_chatbot_html(request, project_id):
     }}
   }});
 
+  // ── Copy to clipboard ──────────────────────────────────────
+  function buildCopyText(plainText, citations) {{
+    let out = plainText;
+    if (citations && citations.length > 0) {{
+      out += '\n\nReferences:\n';
+      citations.forEach(function(c) {{
+        let line = '[' + c.ref + '] ';
+        if (c.document_title) line += c.document_title;
+        else if (c.url) line += c.url;
+        if (c.page) line += ', p.' + c.page;
+        if (c.section) line += ', ' + c.section;
+        if (c.url && c.document_title) line += ' (' + c.url + ')';
+        if (c.quoted_text) line += ' — "' + c.quoted_text.slice(0, 200) + '"';
+        out += line + '\n';
+      }});
+    }}
+    return out;
+  }}
+
+  function addCopyButton(bubble, plainText, citations) {{
+    const actions = document.createElement('div');
+    actions.className = 'bubble-actions';
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn';
+    btn.title = 'Copy to clipboard';
+    btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg><span>Copy</span>';
+    btn.addEventListener('click', function(e) {{
+      e.stopPropagation();
+      var text = buildCopyText(plainText, citations);
+      navigator.clipboard.writeText(text).then(function() {{
+        btn.classList.add('copied');
+        btn.querySelector('span').textContent = 'Copied';
+        btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><span>Copied</span>';
+        setTimeout(function() {{
+          btn.classList.remove('copied');
+          btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg><span>Copy</span>';
+        }}, 2000);
+      }});
+    }});
+    actions.appendChild(btn);
+    bubble.appendChild(actions);
+  }}
+
   const messages = [];
   // Allow explicit session_id via URL for in-app chatbot, fallback to random for external embeds
   const urlParams = new URLSearchParams(window.location.search || '');
@@ -3001,10 +3083,11 @@ def embed_chatbot_html(request, project_id):
       if (citations.length > 0) rendered = renderCitationChips(rendered, citations);
       markdownEl.innerHTML = rendered;
       bubble.appendChild(markdownEl);
+      addCopyButton(bubble, cleanText, citations);
     }} else {{
       bubble.textContent = text;
     }}
-    
+
     msg.appendChild(bubble);
     messagesEl.appendChild(msg);
     messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -3321,6 +3404,7 @@ def embed_chatbot_html(request, project_id):
                     ? renderCitationChips(renderMarkdown(cleanContent), citations)
                     : renderMarkdown(cleanContent);
                 }}
+                if (bubble) addCopyButton(bubble, cleanContent, citations);
                 messages.push({{ role: 'assistant', content: cleanContent }});
                 statusEl.textContent = '';
                 resetActivityPanel();
