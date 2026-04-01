@@ -2,7 +2,26 @@ import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  plugins: [sveltekit()],
+  plugins: [
+    // Guard against malformed URIs from bot probes crashing the SvelteKit dev server
+    {
+      name: 'malformed-uri-guard',
+      configureServer(server) {
+        server.middlewares.use((req, _res, next) => {
+          try {
+            decodeURI(req.url || '');
+          } catch {
+            // Invalid percent-encoding in URL — reject before SvelteKit sees it
+            _res.statusCode = 400;
+            _res.end('Bad Request');
+            return;
+          }
+          next();
+        });
+      },
+    },
+    sveltekit(),
+  ],
   
   // Server configuration with improved WebSocket handling and API proxy
   server: {

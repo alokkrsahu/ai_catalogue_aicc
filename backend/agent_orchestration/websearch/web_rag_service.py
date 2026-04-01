@@ -27,6 +27,22 @@ MIN_CHUNK_CHARS = 20
 INDEX_FLAG_PREFIX = "websearch_milvus_idx_"
 
 
+def _milvus_connection_params(timeout: int = 10) -> dict:
+    """Build Milvus connection kwargs, including auth if configured."""
+    params = {
+        'alias': 'default',
+        'host': getattr(settings, 'MILVUS_HOST', 'localhost'),
+        'port': getattr(settings, 'MILVUS_PORT', '19530'),
+        'timeout': timeout,
+    }
+    milvus_user = getattr(settings, 'MILVUS_USER', None)
+    milvus_password = getattr(settings, 'MILVUS_PASSWORD', None)
+    if milvus_user and milvus_password:
+        params['user'] = milvus_user
+        params['password'] = milvus_password
+    return params
+
+
 def _get_embedding_service():
     """Lazy-load the shared embedding service singleton."""
     global _embedding_service
@@ -37,17 +53,15 @@ def _get_embedding_service():
 
 
 def _check_milvus():
-    """Check if Milvus is reachable (cached result)."""
+    """Check if Milvus is reachable (re-checks each time to handle thread pool workers)."""
     global _milvus_available
-    if _milvus_available is not None:
-        return _milvus_available
     try:
         from pymilvus import connections, utility
-        milvus_host = getattr(settings, 'MILVUS_HOST', 'localhost')
-        milvus_port = getattr(settings, 'MILVUS_PORT', '19530')
-        alias = "default"
-        if alias not in [c[0] for c in connections.list_connections()]:
-            connections.connect(alias=alias, host=milvus_host, port=milvus_port, timeout=5)
+        params = _milvus_connection_params(timeout=5)
+        alias = params['alias']
+        connected = any(c[0] == alias and c[1] for c in connections.list_connections())
+        if not connected:
+            connections.connect(**params)
         utility.list_collections(using=alias)
         _milvus_available = True
     except Exception as e:
@@ -84,11 +98,11 @@ def _get_or_create_collection(project_id: str):
     name = _collection_name(project_id)
     alias = "default"
 
-    # Ensure connected
-    milvus_host = getattr(settings, 'MILVUS_HOST', 'localhost')
-    milvus_port = getattr(settings, 'MILVUS_PORT', '19530')
-    if alias not in [c[0] for c in connections.list_connections()]:
-        connections.connect(alias=alias, host=milvus_host, port=milvus_port, timeout=10)
+    # Ensure connected (check address is non-empty — alias can exist without active connection)
+    params = _milvus_connection_params(timeout=10)
+    connected = any(c[0] == alias and c[1] for c in connections.list_connections())
+    if not connected:
+        connections.connect(**params)
 
     if utility.has_collection(name, using=alias):
         col = Collection(name, using=alias)
@@ -329,6 +343,36 @@ class WebRAGService:
             return []
 
     # ------------------------------------------------------------------
+    # Query
+    # ------------------------------------------------------------------
+
+    async def get_indexed_urls(self, project_id: str) -> List[str]:
+        """Return distinct URLs currently indexed in the project's Milvus collection."""
+        from asgiref.sync import sync_to_async
+        try:
+            from pymilvus import utility, connections
+            params = _milvus_connection_params(timeout=10)
+            alias = params['alias']
+            connected = any(c[0] == alias and c[1] for c in connections.list_connections())
+            if not connected:
+                connections.connect(**params)
+
+            name = _collection_name(project_id)
+            if not await sync_to_async(utility.has_collection)(name, using=alias):
+                return []
+
+            col = await sync_to_async(_get_or_create_collection)(project_id)
+            results = await sync_to_async(col.query)(
+                expr="word_count >= 0",
+                output_fields=["url"],
+                limit=16384,
+            )
+            return list({r['url'] for r in results})
+        except Exception as e:
+            logger.warning(f"⚠️ WEB RAG: Failed to get indexed URLs: {e}")
+            return []
+
+    # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
 
@@ -349,11 +393,11 @@ class WebRAGService:
         from asgiref.sync import sync_to_async
         try:
             from pymilvus import utility, connections
-            alias = "default"
-            milvus_host = getattr(settings, 'MILVUS_HOST', 'localhost')
-            milvus_port = getattr(settings, 'MILVUS_PORT', '19530')
-            if alias not in [c[0] for c in connections.list_connections()]:
-                connections.connect(alias=alias, host=milvus_host, port=milvus_port, timeout=10)
+            params = _milvus_connection_params(timeout=10)
+            alias = params['alias']
+            connected = any(c[0] == alias and c[1] for c in connections.list_connections())
+            if not connected:
+                connections.connect(**params)
 
             name = _collection_name(project_id)
             if await sync_to_async(utility.has_collection)(name, using=alias):

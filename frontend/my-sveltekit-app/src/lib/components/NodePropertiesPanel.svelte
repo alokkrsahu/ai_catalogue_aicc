@@ -119,6 +119,45 @@
     }
   }
 
+  // Web search URL indexing state
+  let syncingWebIndex = false;
+  let webIndexStatus: string | null = null;
+  let webIndexDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function debouncedSyncWebIndex(urls: string[]) {
+    if (webIndexDebounceTimer) clearTimeout(webIndexDebounceTimer);
+    webIndexDebounceTimer = setTimeout(() => {
+      doSyncWebIndex(urls);
+    }, 2000); // 2s debounce — user stops typing
+  }
+
+  async function doSyncWebIndex(urls: string[]) {
+    if (!projectId || syncingWebIndex) return;
+    const validUrls = urls.filter(u => u.startsWith('http://') || u.startsWith('https://'));
+    if (validUrls.length === 0) return;
+    syncingWebIndex = true;
+    webIndexStatus = null;
+    try {
+      const cacheTtl = nodeConfig.web_search_cache_ttl ?? 2592000;
+      const res = await api.post(`/agent-orchestration/projects/${projectId}/sync-websearch-index/`, {
+        urls: validUrls,
+        cache_ttl: cacheTtl,
+      });
+      const d = res.data;
+      if (d.indexed > 0 || d.removed > 0) {
+        webIndexStatus = `Indexed ${d.indexed} new, removed ${d.removed} stale` + (d.failed > 0 ? `, ${d.failed} failed` : '');
+      } else {
+        webIndexStatus = `All ${d.already_indexed} URLs up to date`;
+      }
+      setTimeout(() => { webIndexStatus = null; }, 5000);
+    } catch (err: any) {
+      console.warn('Sync web index failed:', err);
+      webIndexStatus = null;
+    } finally {
+      syncingWebIndex = false;
+    }
+  }
+
   // Initialize defaults for new nodes
   function initializeNodeDefaults() {
     // Initialize default LLM configuration if not present
@@ -2564,12 +2603,21 @@
                   const urls = e.target.value.split('\n').filter(u => u.trim());
                   nodeConfig.web_search_urls = urls;
                   updateNodeData();
+                  debouncedSyncWebIndex(urls);
                 }}
                 rows="4"
                 class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
                 placeholder="https://example.com/page1&#10;https://docs.example.com/api&#10;https://wiki.example.org/article"
               ></textarea>
-              <p class="text-xs text-gray-500 mt-1">Enter full URLs (with https://) to fetch content from specific pages</p>
+              <div class="flex items-center gap-2 mt-1">
+                <p class="text-xs text-gray-500">Enter full URLs (with https://) to fetch content from specific pages</p>
+                {#if syncingWebIndex}
+                  <span class="text-xs text-blue-600"><i class="fas fa-spinner fa-spin mr-1"></i>Indexing...</span>
+                {/if}
+                {#if webIndexStatus}
+                  <span class="text-xs text-green-600"><i class="fas fa-check mr-1"></i>{webIndexStatus}</span>
+                {/if}
+              </div>
               <!-- Relevant Excerpts (RAG top-K) -->
               <div class="mt-3">
                 <label class="block text-sm font-medium text-gray-700 mb-2">Relevant Excerpts</label>
@@ -3109,12 +3157,21 @@
                   const urls = e.target.value.split('\n').filter(u => u.trim());
                   nodeConfig.web_search_urls = urls;
                   updateNodeData();
+                  debouncedSyncWebIndex(urls);
                 }}
                 rows="4"
                 class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
                 placeholder="https://example.com/page1&#10;https://docs.example.com/api&#10;https://wiki.example.org/article"
               ></textarea>
-              <p class="text-xs text-gray-500 mt-1">Enter full URLs (with https://) to fetch content from specific pages</p>
+              <div class="flex items-center gap-2 mt-1">
+                <p class="text-xs text-gray-500">Enter full URLs (with https://) to fetch content from specific pages</p>
+                {#if syncingWebIndex}
+                  <span class="text-xs text-blue-600"><i class="fas fa-spinner fa-spin mr-1"></i>Indexing...</span>
+                {/if}
+                {#if webIndexStatus}
+                  <span class="text-xs text-green-600"><i class="fas fa-check mr-1"></i>{webIndexStatus}</span>
+                {/if}
+              </div>
               <!-- Relevant Excerpts (RAG top-K) -->
               <div class="mt-3">
                 <label class="block text-sm font-medium text-gray-700 mb-2">Relevant Excerpts</label>

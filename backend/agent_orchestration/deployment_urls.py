@@ -71,5 +71,10 @@ urlpatterns = [
         DeploymentViewSet.as_view({'post': 'clear_websearch_cache'}),
         name='clear-websearch-cache'
     ),
+    path(
+        'api/agent-orchestration/projects/<uuid:project_id>/sync-websearch-index/',
+        DeploymentViewSet.as_view({'post': 'sync_websearch_index'}),
+        name='sync-websearch-index'
+    ),
 ]
 

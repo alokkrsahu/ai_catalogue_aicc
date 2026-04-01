@@ -746,6 +746,116 @@ class DeploymentViewSet(viewsets.ViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+    @action(detail=False, methods=['post'], url_path='projects/(?P<project_id>[^/.]+)/sync-websearch-index')
+    def sync_websearch_index(self, request, project_id=None):
+        """
+        Sync the Milvus RAG index for a project's web search URLs.
+        Indexes new URLs, removes URLs no longer in the list.
+
+        POST /api/agent-orchestration/projects/{project_id}/sync-websearch-index/
+        Body: { "urls": ["https://…", …], "cache_ttl": 2592000 }
+        Returns: { "indexed": 3, "removed": 1, "already_indexed": 5, "failed": 0 }
+        """
+        import asyncio
+        from .websearch import WebSearchCacheService, WebsiteFetcherService, WebRAGService
+
+        try:
+            project = get_object_or_404(IntelliDocProject, project_id=project_id)
+            if not project.has_user_access(request.user):
+                return Response(
+                    {'error': 'You do not have permission to access this project'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            urls = request.data.get('urls', [])
+            cache_ttl = request.data.get('cache_ttl', 2592000)
+
+            if not isinstance(urls, list):
+                return Response({'error': '"urls" must be a list'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Filter to valid URLs
+            urls = [u.strip() for u in urls if u.strip().startswith(('http://', 'https://'))]
+
+            pid = str(project_id)
+            rag_service = WebRAGService()
+            cache_service = WebSearchCacheService()
+            fetcher_service = WebsiteFetcherService()
+
+            async def _sync():
+                # 1. Get currently indexed URLs
+                indexed_urls = set(await rag_service.get_indexed_urls(pid))
+                desired_urls = set(urls)
+
+                # 2. Remove URLs no longer in the list
+                to_remove = indexed_urls - desired_urls
+                for url in to_remove:
+                    await rag_service.remove_url(url, pid)
+                logger.info(f"🌐 SYNC INDEX: Removed {len(to_remove)} stale URLs (project {pid[:8]})")
+
+                # 3. Determine which URLs need indexing
+                #    (not in Milvus OR index flag expired)
+                to_index = []
+                already_indexed = 0
+                for url in desired_urls:
+                    flag_key = f"websearch_milvus_idx_{pid.replace('-', '_')}_{__import__('hashlib').md5(url.encode()).hexdigest()}"
+                    from django.core.cache import cache as django_cache
+                    if django_cache.get(flag_key):
+                        already_indexed += 1
+                    else:
+                        to_index.append(url)
+
+                if not to_index:
+                    return {
+                        'indexed': 0,
+                        'removed': len(to_remove),
+                        'already_indexed': already_indexed,
+                        'failed': 0,
+                    }
+
+                # 4. Fetch content for URLs that need indexing
+                cached_results = cache_service.get_cached_urls_batch(to_index, pid)
+                urls_to_fetch = [url for url, content in cached_results.items() if content is None]
+
+                if urls_to_fetch:
+                    fetch_results = await fetcher_service.fetch_urls_parallel(urls_to_fetch)
+                    to_cache = {}
+                    for result in fetch_results:
+                        url = result.get('url')
+                        if url:
+                            to_cache[url] = result
+                            cached_results[url] = result
+                    if to_cache:
+                        cache_service.cache_urls_batch(to_cache, pid, ttl=cache_ttl)
+
+                # 5. Index in Milvus
+                indexed = 0
+                failed = 0
+                for url in to_index:
+                    page = cached_results.get(url)
+                    if page and not page.get('extraction_error'):
+                        success = await rag_service.ensure_indexed(url, page, pid, cache_ttl)
+                        if success:
+                            indexed += 1
+                        else:
+                            already_indexed += 1  # ensure_indexed returned False = already done
+                    else:
+                        failed += 1
+
+                return {
+                    'indexed': indexed,
+                    'removed': len(to_remove),
+                    'already_indexed': already_indexed,
+                    'failed': failed,
+                }
+
+            result = asyncio.run(_sync())
+            logger.info(f"🌐 SYNC INDEX: project {pid[:8]} — indexed={result['indexed']}, removed={result['removed']}, already={result['already_indexed']}, failed={result['failed']}")
+            return Response(result, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"❌ SYNC WEBSEARCH INDEX: {e}", exc_info=True)
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
     @action(detail=False, methods=['get'], url_path='projects/(?P<project_id>[^/.]+)/deployment/activity')
     def get_deployment_activity(self, request, project_id=None):
         """

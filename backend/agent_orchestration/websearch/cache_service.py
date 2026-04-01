@@ -39,6 +39,7 @@ class WebSearchCacheService:
     # Cache key prefixes (keys will be {prefix}{project_id}_{hash})
     URL_PREFIX = "websearch_url_"
     SEARCH_PREFIX = "websearch_query_"
+    INDEX_FLAG_PREFIX = "websearch_milvus_idx_"
     
     def __init__(self):
         """Initialize cache service with settings from Django config."""
@@ -310,6 +311,7 @@ class WebSearchCacheService:
             if hasattr(cache, 'delete_pattern'):
                 cache.delete_pattern(f"{self.URL_PREFIX}{pid}_*")
                 cache.delete_pattern(f"{self.SEARCH_PREFIX}{pid}_*")
+                cache.delete_pattern(f"{self.INDEX_FLAG_PREFIX}{pid}_*")
                 logger.info(f"🗑️ WEBSEARCH CACHE: Cleared all websearch cache for project {project_id[:8]}")
                 return True
 
@@ -321,7 +323,7 @@ class WebSearchCacheService:
                 key_prefix = getattr(cache, 'key_prefix', '')
                 version = getattr(cache, 'version', 1)
                 deleted = 0
-                for prefix in (self.URL_PREFIX, self.SEARCH_PREFIX):
+                for prefix in (self.URL_PREFIX, self.SEARCH_PREFIX, self.INDEX_FLAG_PREFIX):
                     full_pattern = f"{key_prefix}:{version}:{prefix}{pid}_*"
                     cursor = 0
                     while True:
