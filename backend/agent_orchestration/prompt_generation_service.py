@@ -298,27 +298,10 @@ Return ONLY the generated system prompt, without any additional explanation or f
         return "; ".join(context_parts)
     
     def _enhance_with_docaware_instructions(self, generated_prompt: str) -> str:
-        """Enhance generated prompt with DocAware/RAG instructions"""
-        docaware_section = """
-
-DOCUMENT ACCESS CAPABILITY:
-You have access to project documents through a retrieval function. When you need information from uploaded documents, use the retrieve_documents() function with relevant search queries.
-
-Available function:
-- retrieve_documents(query: str, limit: int = 5) -> List[Dict]: Search project documents for relevant content
-
-The function returns a list of document chunks with:
-- content: The actual text content
-- metadata: Source, page number, relevance score, and document information
-
-Use this function when:
-1. The user asks about document content
-2. You need context from uploaded files
-3. You want to cite specific information from project documents
-
-Always cite document sources when using retrieved information."""
-        
-        return generated_prompt + docaware_section
+        """No-op: document access instructions are injected at runtime by the
+        IntelliDoc platform prompt only when documents are actually available.
+        Kept for backwards compatibility with callers."""
+        return generated_prompt
     
     def _validate_generated_prompt(self, prompt: str) -> Dict[str, Any]:
         """Validate that the generated prompt is acceptable"""
@@ -382,11 +365,9 @@ Always cite document sources when using retrieved information."""
             prompt_parts.append("Focus on providing detailed, specialized analysis for the tasks assigned to you.")
             prompt_parts.append("Be thorough and comprehensive in your responses, ensuring you address all aspects of the assigned task.")
         
-        # Add DocAware capabilities
-        if doc_aware:
-            prompt_parts.append("\n\nYou have access to document search capabilities.")
-            prompt_parts.append("When users ask questions or when processing tasks, search relevant documents and use the retrieved information to provide accurate, context-aware responses.")
-            prompt_parts.append("Always cite document sources when possible.")
+        # DocAware note: capability instructions are injected at runtime by
+        # the IntelliDoc platform prompt only when documents are actually
+        # available.  No static "you have access to document search" here.
         
         # Add behavioral guidelines
         prompt_parts.append("\n\nGuidelines for your behavior:")

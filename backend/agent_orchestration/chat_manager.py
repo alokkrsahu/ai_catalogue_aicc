@@ -30,20 +30,21 @@ class ChatManager:
         self.websearch_handler = websearch_handler
 
     def _append_intellidoc_platform_prompt(
-        self, parts: List[str], agent_node: Dict[str, Any]
+        self, parts: List[str], agent_node: Dict[str, Any],
+        has_sources: bool = False,
     ) -> None:
         """Append global + per-type IntelliDoc guidance after user system text (not shown in UI)."""
         from .intellidoc_system_prompt import intellidoc_addendum_for_node
 
-        block = intellidoc_addendum_for_node(agent_node)
+        block = intellidoc_addendum_for_node(agent_node, has_sources=has_sources)
         if block:
             parts.append(block)
 
-    def _intellidoc_addendum_string(self, agent_node: Dict[str, Any]) -> str:
+    def _intellidoc_addendum_string(self, agent_node: Dict[str, Any], has_sources: bool = False) -> str:
         """Return platform addendum for embedding in f-strings (e.g. group chat final prompt)."""
         from .intellidoc_system_prompt import intellidoc_addendum_for_node
 
-        return intellidoc_addendum_for_node(agent_node)
+        return intellidoc_addendum_for_node(agent_node, has_sources=has_sources)
     
     @staticmethod
     def format_messages_with_file_refs(
@@ -387,8 +388,8 @@ class ChatManager:
             system_parts.append(agent_system_message)
         if agent_instructions:
             system_parts.append(f"Instructions for {agent_name}: {agent_instructions}")
-        self._append_intellidoc_platform_prompt(system_parts, agent_node)
-        
+        # IntelliDoc platform prompt is appended AFTER sources are resolved (see below)
+
         # 📚 DOCAWARE INTEGRATION: Add chunk-based document context if enabled
         # Skip when the agent enters the tool-calling path (doc_tool_calling,
         # web_search_enabled, or doc_aware as tool) -- the LLM will obtain
@@ -491,8 +492,7 @@ class ChatManager:
         # If we have any attachments (project-level or node-scoped), add indicator to system message
         if file_attachment_refs:
             system_parts.append("\n=== FILE ATTACHMENTS ===")
-            system_parts.append("You have been provided with full access to the following documents via file attachments.")
-            system_parts.append("These may include project-level documents (from DocAware search) and/or node-level file attachments configured for this agent.")
+            system_parts.append("The following documents have been attached for your reference.")
             for ref in file_attachment_refs:
                 system_parts.append(f"- {ref.get('filename', 'unknown')} ({ref.get('file_type', 'document')})")
             system_parts.append("=== END FILE ATTACHMENTS ===")
@@ -529,10 +529,16 @@ class ChatManager:
             system_parts.append("")
             system_parts.append(websearch_context)
             system_parts.append("=== END WEB SEARCH ===")
-        
+
+        # Append IntelliDoc platform prompt — now that we know which sources
+        # are available, citation instructions are included only when needed.
+        _has_sources = bool(document_context or websearch_context or file_attachment_refs
+                           or _da_will_use_tool_path or _will_use_tool_path)
+        self._append_intellidoc_platform_prompt(system_parts, agent_node, has_sources=_has_sources)
+
         # Build full system message
         system_message = "\n".join(system_parts) if system_parts else None
-        
+
         # Add final instruction to conversation history
         enhanced_history = conversation_history
         if enhanced_history.strip():
@@ -595,8 +601,8 @@ class ChatManager:
             system_parts.append(agent_system_message)
         if agent_instructions:
             system_parts.append(f"Instructions for {agent_name}: {agent_instructions}")
-        self._append_intellidoc_platform_prompt(system_parts, agent_node)
-        
+        # IntelliDoc platform prompt is appended AFTER sources are resolved (see below)
+
         # 📚 DOCAWARE INTEGRATION: Chunk-based document context
         # Skip when the agent enters the tool-calling path (doc_tool_calling,
         # web_search_enabled, or doc_aware as tool) -- the LLM will obtain
@@ -694,8 +700,7 @@ class ChatManager:
 
         if file_attachment_refs:
             system_parts.append("\n=== FILE ATTACHMENTS ===")
-            system_parts.append("You have been provided with full access to the following documents via file attachments.")
-            system_parts.append("These may include project-level documents (from DocAware search) and/or node-level file attachments configured for this agent.")
+            system_parts.append("The following documents have been attached for your reference.")
             for ref in file_attachment_refs:
                 system_parts.append(f"- {ref.get('filename', 'unknown')} ({ref.get('file_type', 'document')})")
             system_parts.append("=== END FILE ATTACHMENTS ===")
@@ -740,10 +745,19 @@ class ChatManager:
             system_parts.append("")
             system_parts.append(websearch_context)
             system_parts.append("=== END WEB SEARCH ===")
-        
+
+        # Append IntelliDoc platform prompt — citation instructions only when sources exist.
+        # For multi-input nodes, upstream agent citations also count as sources.
+        _has_sources_multi = bool(
+            document_context or websearch_context or file_attachment_refs
+            or _da_will_use_tool_path or _will_use_tool_path
+            or aggregated_context.get('input_count', 0) > 0
+        )
+        self._append_intellidoc_platform_prompt(system_parts, agent_node, has_sources=_has_sources_multi)
+
         # Build full system message
         system_message = "\n".join(system_parts) if system_parts else None
-        
+
         # Build user message with aggregated input and conversation history
         user_parts = []
         

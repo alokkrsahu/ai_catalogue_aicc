@@ -617,6 +617,14 @@ async def execute_tool_based_delegation(
         delegate_summaries.append("\n".join(capability_parts))
     delegate_listing = "\n".join(delegate_summaries)
 
+    # Validate delegate tools BEFORE Phase 1 planning — don't tell the LLM
+    # about agents that can't actually be called.
+    tools, tool_map = build_delegate_tools(delegate_nodes)
+    if not tools:
+        raise Exception(
+            f"GroupChatManager {manager_name} has no delegate tools (no delegates connected)"
+        )
+
     phase1_messages: List[Dict[str, Any]] = [
         {"role": "system", "content": system_content},
         {
@@ -651,13 +659,7 @@ async def execute_tool_based_delegation(
     logger.info(f"🔬 DEBUG-6451c8 [H4] Phase1 done: plan_len={len(manager_plan)}, preview={manager_plan[:200]}")
     # #endregion
 
-    # ── Phase 2 — Tool loop ──────────────────────────────────────
-    tools, tool_map = build_delegate_tools(delegate_nodes)
-    if not tools:
-        raise Exception(
-            f"GroupChatManager {manager_name} has no delegate tools (no delegates connected)"
-        )
-
+    # ── Phase 2 — Tool loop (tools already validated before Phase 1) ──
     tool_names_listing = "\n".join(
         f"- {t['function']['name']}: {t['function']['description'][:150]}"
         for t in tools
