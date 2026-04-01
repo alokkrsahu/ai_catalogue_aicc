@@ -719,9 +719,11 @@ class ChatManager:
             try:
                 logger.info(f"🌐 WEBSEARCH: Agent {agent_name} with aggregated input - WebSearch enabled (context augmentation, mode={_ws_mode})")
                 if _ws_mode == 'urls':
-                    # URL mode: fetch configured URLs directly — no query extraction needed
+                    # URL mode: use aggregated input as RAG query so Milvus
+                    # returns chunks relevant to A1+A2's outputs, not generic content.
+                    agg_query = self.websearch_handler.extract_search_query_from_aggregated_input(aggregated_context)
                     websearch_context = await self.websearch_handler.get_websearch_context(
-                        agent_node, "", project_id
+                        agent_node, agg_query or "", project_id
                     )
                 else:
                     search_query = self.websearch_handler.extract_search_query_from_aggregated_input(aggregated_context)
