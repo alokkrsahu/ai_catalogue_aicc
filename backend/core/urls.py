@@ -4,16 +4,12 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
-from django.http import HttpResponse, Http404, JsonResponse
+from django.http import JsonResponse
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import (
     TokenObtainPairView,
     TokenRefreshView,
 )
-import logging
-
-logger = logging.getLogger(__name__)
-
 from api.views import (
     RegisterView, 
     UserViewSet, 
@@ -39,16 +35,7 @@ from agent_orchestration.workflow_views import AgentWorkflowViewSet
 from agent_orchestration.debug_views import debug_workflows
 
 # Import vector search views for main endpoints
-from vector_search import api_views
 from vector_search import consolidated_api_views
-
-# IMMEDIATE FIX: Import AICC-IntelliDoc template functions directly
-# from templates.template_definitions.aicc_intellidoc.urls import discover_template as aicc_discover
-
-# PHASE 2: Enhanced views have been consolidated into the main system
-# All enhanced functionality is now available through the consolidated endpoints
-ENHANCED_VIEWS_AVAILABLE = False  # Deprecated in Phase 2
-ENHANCED_UNIFIED_VIEWS_AVAILABLE = False  # Deprecated in Phase 2
 
 from llm_eval.views import (
     LLMProviderViewSet,

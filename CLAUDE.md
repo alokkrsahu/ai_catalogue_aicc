@@ -119,7 +119,7 @@ postgres, redis, etcd, minio, milvus, chromadb, backend, frontend, nginx — all
 - **Embedding model**: SentenceTransformers `all-MiniLM-L6-v2` (384-dim vectors). Configured in `settings.py`.
 - **WebSocket rooms**: `AgentOrchestrationConsumer` uses project-scoped channel groups (`agent_orchestration_{project_id}`). Key message types: `workflow_connected` (handshake), `ping`/`pong` (keep-alive), `human_input_response` (human-in-the-loop), `execution_control` (pause/cancel).
 - **Dynamic template URLs**: The `templates/` app registers project-type-specific URL patterns at runtime via `include_template_urls()`. If a template's URLs fail to load, `core/urls.py` has a hardcoded JSON fallback for AICC-IntelliDoc.
-- **Tests**: No formal test framework configured. Ad-hoc test scripts live in `backend/` (e.g., `test_workflow_api.py`, `test_cors.py`, `test_conversation_workflow.py`) and are run directly with `python <file>.py`.
+- **Tests**: No formal test framework configured. Some Django management commands exist for testing specific features (e.g., `test_bulk_upload`, `test_phase1_backend`, `test_milvus_algorithms`).
 
 ## Environment Variables
 
