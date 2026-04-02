@@ -34,6 +34,7 @@
   let primaryColor = '#78b2e8';
   let secondaryColor = '#3a6d98';
   let logoUrl = '';
+  let fileUploadsEnabled = false;
   
   // Helper function to convert hex color to RGB values
   function hexToRgb(hex: string): string {
@@ -789,7 +790,8 @@
         primaryColor = deployment.primary_color || '#78b2e8';
         secondaryColor = deployment.secondary_color || '#3a6d98';
         logoUrl = deployment.logo_url || '';
-        
+        fileUploadsEnabled = deployment.file_uploads_enabled || false;
+
         // Construct endpoint URL
         const baseUrl = typeof window !== 'undefined' ? window.location.origin : '';
         endpointUrl = `${baseUrl}${deployment.endpoint_path}`;
@@ -857,7 +859,8 @@
         chatbot_subtitle: chatbotSubtitle,
         primary_color: primaryColor,
         secondary_color: secondaryColor,
-        logo_url: logoUrl || null
+        logo_url: logoUrl || null,
+        file_uploads_enabled: fileUploadsEnabled
       });
       
       toasts.success('Deployment configuration saved successfully');
@@ -1370,6 +1373,26 @@
               </p>
             </div>
             
+            <!-- File Uploads Toggle -->
+            <div class="mb-6">
+              <label class="flex items-center gap-3 cursor-pointer">
+                <div class="relative">
+                  <input
+                    type="checkbox"
+                    bind:checked={fileUploadsEnabled}
+                    class="sr-only peer"
+                  />
+                  <div class="w-10 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-oxford-blue"></div>
+                </div>
+                <div>
+                  <span class="text-sm font-medium text-gray-700">Allow File Uploads</span>
+                  <p class="text-xs text-gray-500">
+                    {fileUploadsEnabled ? 'Users can attach PDF, TXT, DOC, DOCX, MD, RTF files in the chatbot' : 'File upload is disabled for chatbot users'}
+                  </p>
+                </div>
+              </label>
+            </div>
+
             <!-- Live Preview -->
             <div class="mb-6">
               <label class="block text-sm font-medium text-gray-700 mb-2">

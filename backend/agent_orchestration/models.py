@@ -77,7 +77,11 @@ class WorkflowDeployment(models.Model):
         null=True,
         help_text='Optional URL to a logo image displayed in the header'
     )
-    
+    file_uploads_enabled = models.BooleanField(
+        default=False,
+        help_text='Whether end-users can upload files in the chatbot'
+    )
+
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -291,6 +295,30 @@ class DeploymentSession(models.Model):
     
     def __str__(self):
         return f"Session {self.session_id[:8]} for {self.deployment.project.name} ({self.message_count} messages)"
+
+
+class DeploymentSessionFile(models.Model):
+    """Files uploaded by end-users during a deployment chatbot session"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session = models.ForeignKey(
+        DeploymentSession,
+        on_delete=models.CASCADE,
+        related_name='uploaded_files',
+    )
+    filename = models.CharField(max_length=255)
+    file_extension = models.CharField(max_length=20)
+    mime_type = models.CharField(max_length=100)
+    file_size = models.BigIntegerField()
+    storage_path = models.CharField(max_length=500, help_text='Path in default_storage')
+    provider = models.CharField(max_length=20, help_text='LLM provider the file was uploaded to')
+    provider_file_id = models.CharField(max_length=500, help_text='File ID from the LLM provider API')
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-uploaded_at']
+
+    def __str__(self):
+        return f"{self.filename} ({self.provider}) — session {self.session.session_id[:8]}"
 
 
 class DeploymentExecution(models.Model):

@@ -644,6 +644,20 @@ class WorkflowExecutor:
                                         prompt_result_single.get('provider', 'openai')
                                     )
                             
+                            # --- Chat file references (deployment chatbot uploads) ---
+                            if is_deployment and deployment_context and deployment_context.get('chat_file_references'):
+                                _has_node_refs = (
+                                    (isinstance(prompt_result, dict) and prompt_result.get('file_references')) if len(input_sources) > 1
+                                    else (isinstance(prompt_result_single, dict) and prompt_result_single.get('file_references')) if 'prompt_result_single' in dir() else False
+                                )
+                                if not _has_node_refs and node_type == 'AssistantAgent':
+                                    _chat_refs = deployment_context['chat_file_references']
+                                    _provider = node_data.get('llm_provider', 'openai').lower()
+                                    logger.info(f"📎 CHAT FILES: Attaching {len(_chat_refs)} session files to {node_name} ({_provider})")
+                                    llm_messages = self.chat_manager.format_messages_with_file_refs(
+                                        llm_messages, _chat_refs, _provider
+                                    )
+
                             # --- Tool Calling Mode (document tools, web search, and/or DocAware) ---
                             _synthesis_citations = []
                             _ws_handler = getattr(self.chat_manager, 'websearch_handler', None)

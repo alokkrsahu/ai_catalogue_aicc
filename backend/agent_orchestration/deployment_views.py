@@ -9,6 +9,8 @@ Deployment / chat limitations (see DEPLOYMENT_CHAT_LIMITATIONS.md in project roo
 """
 import logging
 import json
+import os
+import mimetypes
 import queue as queue_mod
 import uuid
 import hashlib
@@ -23,6 +25,7 @@ from django.views.decorators.http import require_http_methods
 from django.utils import timezone
 from django.views.decorators.cache import never_cache
 from django.shortcuts import get_object_or_404
+from django.core.files.storage import default_storage
 from django.db import transaction
 from rest_framework import viewsets, status
 from rest_framework.response import Response
@@ -38,6 +41,7 @@ from .models import (
     WorkflowDeploymentRequest,
     WorkflowDeploymentRequestStatus,
     DeploymentSession,
+    DeploymentSessionFile,
     DeploymentExecution
 )
 from .deployment_executor import WorkflowDeploymentExecutor
@@ -249,6 +253,7 @@ class DeploymentViewSet(viewsets.ViewSet):
                     'primary_color': getattr(deployment, 'primary_color', '#78b2e8'),
                     'secondary_color': getattr(deployment, 'secondary_color', '#3a6d98'),
                     'logo_url': getattr(deployment, 'logo_url', None),
+                    'file_uploads_enabled': getattr(deployment, 'file_uploads_enabled', False),
                     'created_at': deployment.created_at.isoformat(),
                     'updated_at': deployment.updated_at.isoformat()
                 },
@@ -300,7 +305,8 @@ class DeploymentViewSet(viewsets.ViewSet):
                     'chatbot_subtitle': request.data.get('chatbot_subtitle', 'Powered by AICC IntelliDoc'),
                     'primary_color': request.data.get('primary_color', '#78b2e8'),
                     'secondary_color': request.data.get('secondary_color', '#3a6d98'),
-                    'logo_url': request.data.get('logo_url', None)
+                    'logo_url': request.data.get('logo_url', None),
+                    'file_uploads_enabled': request.data.get('file_uploads_enabled', False),
                 }
             )
             
@@ -326,6 +332,8 @@ class DeploymentViewSet(viewsets.ViewSet):
                     deployment.secondary_color = request.data['secondary_color']
                 if 'logo_url' in request.data:
                     deployment.logo_url = request.data['logo_url']
+                if 'file_uploads_enabled' in request.data:
+                    deployment.file_uploads_enabled = request.data['file_uploads_enabled']
                 deployment.save()
             
             logger.info(f"✅ DEPLOYMENT: {'Created' if created else 'Updated'} deployment for project {project.name}")
@@ -344,6 +352,7 @@ class DeploymentViewSet(viewsets.ViewSet):
                 'primary_color': getattr(deployment, 'primary_color', '#78b2e8'),
                 'secondary_color': getattr(deployment, 'secondary_color', '#3a6d98'),
                 'logo_url': getattr(deployment, 'logo_url', None),
+                'file_uploads_enabled': getattr(deployment, 'file_uploads_enabled', False),
                 'message': 'Deployment created successfully' if created else 'Deployment updated successfully'
             }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
             
@@ -1071,11 +1080,28 @@ def public_chat_endpoint(request, project_id):
             else:
                 logger.info(f"🔄 DEPLOYMENT: Retrieved existing session {session_id[:8]} with {deployment_session.message_count} messages")
             
+            # Build file references from ALL session files (persist across messages)
+            chat_file_references = []
+            try:
+                session_files = list(DeploymentSessionFile.objects.filter(session=deployment_session))
+                for sf in session_files:
+                    chat_file_references.append({
+                        'file_id': sf.provider_file_id,
+                        'filename': sf.filename,
+                        'provider': sf.provider,
+                        'file_type': sf.mime_type,
+                        'file_size': sf.file_size,
+                    })
+                if chat_file_references:
+                    logger.info(f"📎 CHAT FILES: {len(chat_file_references)} session files for {session_id[:8]}")
+            except Exception as e:
+                logger.warning(f"⚠️ CHAT FILES: Failed to load session files: {e}")
+
             # Add user query to conversation history
             conversation_history.append({
                 'role': 'user',
                 'content': user_query,
-                'timestamp': timezone.now().isoformat()
+                'timestamp': timezone.now().isoformat(),
             })
             
             # Build full conversation history string for workflow execution
@@ -1151,7 +1177,8 @@ def public_chat_endpoint(request, project_id):
                     full_conversation,
                     session_id,
                     execution_id,
-                    current_user_query=user_query  # Pass current user query for UserProxyAgent handling
+                    current_user_query=user_query,
+                    chat_file_references=chat_file_references,
                 )
             )
         except Exception as e:
@@ -1361,13 +1388,30 @@ def public_chat_endpoint_stream(request, project_id):
                         'timestamp': timezone.now().isoformat()
                     })
                 
+                # Build file references from ALL session files (persist across messages)
+                chat_file_references = []
+                try:
+                    session_files = list(DeploymentSessionFile.objects.filter(session=deployment_session))
+                    for sf in session_files:
+                        chat_file_references.append({
+                            'file_id': sf.provider_file_id,
+                            'filename': sf.filename,
+                            'provider': sf.provider,
+                            'file_type': sf.mime_type,
+                            'file_size': sf.file_size,
+                        })
+                    if chat_file_references:
+                        logger.info(f"📎 CHAT FILES (stream): {len(chat_file_references)} session files for {session_id[:8]}")
+                except Exception as file_err:
+                    logger.warning(f"⚠️ CHAT FILES: Failed to load session files: {file_err}")
+
                 # Add user query to conversation history
                 conversation_history.append({
                     'role': 'user',
                     'content': user_query,
                     'timestamp': timezone.now().isoformat()
                 })
-                
+
                 # Build conversation history string
                 conversation_text_parts = []
                 for msg in conversation_history:
@@ -1415,6 +1459,7 @@ def public_chat_endpoint_stream(request, project_id):
                             execution_id,
                             current_user_query=user_query,
                             event_callback=_emit_event,
+                            chat_file_references=chat_file_references,
                         )
                     )
                 except Exception as exc:
@@ -1947,6 +1992,154 @@ def submit_deployment_human_input(request, project_id):
         }, status=500)
 
 
+def _get_deployment_llm_provider(workflow):
+    """Extract LLM provider from the first AssistantAgent node in a workflow."""
+    for node in workflow.graph_json.get('nodes', []):
+        if node.get('type') == 'AssistantAgent':
+            return node.get('data', {}).get('llm_provider', 'openai').lower()
+    return 'openai'
+
+
+CHAT_UPLOAD_ALLOWED_EXTENSIONS = {'.pdf', '.txt', '.doc', '.docx', '.md', '.rtf'}
+CHAT_UPLOAD_MAX_SIZE = 50 * 1024 * 1024  # 50 MB (OpenAI limit, strictest)
+CHAT_UPLOAD_MAX_FILES_PER_SESSION = 10
+
+
+@csrf_exempt
+@require_http_methods(["POST", "OPTIONS"])
+@never_cache
+def upload_chat_file(request, project_id):
+    """
+    Upload a file for use in the deployed chatbot.
+    POST /api/workflow-deploy/{project_id}/upload-file/
+    Multipart: file, session_id
+    """
+    if request.method == 'OPTIONS':
+        response = JsonResponse({'status': 'ok'})
+        _add_cors_headers(response, request)
+        return response
+
+    try:
+        # Validate project + deployment
+        try:
+            project = IntelliDocProject.objects.get(project_id=project_id)
+        except IntelliDocProject.DoesNotExist:
+            return JsonResponse({'error': 'Project not found'}, status=404)
+
+        deployment = WorkflowDeployment.objects.filter(project=project, is_active=True).first()
+        if not deployment:
+            return JsonResponse({'error': 'No active deployment'}, status=404)
+
+        if not deployment.file_uploads_enabled:
+            return JsonResponse({'error': 'File uploads are not enabled for this chatbot'}, status=403)
+
+        # Parse session_id
+        session_id = request.POST.get('session_id', '').strip()
+        if not session_id:
+            return JsonResponse({'error': 'session_id is required'}, status=400)
+
+        session = DeploymentSession.objects.filter(deployment=deployment, session_id=session_id).first()
+        if not session:
+            return JsonResponse({'error': 'Session not found'}, status=404)
+
+        # Check per-session file limit
+        from .models import DeploymentSessionFile
+        existing_count = DeploymentSessionFile.objects.filter(session=session).count()
+        if existing_count >= CHAT_UPLOAD_MAX_FILES_PER_SESSION:
+            return JsonResponse({
+                'error': f'Maximum {CHAT_UPLOAD_MAX_FILES_PER_SESSION} files per session'
+            }, status=400)
+
+        # Validate file
+        upload = request.FILES.get('file')
+        if not upload:
+            return JsonResponse({'error': 'No file provided'}, status=400)
+
+        filename = upload.name
+        ext = os.path.splitext(filename)[1].lower()
+        mime_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+
+        if ext not in CHAT_UPLOAD_ALLOWED_EXTENSIONS:
+            return JsonResponse({
+                'error': f'Unsupported file type: {ext}. Allowed: {", ".join(sorted(CHAT_UPLOAD_ALLOWED_EXTENSIONS))}'
+            }, status=400)
+
+        if upload.size > CHAT_UPLOAD_MAX_SIZE:
+            return JsonResponse({
+                'error': f'File too large ({upload.size // (1024*1024)}MB). Maximum: {CHAT_UPLOAD_MAX_SIZE // (1024*1024)}MB'
+            }, status=400)
+
+        # Determine LLM provider from workflow
+        workflow = deployment.workflow
+        provider = _get_deployment_llm_provider(workflow)
+
+        # Save to temp storage
+        storage_path = default_storage.save(
+            os.path.join('chat_uploads', str(project_id), session_id, f'{uuid.uuid4().hex}_{filename}'),
+            upload,
+        )
+
+        # Upload to LLM provider
+        from types import SimpleNamespace
+        pseudo_doc = SimpleNamespace(
+            file_path=storage_path,
+            file_size=upload.size,
+            file_extension=ext,
+            file_type=mime_type,
+            original_filename=filename,
+            document_id=None,
+        )
+
+        from .llm_file_service import LLMFileUploadService
+        from asgiref.sync import async_to_sync
+        service = LLMFileUploadService(project)
+        result = async_to_sync(service._upload_to_provider)(pseudo_doc, provider)
+
+        # Clean up temp storage
+        try:
+            if default_storage.exists(storage_path):
+                default_storage.delete(storage_path)
+        except Exception:
+            pass
+
+        if not result.get('file_id'):
+            return JsonResponse({
+                'error': result.get('error', 'Upload to LLM provider failed'),
+                'reason': result.get('reason'),
+            }, status=400)
+
+        # Create session file record
+        session_file = DeploymentSessionFile.objects.create(
+            session=session,
+            filename=filename,
+            file_extension=ext,
+            mime_type=mime_type,
+            file_size=upload.size,
+            storage_path='',  # already cleaned up
+            provider=provider,
+            provider_file_id=result['file_id'],
+        )
+
+        logger.info(f"📎 CHAT UPLOAD: {filename} ({upload.size} bytes) → {provider} file_id={result['file_id'][:20]}... (session {session_id[:8]})")
+
+        response = JsonResponse({
+            'attachment_id': str(session_file.id),
+            'file_id': result['file_id'],
+            'filename': filename,
+            'provider': provider,
+            'size': upload.size,
+            'mime_type': mime_type,
+        }, status=201)
+        _add_cors_headers(response, request)
+        return response
+
+    except Exception as e:
+        logger.error(f"❌ CHAT UPLOAD: Error: {e}", exc_info=True)
+        response = JsonResponse({'error': 'File upload failed'}, status=500)
+        _add_cors_headers(response, request)
+        return response
+
+
 @csrf_exempt
 @xframe_options_exempt
 def embed_chatbot_html(request, project_id):
@@ -2002,7 +2195,8 @@ def embed_chatbot_html(request, project_id):
         primary_color = getattr(deployment, 'primary_color', '#78b2e8')
         secondary_color = getattr(deployment, 'secondary_color', '#3a6d98')
         logo_url = getattr(deployment, 'logo_url', None) or ''
-        
+        file_uploads_enabled = getattr(deployment, 'file_uploads_enabled', False)
+
         # Generate the modern HTML with glassmorphism design
         html_content = f'''<!DOCTYPE html>
 <html lang="en">
@@ -2669,6 +2863,91 @@ def embed_chatbot_html(request, project_id):
       color: #16a34a;
     }}
 
+    /* ── File upload ─────────────────────────────────────────── */
+    .file-attach-btn {{
+      background: none;
+      border: none;
+      color: #94a3b8;
+      cursor: pointer;
+      padding: 6px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      transition: color 0.15s, background 0.15s;
+      flex-shrink: 0;
+    }}
+    .file-attach-btn:hover {{
+      color: var(--primary-color);
+      background: rgba(0,0,0,0.04);
+    }}
+    .file-attach-btn svg {{
+      width: 20px;
+      height: 20px;
+    }}
+    .file-preview-bar {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 8px 12px 4px;
+      border-top: 1px solid #e2e8f0;
+      background: #f8fafc;
+    }}
+    .file-chip {{
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: #e2e8f0;
+      color: #334155;
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      max-width: 200px;
+    }}
+    .file-chip-name {{
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .file-chip-remove {{
+      background: none;
+      border: none;
+      color: #94a3b8;
+      cursor: pointer;
+      padding: 0 2px;
+      font-size: 14px;
+      line-height: 1;
+    }}
+    .file-chip-remove:hover {{
+      color: #dc2626;
+    }}
+    .file-chip.uploading {{
+      opacity: 0.6;
+    }}
+    .file-chip.uploading::after {{
+      content: '';
+      width: 12px;
+      height: 12px;
+      border: 2px solid #94a3b8;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+    }}
+    @keyframes spin {{
+      to {{ transform: rotate(360deg); }}
+    }}
+    .msg-file-indicator {{
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      opacity: 0.7;
+      margin-top: 4px;
+    }}
+    .msg-file-indicator svg {{
+      width: 12px;
+      height: 12px;
+    }}
+
     /* ── Activity / Planning panel ────────────────────────────── */
     .activity-panel {{
       background: #f1f5f9;
@@ -2794,7 +3073,13 @@ def embed_chatbot_html(request, project_id):
   <div id="messages" class="chat-messages"></div>
   <div id="status" class="status"></div>
   <div class="chat-input-container">
+    <div id="filePreviewBar" class="file-preview-bar" style="display:none;"></div>
     <div class="chat-input">
+      <button id="attachBtn" class="file-attach-btn" title="Attach file" type="button" style="display:none;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
+        </svg>
+      </button>
       <textarea id="input" rows="1" placeholder="Type your message..."></textarea>
       <button id="sendBtn" title="Send message">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -2803,6 +3088,7 @@ def embed_chatbot_html(request, project_id):
         </svg>
       </button>
     </div>
+    <input type="file" id="fileInput" accept=".pdf,.txt,.doc,.docx,.md,.rtf" style="display:none;" />
   </div>
 </div>
 
@@ -2831,6 +3117,8 @@ def embed_chatbot_html(request, project_id):
     : {json.dumps(endpoint_url)};
   const STREAM_URL = ENDPOINT_URL.replace(/\\/$/, '') + '/stream/';
   const SUBMIT_INPUT_URL = ENDPOINT_URL.replace(/\\/$/, '') + '/submit-input/';
+  const UPLOAD_URL = ENDPOINT_URL.replace(/\\/$/, '') + '/upload-file/';
+  const FILE_UPLOADS_ENABLED = {json.dumps(file_uploads_enabled)};
   const INITIAL_GREETING = {json.dumps(initial_greeting)};
   const PRELOADED_HISTORY = {json.dumps(preloaded_history)};
   
@@ -3096,6 +3384,76 @@ def embed_chatbot_html(request, project_id):
     }});
     actions.appendChild(btn);
     bubble.appendChild(actions);
+  }}
+
+  // ── File upload ────────────────────────────────────────────
+  const attachBtn = document.getElementById('attachBtn');
+  const fileInput = document.getElementById('fileInput');
+  const filePreviewBar = document.getElementById('filePreviewBar');
+  let pendingFiles = [];
+
+  if (FILE_UPLOADS_ENABLED && attachBtn) {{
+    attachBtn.style.display = 'flex';
+    attachBtn.addEventListener('click', function() {{ fileInput.click(); }});
+    fileInput.addEventListener('change', function() {{
+      if (fileInput.files && fileInput.files[0]) {{
+        uploadFile(fileInput.files[0]);
+        fileInput.value = '';
+      }}
+    }});
+  }}
+
+  function _updatePreviewBar() {{
+    if (pendingFiles.length === 0) {{
+      filePreviewBar.style.display = 'none';
+      return;
+    }}
+    filePreviewBar.style.display = 'flex';
+    filePreviewBar.innerHTML = '';
+    pendingFiles.forEach(function(f) {{
+      const chip = document.createElement('div');
+      chip.className = 'file-chip' + (f.uploading ? ' uploading' : '');
+      chip.id = 'fchip_' + f._cid;
+      var nameSpan = '<span class="file-chip-name">' + f.filename.replace(/</g,'&lt;') + '</span>';
+      var removeBtn = f.uploading ? '' : '<button class="file-chip-remove" data-cid="' + f._cid + '">&times;</button>';
+      chip.innerHTML = nameSpan + removeBtn;
+      filePreviewBar.appendChild(chip);
+    }});
+    filePreviewBar.querySelectorAll('.file-chip-remove').forEach(function(btn) {{
+      btn.addEventListener('click', function() {{
+        var cid = btn.dataset.cid;
+        pendingFiles = pendingFiles.filter(function(f) {{ return f._cid !== cid; }});
+        _updatePreviewBar();
+      }});
+    }});
+  }}
+
+  async function uploadFile(file) {{
+    var cid = 'f' + Date.now();
+    var entry = {{ _cid: cid, filename: file.name, uploading: true }};
+    pendingFiles.push(entry);
+    _updatePreviewBar();
+
+    try {{
+      var formData = new FormData();
+      formData.append('file', file);
+      formData.append('session_id', sessionId);
+      var resp = await fetch(UPLOAD_URL, {{ method: 'POST', body: formData }});
+      var data = await resp.json();
+      if (!resp.ok) {{
+        throw new Error(data.error || 'Upload failed');
+      }}
+      entry.uploading = false;
+      entry.attachment_id = data.attachment_id;
+      entry.file_id = data.file_id;
+      entry.provider = data.provider;
+      _updatePreviewBar();
+    }} catch (e) {{
+      pendingFiles = pendingFiles.filter(function(f) {{ return f._cid !== cid; }});
+      _updatePreviewBar();
+      statusEl.textContent = 'Upload failed: ' + e.message;
+      setTimeout(function() {{ statusEl.textContent = ''; }}, 4000);
+    }}
   }}
 
   const messages = [];
@@ -3384,8 +3742,25 @@ def embed_chatbot_html(request, project_id):
     const text = inputEl.value.trim();
     if (!text || awaitingHumanInput) return;
 
+    // Show file indicator in user message if files are pending
+    var fileNames = pendingFiles.filter(function(f) {{ return !f.uploading; }}).map(function(f) {{ return f.filename; }});
     appendMessage('user', text);
+    if (fileNames.length > 0) {{
+      var lastMsg = messagesEl.querySelector('.msg.user:last-child .bubble');
+      if (lastMsg) {{
+        var ind = document.createElement('div');
+        ind.className = 'msg-file-indicator';
+        ind.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>' +
+          fileNames.map(function(n) {{ return '<span>' + n.replace(/</g,'&lt;') + '</span>'; }}).join(', ');
+        lastMsg.appendChild(ind);
+      }}
+    }}
     messages.push({{ role: 'user', content: text }});
+
+    // Collect file IDs and clear pending
+    var fileIds = pendingFiles.filter(function(f) {{ return f.attachment_id; }}).map(function(f) {{ return f.attachment_id; }});
+    pendingFiles = [];
+    _updatePreviewBar();
 
     inputEl.value = '';
     inputEl.style.height = 'auto';
@@ -3394,10 +3769,12 @@ def embed_chatbot_html(request, project_id):
     showThinkingIndicator();
 
     try {{
+      var payload = {{ user_query: text, session_id: sessionId }};
+      if (fileIds.length > 0) payload.file_ids = fileIds;
       const resp = await fetch(STREAM_URL, {{
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json' }},
-        body: JSON.stringify({{ user_query: text, session_id: sessionId }})
+        body: JSON.stringify(payload)
       }});
 
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
