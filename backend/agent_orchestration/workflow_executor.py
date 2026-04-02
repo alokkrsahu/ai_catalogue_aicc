@@ -285,7 +285,8 @@ class WorkflowExecutor:
                         parallel_results = await self._execute_nodes_in_parallel(
                             other_ready_nodes, workflow, graph_json, executed_nodes, conversation_history,
                             execution_record, messages, message_sequence, agents_involved,
-                            total_response_time, providers_used, project_id
+                            total_response_time, providers_used, project_id,
+                            deployment_context=deployment_context,
                         )
                         
                         # Update state from parallel execution results
@@ -645,18 +646,29 @@ class WorkflowExecutor:
                                     )
                             
                             # --- Chat file references (deployment chatbot uploads) ---
-                            if is_deployment and deployment_context and deployment_context.get('chat_file_references'):
+                            if is_deployment and deployment_context and node_type == 'AssistantAgent':
                                 _has_node_refs = (
                                     (isinstance(prompt_result, dict) and prompt_result.get('file_references')) if len(input_sources) > 1
                                     else (isinstance(prompt_result_single, dict) and prompt_result_single.get('file_references')) if 'prompt_result_single' in dir() else False
                                 )
-                                if not _has_node_refs and node_type == 'AssistantAgent':
+                                # Attach file API references
+                                if not _has_node_refs and deployment_context.get('chat_file_references'):
                                     _chat_refs = deployment_context['chat_file_references']
                                     _provider = node_data.get('llm_provider', 'openai').lower()
                                     logger.info(f"📎 CHAT FILES: Attaching {len(_chat_refs)} session files to {node_name} ({_provider})")
                                     llm_messages = self.chat_manager.format_messages_with_file_refs(
                                         llm_messages, _chat_refs, _provider
                                     )
+                                # Inject text-extracted attachments into last user message
+                                if deployment_context.get('chat_text_attachments'):
+                                    for _att in deployment_context['chat_text_attachments']:
+                                        _text_block = f"\n\n--- Attached Document: {_att['filename']} ---\n{_att['text']}\n--- End Document ---"
+                                        for _msg in reversed(llm_messages):
+                                            if _msg.get('role') == 'user':
+                                                if isinstance(_msg['content'], str):
+                                                    _msg['content'] += _text_block
+                                                break
+                                    logger.info(f"📎 CHAT TEXT: Injected {len(deployment_context['chat_text_attachments'])} text attachments into {node_name}")
 
                             # --- Tool Calling Mode (document tools, web search, and/or DocAware) ---
                             _synthesis_citations = []
@@ -1640,12 +1652,34 @@ class WorkflowExecutor:
                                 prompt_result_single.get('provider', 'openai')
                             )
                     
-                    # CRITICAL FIX: Use separate variable for LLM-formatted messages
-                    # These are for LLM API calls only, NOT for storage in messages_data
+                    # Chat file references (deployment chatbot uploads) — continue path
+                    _is_deployment = deployment_context is not None and deployment_context.get('is_deployment', False)
+                    if _is_deployment and deployment_context and node_type == 'AssistantAgent':
+                        _has_node_refs = (
+                            (isinstance(prompt_result, dict) and prompt_result.get('file_references')) if len(input_sources) > 1
+                            else (isinstance(prompt_result_single, dict) and prompt_result_single.get('file_references')) if 'prompt_result_single' in dir() else False
+                        )
+                        if not _has_node_refs and deployment_context.get('chat_file_references'):
+                            _chat_refs = deployment_context['chat_file_references']
+                            _provider = node_data.get('llm_provider', 'openai').lower()
+                            logger.info(f"📎 CHAT FILES (continue): Attaching {len(_chat_refs)} session files to {node_name} ({_provider})")
+                            llm_messages = self.chat_manager.format_messages_with_file_refs(
+                                llm_messages, _chat_refs, _provider
+                            )
+                        if deployment_context.get('chat_text_attachments'):
+                            for _att in deployment_context['chat_text_attachments']:
+                                _text_block = f"\n\n--- Attached Document: {_att['filename']} ---\n{_att['text']}\n--- End Document ---"
+                                for _msg in reversed(llm_messages):
+                                    if _msg.get('role') == 'user':
+                                        if isinstance(_msg['content'], str):
+                                            _msg['content'] += _text_block
+                                        break
+                            logger.info(f"📎 CHAT TEXT (continue): Injected {len(deployment_context['chat_text_attachments'])} text attachments into {node_name}")
+
                     # DEBUG: Log messages content for troubleshooting
                     messages_preview = f"{len(llm_messages)} messages" + (f", first message: {llm_messages[0].get('content', '')[:100]}..." if llm_messages and isinstance(llm_messages, list) else "")
                     logger.info(f"🔍 CONTINUE WORKFLOW: Agent {node_name} messages: {messages_preview}")
-                    
+
                     # Make LLM call with structured messages
                     start_time = timezone.now()
                     llm_response = await llm_provider.generate_response(messages=llm_messages)
@@ -2760,7 +2794,8 @@ class WorkflowExecutor:
     async def _execute_nodes_in_parallel(self, ready_nodes: List[Tuple[int, Dict[str, Any]]],
                                         workflow, graph_json, executed_nodes, conversation_history,
                                         execution_record, messages, message_sequence, agents_involved,
-                                        total_response_time, providers_used, project_id) -> List[Dict[str, Any]]:
+                                        total_response_time, providers_used, project_id,
+                                        deployment_context: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
         Execute multiple nodes in parallel using asyncio.gather
         
@@ -2903,8 +2938,30 @@ class WorkflowExecutor:
                             prompt_result_single.get('provider', 'openai')
                         )
                 
-                # CRITICAL FIX: Use separate variable for LLM-formatted messages
-                # These are for LLM API calls only, NOT for storage in messages_data
+                # Chat file references (deployment chatbot uploads) — parallel path
+                is_deployment = deployment_context is not None and deployment_context.get('is_deployment', False)
+                if is_deployment and deployment_context and node_type == 'AssistantAgent':
+                    _has_node_refs = (
+                        (isinstance(prompt_result, dict) and prompt_result.get('file_references')) if len(input_sources) > 1
+                        else (isinstance(prompt_result_single, dict) and prompt_result_single.get('file_references')) if 'prompt_result_single' in dir() else False
+                    )
+                    if not _has_node_refs and deployment_context.get('chat_file_references'):
+                        _chat_refs = deployment_context['chat_file_references']
+                        _provider = node_data.get('llm_provider', 'openai').lower()
+                        logger.info(f"📎 CHAT FILES (parallel): Attaching {len(_chat_refs)} session files to {node_name} ({_provider})")
+                        llm_messages = self.chat_manager.format_messages_with_file_refs(
+                            llm_messages, _chat_refs, _provider
+                        )
+                    if deployment_context.get('chat_text_attachments'):
+                        for _att in deployment_context['chat_text_attachments']:
+                            _text_block = f"\n\n--- Attached Document: {_att['filename']} ---\n{_att['text']}\n--- End Document ---"
+                            for _msg in reversed(llm_messages):
+                                if _msg.get('role') == 'user':
+                                    if isinstance(_msg['content'], str):
+                                        _msg['content'] += _text_block
+                                    break
+                        logger.info(f"📎 CHAT TEXT (parallel): Injected {len(deployment_context['chat_text_attachments'])} text attachments into {node_name}")
+
                 # Execute LLM call with structured messages
                 agent_response = await llm_provider.generate_response(messages=llm_messages)
                 

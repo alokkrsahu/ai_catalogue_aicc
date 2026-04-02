@@ -35,6 +35,7 @@ class WorkflowDeploymentExecutor:
         current_user_query: Optional[str] = None,
         event_callback=None,
         chat_file_references: Optional[list] = None,
+        chat_text_attachments: Optional[list] = None,
     ) -> Dict[str, Any]:
         """
         Execute a deployed workflow with full conversation history
@@ -98,6 +99,7 @@ class WorkflowDeploymentExecutor:
                     'current_user_query': current_user_query or '',
                     'session_id': session_id,
                     'chat_file_references': chat_file_references or [],
+                    'chat_text_attachments': chat_text_attachments or [],
                 }
                 
                 execution_result = await self.orchestrator.execute_workflow(

@@ -1080,20 +1080,29 @@ def public_chat_endpoint(request, project_id):
             else:
                 logger.info(f"🔄 DEPLOYMENT: Retrieved existing session {session_id[:8]} with {deployment_session.message_count} messages")
             
-            # Build file references from ALL session files (persist across messages)
+            # Build file references and text attachments from ALL session files
             chat_file_references = []
+            chat_text_attachments = []
             try:
                 session_files = list(DeploymentSessionFile.objects.filter(session=deployment_session))
                 for sf in session_files:
-                    chat_file_references.append({
-                        'file_id': sf.provider_file_id,
-                        'filename': sf.filename,
-                        'provider': sf.provider,
-                        'file_type': sf.mime_type,
-                        'file_size': sf.file_size,
-                    })
+                    if sf.provider_file_id:
+                        chat_file_references.append({
+                            'file_id': sf.provider_file_id,
+                            'filename': sf.filename,
+                            'provider': sf.provider,
+                            'file_type': sf.mime_type,
+                            'file_size': sf.file_size,
+                        })
+                    elif sf.extracted_text:
+                        chat_text_attachments.append({
+                            'filename': sf.filename,
+                            'text': sf.extracted_text,
+                        })
                 if chat_file_references:
-                    logger.info(f"📎 CHAT FILES: {len(chat_file_references)} session files for {session_id[:8]}")
+                    logger.info(f"📎 CHAT FILES: {len(chat_file_references)} file refs for {session_id[:8]}")
+                if chat_text_attachments:
+                    logger.info(f"📎 CHAT TEXT: {len(chat_text_attachments)} text attachments for {session_id[:8]}")
             except Exception as e:
                 logger.warning(f"⚠️ CHAT FILES: Failed to load session files: {e}")
 
@@ -1179,6 +1188,7 @@ def public_chat_endpoint(request, project_id):
                     execution_id,
                     current_user_query=user_query,
                     chat_file_references=chat_file_references,
+                    chat_text_attachments=chat_text_attachments,
                 )
             )
         except Exception as e:
@@ -1388,20 +1398,29 @@ def public_chat_endpoint_stream(request, project_id):
                         'timestamp': timezone.now().isoformat()
                     })
                 
-                # Build file references from ALL session files (persist across messages)
+                # Build file references and text attachments from ALL session files
                 chat_file_references = []
+                chat_text_attachments = []
                 try:
                     session_files = list(DeploymentSessionFile.objects.filter(session=deployment_session))
                     for sf in session_files:
-                        chat_file_references.append({
-                            'file_id': sf.provider_file_id,
-                            'filename': sf.filename,
-                            'provider': sf.provider,
-                            'file_type': sf.mime_type,
-                            'file_size': sf.file_size,
-                        })
+                        if sf.provider_file_id:
+                            chat_file_references.append({
+                                'file_id': sf.provider_file_id,
+                                'filename': sf.filename,
+                                'provider': sf.provider,
+                                'file_type': sf.mime_type,
+                                'file_size': sf.file_size,
+                            })
+                        elif sf.extracted_text:
+                            chat_text_attachments.append({
+                                'filename': sf.filename,
+                                'text': sf.extracted_text,
+                            })
                     if chat_file_references:
-                        logger.info(f"📎 CHAT FILES (stream): {len(chat_file_references)} session files for {session_id[:8]}")
+                        logger.info(f"📎 CHAT FILES (stream): {len(chat_file_references)} file refs for {session_id[:8]}")
+                    if chat_text_attachments:
+                        logger.info(f"📎 CHAT TEXT (stream): {len(chat_text_attachments)} text attachments for {session_id[:8]}")
                 except Exception as file_err:
                     logger.warning(f"⚠️ CHAT FILES: Failed to load session files: {file_err}")
 
@@ -1460,6 +1479,7 @@ def public_chat_endpoint_stream(request, project_id):
                             current_user_query=user_query,
                             event_callback=_emit_event,
                             chat_file_references=chat_file_references,
+                            chat_text_attachments=chat_text_attachments,
                         )
                     )
                 except Exception as exc:
@@ -2000,7 +2020,15 @@ def _get_deployment_llm_provider(workflow):
     return 'openai'
 
 
-CHAT_UPLOAD_ALLOWED_EXTENSIONS = {'.pdf', '.txt', '.doc', '.docx', '.md', '.rtf'}
+# Extensions supported by each provider's File API (uploaded as file references)
+CHAT_UPLOAD_FILE_API_EXTENSIONS = {
+    'openai': {'.pdf'},
+    'anthropic': {'.pdf', '.txt', '.png', '.jpg', '.jpeg', '.gif', '.webp'},
+    'google': {'.pdf', '.txt', '.doc', '.docx', '.md', '.rtf', '.png', '.jpg', '.jpeg'},
+}
+CHAT_UPLOAD_FILE_API_DEFAULT = {'.pdf'}
+# Extensions we can handle via server-side text extraction (fallback for unsupported File API types)
+CHAT_UPLOAD_TEXT_EXTRACTABLE = {'.docx', '.doc', '.txt', '.md', '.rtf', '.csv', '.xlsx', '.html'}
 CHAT_UPLOAD_MAX_SIZE = 50 * 1024 * 1024  # 50 MB (OpenAI limit, strictest)
 CHAT_UPLOAD_MAX_FILES_PER_SESSION = 10
 
@@ -2038,9 +2066,11 @@ def upload_chat_file(request, project_id):
         if not session_id:
             return JsonResponse({'error': 'session_id is required'}, status=400)
 
-        session = DeploymentSession.objects.filter(deployment=deployment, session_id=session_id).first()
-        if not session:
-            return JsonResponse({'error': 'Session not found'}, status=404)
+        session, _ = DeploymentSession.objects.get_or_create(
+            deployment=deployment,
+            session_id=session_id,
+            defaults={'conversation_history': [], 'message_count': 0, 'is_active': True}
+        )
 
         # Check per-session file limit
         from .models import DeploymentSessionFile
@@ -2049,6 +2079,10 @@ def upload_chat_file(request, project_id):
             return JsonResponse({
                 'error': f'Maximum {CHAT_UPLOAD_MAX_FILES_PER_SESSION} files per session'
             }, status=400)
+
+        # Determine LLM provider from workflow
+        workflow = deployment.workflow
+        provider = _get_deployment_llm_provider(workflow)
 
         # Validate file
         upload = request.FILES.get('file')
@@ -2059,9 +2093,14 @@ def upload_chat_file(request, project_id):
         ext = os.path.splitext(filename)[1].lower()
         mime_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
 
-        if ext not in CHAT_UPLOAD_ALLOWED_EXTENSIONS:
+        file_api_exts = CHAT_UPLOAD_FILE_API_EXTENSIONS.get(provider, CHAT_UPLOAD_FILE_API_DEFAULT)
+        use_file_api = ext in file_api_exts
+        use_text_extraction = ext in CHAT_UPLOAD_TEXT_EXTRACTABLE
+
+        if not use_file_api and not use_text_extraction:
+            all_supported = sorted(file_api_exts | CHAT_UPLOAD_TEXT_EXTRACTABLE)
             return JsonResponse({
-                'error': f'Unsupported file type: {ext}. Allowed: {", ".join(sorted(CHAT_UPLOAD_ALLOWED_EXTENSIONS))}'
+                'error': f'Unsupported file type: {ext}. Allowed: {", ".join(all_supported)}'
             }, status=400)
 
         if upload.size > CHAT_UPLOAD_MAX_SIZE:
@@ -2069,31 +2108,70 @@ def upload_chat_file(request, project_id):
                 'error': f'File too large ({upload.size // (1024*1024)}MB). Maximum: {CHAT_UPLOAD_MAX_SIZE // (1024*1024)}MB'
             }, status=400)
 
-        # Determine LLM provider from workflow
-        workflow = deployment.workflow
-        provider = _get_deployment_llm_provider(workflow)
-
         # Save to temp storage
         storage_path = default_storage.save(
             os.path.join('chat_uploads', str(project_id), session_id, f'{uuid.uuid4().hex}_{filename}'),
             upload,
         )
 
-        # Upload to LLM provider
-        from types import SimpleNamespace
-        pseudo_doc = SimpleNamespace(
-            file_path=storage_path,
-            file_size=upload.size,
-            file_extension=ext,
-            file_type=mime_type,
-            original_filename=filename,
-            document_id=None,
-        )
+        provider_file_id = ''
+        extracted_text = ''
 
-        from .llm_file_service import LLMFileUploadService
-        from asgiref.sync import async_to_sync
-        service = LLMFileUploadService(project)
-        result = async_to_sync(service._upload_to_provider)(pseudo_doc, provider)
+        if use_file_api:
+            # Path 1: Upload to LLM provider via File API
+            from types import SimpleNamespace
+            pseudo_doc = SimpleNamespace(
+                file_path=storage_path,
+                file_size=upload.size,
+                file_extension=ext,
+                file_type=mime_type,
+                original_filename=filename,
+                document_id=None,
+            )
+
+            from .llm_file_service import LLMFileUploadService
+            from asgiref.sync import async_to_sync
+            service = LLMFileUploadService(project)
+            result = async_to_sync(service._upload_to_provider)(pseudo_doc, provider)
+
+            if not result.get('file_id'):
+                try:
+                    if default_storage.exists(storage_path):
+                        default_storage.delete(storage_path)
+                except Exception:
+                    pass
+                return JsonResponse({
+                    'error': result.get('error', 'Upload to LLM provider failed'),
+                    'reason': result.get('reason'),
+                }, status=400)
+
+            provider_file_id = result['file_id']
+            logger.info(f"📎 CHAT UPLOAD (File API): {filename} ({upload.size} bytes) → {provider} file_id={provider_file_id[:20]}... (session {session_id[:8]})")
+        else:
+            # Path 2: Extract text server-side using DocumentProcessor
+            try:
+                from public_chatbot.document_processor import DocumentProcessor
+                processor = DocumentProcessor()
+                method_name = processor.SUPPORTED_FORMATS.get(ext)
+                if not method_name:
+                    raise ValueError(f'No processor for {ext}')
+                upload.seek(0)  # ensure file pointer at start
+                extracted_text = getattr(processor, method_name)(upload)
+                if not extracted_text or not extracted_text.strip():
+                    extracted_text = ''
+                    logger.warning(f"⚠️ CHAT UPLOAD: Text extraction returned empty for {filename}")
+                else:
+                    logger.info(f"📎 CHAT UPLOAD (text extraction): {filename} ({upload.size} bytes) → {len(extracted_text)} chars extracted (session {session_id[:8]})")
+            except Exception as extract_err:
+                logger.error(f"❌ CHAT UPLOAD: Text extraction failed for {filename}: {extract_err}")
+                try:
+                    if default_storage.exists(storage_path):
+                        default_storage.delete(storage_path)
+                except Exception:
+                    pass
+                return JsonResponse({
+                    'error': f'Failed to extract text from {filename}: {str(extract_err)[:200]}'
+                }, status=400)
 
         # Clean up temp storage
         try:
@@ -2102,12 +2180,6 @@ def upload_chat_file(request, project_id):
         except Exception:
             pass
 
-        if not result.get('file_id'):
-            return JsonResponse({
-                'error': result.get('error', 'Upload to LLM provider failed'),
-                'reason': result.get('reason'),
-            }, status=400)
-
         # Create session file record
         session_file = DeploymentSessionFile.objects.create(
             session=session,
@@ -2115,20 +2187,20 @@ def upload_chat_file(request, project_id):
             file_extension=ext,
             mime_type=mime_type,
             file_size=upload.size,
-            storage_path='',  # already cleaned up
+            storage_path='',
             provider=provider,
-            provider_file_id=result['file_id'],
+            provider_file_id=provider_file_id,
+            extracted_text=extracted_text,
         )
-
-        logger.info(f"📎 CHAT UPLOAD: {filename} ({upload.size} bytes) → {provider} file_id={result['file_id'][:20]}... (session {session_id[:8]})")
 
         response = JsonResponse({
             'attachment_id': str(session_file.id),
-            'file_id': result['file_id'],
+            'file_id': provider_file_id or 'text_extracted',
             'filename': filename,
             'provider': provider,
             'size': upload.size,
             'mime_type': mime_type,
+            'mode': 'file_api' if provider_file_id else 'text_extraction',
         }, status=201)
         _add_cors_headers(response, request)
         return response
@@ -3088,7 +3160,7 @@ def embed_chatbot_html(request, project_id):
         </svg>
       </button>
     </div>
-    <input type="file" id="fileInput" accept=".pdf,.txt,.doc,.docx,.md,.rtf" style="display:none;" />
+    <input type="file" id="fileInput" accept=".pdf,.txt,.doc,.docx,.md,.rtf,.csv,.xlsx" multiple style="display:none;" />
   </div>
 </div>
 
@@ -3396,8 +3468,10 @@ def embed_chatbot_html(request, project_id):
     attachBtn.style.display = 'flex';
     attachBtn.addEventListener('click', function() {{ fileInput.click(); }});
     fileInput.addEventListener('change', function() {{
-      if (fileInput.files && fileInput.files[0]) {{
-        uploadFile(fileInput.files[0]);
+      if (fileInput.files && fileInput.files.length > 0) {{
+        for (var i = 0; i < fileInput.files.length; i++) {{
+          uploadFile(fileInput.files[i]);
+        }}
         fileInput.value = '';
       }}
     }});

@@ -311,7 +311,8 @@ class DeploymentSessionFile(models.Model):
     file_size = models.BigIntegerField()
     storage_path = models.CharField(max_length=500, help_text='Path in default_storage')
     provider = models.CharField(max_length=20, help_text='LLM provider the file was uploaded to')
-    provider_file_id = models.CharField(max_length=500, help_text='File ID from the LLM provider API')
+    provider_file_id = models.CharField(max_length=500, blank=True, default='', help_text='File ID from the LLM provider API')
+    extracted_text = models.TextField(blank=True, default='', help_text='Extracted text for file types not supported by provider File API')
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
