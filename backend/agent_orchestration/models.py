@@ -64,13 +64,18 @@ class WorkflowDeployment(models.Model):
     )
     primary_color = models.CharField(
         max_length=7,
-        default='#78b2e8',
+        default='#ffffff',
         help_text='Primary color for header and user messages (hex format)'
     )
     secondary_color = models.CharField(
         max_length=7,
-        default='#3a6d98',
+        default='#ffffff',
         help_text='Secondary color for gradient effects (hex format)'
+    )
+    font_color = models.CharField(
+        max_length=7,
+        default='#000000',
+        help_text='Font color for chatbot text (hex format)'
     )
     logo_url = models.URLField(
         blank=True,

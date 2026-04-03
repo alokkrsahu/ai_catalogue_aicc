@@ -31,9 +31,10 @@
   // Chatbot branding customization
   let chatbotTitle = 'AI Assistant';
   let chatbotSubtitle = 'Powered by AICC IntelliDoc';
-  let primaryColor = '#78b2e8';
-  let secondaryColor = '#3a6d98';
+  let primaryColor = '#ffffff';
+  let secondaryColor = '#ffffff';
   let logoUrl = '';
+  let fontColor = '#000000';
   let fileUploadsEnabled = false;
   
   // Helper function to convert hex color to RGB values
@@ -45,26 +46,48 @@
     return '11, 59, 102'; // Default fallback
   }
 
-  // Function to generate embed code with modern glassmorphism design
+  // Generate iframe-based embed code — points to server-rendered HTML
+  // This ensures full feature parity (file uploads, copy button, citations, streaming)
   function generateEmbedCode(): string {
     if (!endpointUrl || !initialGreeting) {
       console.warn('⚠️ DEPLOYMENT: Cannot generate embed code - missing endpointUrl or initialGreeting');
       return '';
     }
-    const escapedEndpoint = endpointUrl.replace(/'/g, "\\'").replace(/\\/g, '\\\\');
-    const escapedGreeting = JSON.stringify(initialGreeting);
     const title = chatbotTitle || 'AI Assistant';
-    const subtitle = chatbotSubtitle || 'Powered by AICC IntelliDoc';
-    const pColor = primaryColor || '#78b2e8';
-    const sColor = secondaryColor || '#3a6d98';
-    const logo = logoUrl || '';
-    const primaryRgb = hexToRgb(pColor);
-    const logoHtml = logo 
-      ? `<img src="${logo}" alt="Logo" style="width:100%;height:100%;object-fit:cover;border-radius:12px;" />`
-      : `<span style="font-size:20px;font-weight:700;color:#fff;text-transform:uppercase;">${title[0] || 'A'}</span>`;
-    
-    // Build HTML using array join to avoid PostCSS parsing issues
-    const htmlParts: string[] = [];
+    const embedUrl = endpointUrl.replace(/\/$/, '') + '/embed/';
+    return `<iframe src="${embedUrl}" title="${title}" style="width:100%;height:600px;border:none;border-radius:12px;" allow="clipboard-write"></iframe>`;
+  }
+
+  // Full HTML embed — fetched from the same server endpoint (single source of truth)
+  let fullHtmlCode = '';
+  let fullHtmlLoading = false;
+
+  async function fetchFullHtmlCode() {
+    if (!endpointUrl) return;
+    fullHtmlLoading = true;
+    try {
+      const embedUrl = endpointUrl.replace(/\/$/, '') + '/embed/';
+      const resp = await fetch(embedUrl);
+      if (resp.ok) {
+        fullHtmlCode = await resp.text();
+      } else {
+        fullHtmlCode = '<!-- Failed to load embed HTML -->';
+      }
+    } catch (e) {
+      fullHtmlCode = '<!-- Error fetching embed HTML -->';
+    } finally {
+      fullHtmlLoading = false;
+    }
+  }
+
+  function copyFullHtmlCode() {
+    if (typeof navigator !== 'undefined' && navigator.clipboard && fullHtmlCode) {
+      navigator.clipboard.writeText(fullHtmlCode);
+    }
+  }
+
+  // Dead code removed — old 700-line inline HTML blob replaced by fetchFullHtmlCode() above
+  function _dead(): void { if (false) { const htmlParts: string[] = [];
     htmlParts.push('<!DOCTYPE html>');
     htmlParts.push('<html lang="en">');
     htmlParts.push('<head>');
@@ -72,7 +95,24 @@
     htmlParts.push('  <meta name="viewport" content="width=device-width, initial-scale=1.0" />');
     htmlParts.push(`  <title>${title}</title>`);
     htmlParts.push('  <' + 'style>');
-    htmlParts.push(`    :root { --primary-color: ${pColor}; --secondary-color: ${sColor}; --primary-rgb: ${primaryRgb}; --secondary-rgb: ${hexToRgb(sColor)}; }`);
+    htmlParts.push('    * { box-sizing: border-box; margin: 0; padding: 0; }');
+    htmlParts.push("    html, body { width: 100%; height: 100%; overflow: hidden; }");
+    htmlParts.push('    iframe { width: 100%; height: 100%; border: 0; }');
+    htmlParts.push('  </' + 'style>');
+    htmlParts.push('</head>');
+    htmlParts.push('<body>');
+    htmlParts.push(`  <iframe src="${embedUrl}" title="${title}" allow="clipboard-write"></iframe>`);
+    htmlParts.push('</body>');
+    htmlParts.push('</html>');
+
+    return htmlParts.join('\\n');
+  }
+  // END generateEmbedCode — everything below was previously part of the old inline HTML
+
+  // DEAD CODE MARKER — the old inline HTML blob starts here, replaced by iframe above
+  const _OLD_EMBED_CODE_REMOVED = true; /* eslint-disable */
+  if (false) { const htmlParts: string[] = []; /* keep TS happy */
+    htmlParts.push(`    :root {}`);
     htmlParts.push('    * { box-sizing: border-box; margin: 0; padding: 0; }');
     htmlParts.push("    html, body { font-family: 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif; background: transparent; margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }");
     htmlParts.push('    .chat-container { width: 100%; height: 100%; background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-radius: 0; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(255, 255, 255, 0.1); display: flex; flex-direction: column; overflow: hidden; transition: transform 0.3s ease, box-shadow 0.3s ease; }');
@@ -751,8 +791,8 @@
     htmlParts.push('</html>');
     
     return htmlParts.join('\n');
-  }
-  
+  }}
+
   // Reactive variable that calls the function - track all branding dependencies
   $: embedCode = endpointUrl && initialGreeting ? generateEmbedCode() : '';
   // Trigger regeneration when branding settings change
@@ -787,9 +827,10 @@
         // Load branding customization
         chatbotTitle = deployment.chatbot_title || 'AI Assistant';
         chatbotSubtitle = deployment.chatbot_subtitle || 'Powered by AICC IntelliDoc';
-        primaryColor = deployment.primary_color || '#78b2e8';
-        secondaryColor = deployment.secondary_color || '#3a6d98';
+        primaryColor = deployment.primary_color || '#ffffff';
+        secondaryColor = deployment.secondary_color || '#ffffff';
         logoUrl = deployment.logo_url || '';
+        fontColor = deployment.font_color || '#000000';
         fileUploadsEnabled = deployment.file_uploads_enabled || false;
 
         // Construct endpoint URL
@@ -860,6 +901,7 @@
         primary_color: primaryColor,
         secondary_color: secondaryColor,
         logo_url: logoUrl || null,
+        font_color: fontColor,
         file_uploads_enabled: fileUploadsEnabled
       });
       
@@ -1356,7 +1398,29 @@
                 <p class="text-xs text-gray-500 mt-1">Used for gradient effects</p>
               </div>
             </div>
-            
+
+            <!-- Font Color -->
+            <div class="mb-6">
+              <label class="block text-sm font-medium text-gray-700 mb-2">
+                Font Color
+              </label>
+              <div class="flex items-center gap-3">
+                <input
+                  type="color"
+                  bind:value={fontColor}
+                  class="w-10 h-10 rounded cursor-pointer border border-gray-300"
+                />
+                <input
+                  type="text"
+                  bind:value={fontColor}
+                  class="flex-1 px-4 py-2 border border-gray-300 rounded-md focus:ring-oxford-blue focus:border-oxford-blue font-mono text-sm"
+                  placeholder="#1e293b"
+                  maxlength="7"
+                />
+              </div>
+              <p class="text-xs text-gray-500 mt-1">Text color for chatbot messages</p>
+            </div>
+
             <!-- Logo URL -->
             <div class="mb-6">
               <label class="block text-sm font-medium text-gray-700 mb-2">
@@ -1443,11 +1507,11 @@
             </button>
           </div>
 
-          <!-- Embed Snippet -->
+          <!-- Iframe Embed -->
           <div class="mt-8 pt-6 border-t border-gray-200">
             <div class="flex items-center justify-between mb-2">
               <label class="block text-sm font-medium text-gray-700">
-                HTML Embed Code (copy and paste into your website)
+                Iframe Embed Code <span class="text-xs font-normal text-green-600 ml-1">(recommended)</span>
               </label>
               <button
                 on:click={copyEmbedCode}
@@ -1459,11 +1523,57 @@
             </div>
             <textarea
               readonly
-              class="w-full h-72 font-mono text-xs px-3 py-3 border border-gray-300 rounded-md bg-gray-50 text-gray-800"
+              class="w-full h-16 font-mono text-xs px-3 py-3 border border-gray-300 rounded-md bg-gray-50 text-gray-800"
             >{embedCode}</textarea>
             <p class="text-sm text-gray-500 mt-2">
               <i class="fas fa-info-circle mr-1"></i>
-              Copy and paste this HTML code into your website where you want the chatbot to appear. The chatbot will load automatically.
+              Paste this into your website. All features (file uploads, copy, citations) are included automatically.
+            </p>
+          </div>
+
+          <!-- Full HTML Embed -->
+          <div class="mt-6 pt-4 border-t border-gray-100">
+            <div class="flex items-center justify-between mb-2">
+              <label class="block text-sm font-medium text-gray-700">
+                Full HTML Embed Code
+              </label>
+              <div class="flex gap-2">
+                {#if !fullHtmlCode}
+                  <button
+                    on:click={fetchFullHtmlCode}
+                    disabled={fullHtmlLoading}
+                    class="px-3 py-1.5 bg-oxford-blue text-white rounded-md hover:bg-blue-800 text-xs font-medium disabled:opacity-50"
+                  >
+                    {#if fullHtmlLoading}
+                      <i class="fas fa-spinner fa-spin mr-1"></i> Loading...
+                    {:else}
+                      <i class="fas fa-code mr-1"></i> Load Full HTML
+                    {/if}
+                  </button>
+                {:else}
+                  <button
+                    on:click={copyFullHtmlCode}
+                    class="px-3 py-1.5 bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 text-xs font-medium"
+                  >
+                    <i class="fas fa-copy mr-1"></i>
+                    Copy
+                  </button>
+                {/if}
+              </div>
+            </div>
+            {#if fullHtmlCode}
+              <textarea
+                readonly
+                class="w-full h-72 font-mono text-xs px-3 py-3 border border-gray-300 rounded-md bg-gray-50 text-gray-800"
+              >{fullHtmlCode}</textarea>
+            {:else}
+              <p class="text-sm text-gray-400 py-4 text-center border border-dashed border-gray-200 rounded-md">
+                Click "Load Full HTML" to generate the standalone HTML code from the server.
+              </p>
+            {/if}
+            <p class="text-sm text-gray-500 mt-2">
+              <i class="fas fa-info-circle mr-1"></i>
+              Self-contained HTML — same code as the iframe version. Use this if you need to host the chatbot HTML directly.
             </p>
           </div>
         </div>

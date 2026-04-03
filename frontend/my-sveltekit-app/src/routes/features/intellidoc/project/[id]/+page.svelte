@@ -2463,7 +2463,7 @@
                 </div>
                 <div class="min-w-0">
                   <h2 class="font-semibold text-white text-sm leading-tight truncate">
-                    {project?.name || 'Project'} <span class="font-normal text-white/60">/</span> Chatbot
+                    {project?.name || 'Project'} <span class="font-normal text-white/60">/</span> {deployment?.chatbot_title || 'AI Assistant'}
                   </h2>
                 </div>
               </div>
@@ -2487,10 +2487,10 @@
               <div>
                 <h2 class="text-2xl font-bold text-gray-900 flex items-center">
                   <i class="fas fa-comments mr-3 text-oxford-blue"></i>
-                  Chatbot
+                  {deployment?.chatbot_title || 'AI Assistant'}
                 </h2>
                 <p class="text-gray-600 mt-2">
-                  Chat with this workflow using the same assistant your end-users see.
+                  {deployment?.chatbot_subtitle || 'Chat with this workflow using the same assistant your end-users see.'}
                 </p>
               </div>
               <div class="flex items-center gap-3 flex-wrap">
@@ -2584,7 +2584,7 @@
               {#key activeChatbotSessionId}
                 <iframe
                   title="In-App Chatbot"
-                  src={`/api/workflow-deploy/${projectId}/embed/${activeChatbotSessionId ? `?session_id=${activeChatbotSessionId}` : ''}`}
+                  src={`/api/workflow-deploy/${projectId}/embed/?hide_header=1${activeChatbotSessionId ? `&session_id=${activeChatbotSessionId}` : ''}`}
                   class="w-full h-full flex-1 min-h-0 border-0"
                   loading="lazy"
                   referrerpolicy="no-referrer-when-downgrade"

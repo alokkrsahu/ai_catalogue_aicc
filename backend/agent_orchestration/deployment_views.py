@@ -250,8 +250,9 @@ class DeploymentViewSet(viewsets.ViewSet):
                     # Chatbot branding customization
                     'chatbot_title': getattr(deployment, 'chatbot_title', 'AI Assistant'),
                     'chatbot_subtitle': getattr(deployment, 'chatbot_subtitle', 'Powered by AICC IntelliDoc'),
-                    'primary_color': getattr(deployment, 'primary_color', '#78b2e8'),
-                    'secondary_color': getattr(deployment, 'secondary_color', '#3a6d98'),
+                    'primary_color': getattr(deployment, 'primary_color', '#ffffff'),
+                    'secondary_color': getattr(deployment, 'secondary_color', '#ffffff'),
+                    'font_color': getattr(deployment, 'font_color', '#000000'),
                     'logo_url': getattr(deployment, 'logo_url', None),
                     'file_uploads_enabled': getattr(deployment, 'file_uploads_enabled', False),
                     'created_at': deployment.created_at.isoformat(),
@@ -303,8 +304,9 @@ class DeploymentViewSet(viewsets.ViewSet):
                     # Chatbot branding customization
                     'chatbot_title': request.data.get('chatbot_title', 'AI Assistant'),
                     'chatbot_subtitle': request.data.get('chatbot_subtitle', 'Powered by AICC IntelliDoc'),
-                    'primary_color': request.data.get('primary_color', '#78b2e8'),
-                    'secondary_color': request.data.get('secondary_color', '#3a6d98'),
+                    'primary_color': request.data.get('primary_color', '#ffffff'),
+                    'secondary_color': request.data.get('secondary_color', '#ffffff'),
+                    'font_color': request.data.get('font_color', '#000000'),
                     'logo_url': request.data.get('logo_url', None),
                     'file_uploads_enabled': request.data.get('file_uploads_enabled', False),
                 }
@@ -330,6 +332,8 @@ class DeploymentViewSet(viewsets.ViewSet):
                     deployment.primary_color = request.data['primary_color']
                 if 'secondary_color' in request.data:
                     deployment.secondary_color = request.data['secondary_color']
+                if 'font_color' in request.data:
+                    deployment.font_color = request.data['font_color']
                 if 'logo_url' in request.data:
                     deployment.logo_url = request.data['logo_url']
                 if 'file_uploads_enabled' in request.data:
@@ -349,8 +353,9 @@ class DeploymentViewSet(viewsets.ViewSet):
                 # Chatbot branding customization
                 'chatbot_title': getattr(deployment, 'chatbot_title', 'AI Assistant'),
                 'chatbot_subtitle': getattr(deployment, 'chatbot_subtitle', 'Powered by AICC IntelliDoc'),
-                'primary_color': getattr(deployment, 'primary_color', '#78b2e8'),
-                'secondary_color': getattr(deployment, 'secondary_color', '#3a6d98'),
+                'primary_color': getattr(deployment, 'primary_color', '#ffffff'),
+                'secondary_color': getattr(deployment, 'secondary_color', '#ffffff'),
+                'font_color': getattr(deployment, 'font_color', '#000000'),
                 'logo_url': getattr(deployment, 'logo_url', None),
                 'file_uploads_enabled': getattr(deployment, 'file_uploads_enabled', False),
                 'message': 'Deployment created successfully' if created else 'Deployment updated successfully'
@@ -1094,7 +1099,7 @@ def public_chat_endpoint(request, project_id):
                             'file_type': sf.mime_type,
                             'file_size': sf.file_size,
                         })
-                    elif sf.extracted_text:
+                    if sf.extracted_text:
                         chat_text_attachments.append({
                             'filename': sf.filename,
                             'text': sf.extracted_text,
@@ -1412,7 +1417,7 @@ def public_chat_endpoint_stream(request, project_id):
                                 'file_type': sf.mime_type,
                                 'file_size': sf.file_size,
                             })
-                        elif sf.extracted_text:
+                        if sf.extracted_text:
                             chat_text_attachments.append({
                                 'filename': sf.filename,
                                 'text': sf.extracted_text,
@@ -2072,8 +2077,29 @@ def upload_chat_file(request, project_id):
             defaults={'conversation_history': [], 'message_count': 0, 'is_active': True}
         )
 
-        # Check per-session file limit
+        # Check per-session file limit and deduplication
         from .models import DeploymentSessionFile
+
+        # Deduplicate: if same filename already exists in session, return existing
+        upload_peek = request.FILES.get('file')
+        if upload_peek:
+            existing_file = DeploymentSessionFile.objects.filter(
+                session=session, filename__iexact=upload_peek.name
+            ).first()
+            if existing_file:
+                response = JsonResponse({
+                    'attachment_id': str(existing_file.id),
+                    'file_id': existing_file.provider_file_id or 'text_extracted',
+                    'filename': existing_file.filename,
+                    'provider': existing_file.provider,
+                    'size': existing_file.file_size,
+                    'mime_type': existing_file.mime_type,
+                    'mode': 'file_api' if existing_file.provider_file_id else 'text_extraction',
+                    'deduplicated': True,
+                }, status=200)
+                _add_cors_headers(response, request)
+                return response
+
         existing_count = DeploymentSessionFile.objects.filter(session=session).count()
         if existing_count >= CHAT_UPLOAD_MAX_FILES_PER_SESSION:
             return JsonResponse({
@@ -2089,8 +2115,11 @@ def upload_chat_file(request, project_id):
         if not upload:
             return JsonResponse({'error': 'No file provided'}, status=400)
 
-        filename = upload.name
-        ext = os.path.splitext(filename)[1].lower()
+        # Normalize filename extension to lowercase (OpenAI rejects .PDF but accepts .pdf)
+        raw_name = upload.name
+        name_base, name_ext = os.path.splitext(raw_name)
+        filename = name_base + name_ext.lower()
+        ext = name_ext.lower()
         mime_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
 
         file_api_exts = CHAT_UPLOAD_FILE_API_EXTENSIONS.get(provider, CHAT_UPLOAD_FILE_API_DEFAULT)
@@ -2108,17 +2137,33 @@ def upload_chat_file(request, project_id):
                 'error': f'File too large ({upload.size // (1024*1024)}MB). Maximum: {CHAT_UPLOAD_MAX_SIZE // (1024*1024)}MB'
             }, status=400)
 
-        # Save to temp storage
+        provider_file_id = ''
+        extracted_text = ''
+
+        # Always extract text FIRST (before default_storage.save moves the temp file)
+        from public_chatbot.document_processor import DocumentProcessor
+        _dp = DocumentProcessor()
+        _dp_method = _dp.SUPPORTED_FORMATS.get(ext)
+        if _dp_method:
+            try:
+                upload.seek(0)
+                extracted_text = getattr(_dp, _dp_method)(upload) or ''
+                if extracted_text.strip():
+                    logger.info(f"📎 CHAT UPLOAD (text): {filename} → {len(extracted_text)} chars extracted")
+            except Exception as _te:
+                logger.warning(f"⚠️ CHAT UPLOAD: Text extraction failed for {filename}: {_te}")
+                extracted_text = ''
+
+        # Save to storage (this moves the temp file — must happen after text extraction)
+        upload.seek(0)
         storage_path = default_storage.save(
             os.path.join('chat_uploads', str(project_id), session_id, f'{uuid.uuid4().hex}_{filename}'),
             upload,
         )
 
-        provider_file_id = ''
-        extracted_text = ''
-
         if use_file_api:
-            # Path 1: Upload to LLM provider via File API
+            # Also upload to LLM provider via File API (used when no tool-calling)
+            # Reuse the storage_path from the initial save (don't save twice — temp file is already moved)
             from types import SimpleNamespace
             pseudo_doc = SimpleNamespace(
                 file_path=storage_path,
@@ -2134,44 +2179,21 @@ def upload_chat_file(request, project_id):
             service = LLMFileUploadService(project)
             result = async_to_sync(service._upload_to_provider)(pseudo_doc, provider)
 
-            if not result.get('file_id'):
-                try:
-                    if default_storage.exists(storage_path):
-                        default_storage.delete(storage_path)
-                except Exception:
-                    pass
-                return JsonResponse({
-                    'error': result.get('error', 'Upload to LLM provider failed'),
-                    'reason': result.get('reason'),
-                }, status=400)
+            if result.get('file_id'):
+                provider_file_id = result['file_id']
+                logger.info(f"📎 CHAT UPLOAD (File API): {filename} ({upload.size} bytes) → {provider} file_id={provider_file_id[:20]}... (session {session_id[:8]})")
+            else:
+                logger.warning(f"⚠️ CHAT UPLOAD: File API upload failed for {filename}, text extraction available as fallback")
 
-            provider_file_id = result['file_id']
-            logger.info(f"📎 CHAT UPLOAD (File API): {filename} ({upload.size} bytes) → {provider} file_id={provider_file_id[:20]}... (session {session_id[:8]})")
-        else:
-            # Path 2: Extract text server-side using DocumentProcessor
+        if not provider_file_id and not extracted_text:
             try:
-                from public_chatbot.document_processor import DocumentProcessor
-                processor = DocumentProcessor()
-                method_name = processor.SUPPORTED_FORMATS.get(ext)
-                if not method_name:
-                    raise ValueError(f'No processor for {ext}')
-                upload.seek(0)  # ensure file pointer at start
-                extracted_text = getattr(processor, method_name)(upload)
-                if not extracted_text or not extracted_text.strip():
-                    extracted_text = ''
-                    logger.warning(f"⚠️ CHAT UPLOAD: Text extraction returned empty for {filename}")
-                else:
-                    logger.info(f"📎 CHAT UPLOAD (text extraction): {filename} ({upload.size} bytes) → {len(extracted_text)} chars extracted (session {session_id[:8]})")
-            except Exception as extract_err:
-                logger.error(f"❌ CHAT UPLOAD: Text extraction failed for {filename}: {extract_err}")
-                try:
-                    if default_storage.exists(storage_path):
-                        default_storage.delete(storage_path)
-                except Exception:
-                    pass
-                return JsonResponse({
-                    'error': f'Failed to extract text from {filename}: {str(extract_err)[:200]}'
-                }, status=400)
+                if default_storage.exists(storage_path):
+                    default_storage.delete(storage_path)
+            except Exception:
+                pass
+            return JsonResponse({
+                'error': f'Could not process {filename} — no text could be extracted'
+            }, status=400)
 
         # Clean up temp storage
         try:
@@ -2248,6 +2270,9 @@ def embed_chatbot_html(request, project_id):
         endpoint_url = f"{base_url}{deployment.endpoint_path}"
         initial_greeting = getattr(deployment, 'initial_greeting', 'Hi! I am your AI assistant.')
 
+        # Hide header when embedded inside in-app wrapper (avoids double header)
+        hide_header = request.GET.get('hide_header', '') == '1'
+
         # Server-side preload: inject conversation history so the iframe doesn't need auth
         preloaded_history = []
         session_id_param = request.GET.get('session_id', '').strip()
@@ -2264,8 +2289,9 @@ def embed_chatbot_html(request, project_id):
         # Get branding customization with defaults
         chatbot_title = getattr(deployment, 'chatbot_title', 'AI Assistant')
         chatbot_subtitle = getattr(deployment, 'chatbot_subtitle', 'Powered by AICC IntelliDoc')
-        primary_color = getattr(deployment, 'primary_color', '#78b2e8')
-        secondary_color = getattr(deployment, 'secondary_color', '#3a6d98')
+        primary_color = getattr(deployment, 'primary_color', '#ffffff')
+        secondary_color = getattr(deployment, 'secondary_color', '#ffffff')
+        font_color = getattr(deployment, 'font_color', '#000000')
         logo_url = getattr(deployment, 'logo_url', None) or ''
         file_uploads_enabled = getattr(deployment, 'file_uploads_enabled', False)
 
@@ -2280,8 +2306,9 @@ def embed_chatbot_html(request, project_id):
     :root {{
       --primary-color: {primary_color};
       --secondary-color: {secondary_color};
-      --primary-rgb: {_embed_hex_to_rgb_csv(primary_color, '120, 178, 232')};
-      --secondary-rgb: {_embed_hex_to_rgb_csv(secondary_color, '58, 109, 152')};
+      --font-color: {font_color};
+      --primary-rgb: {_embed_hex_to_rgb_csv(primary_color, '255, 255, 255')};
+      --secondary-rgb: {_embed_hex_to_rgb_csv(secondary_color, '255, 255, 255')};
     }}
     
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -2320,6 +2347,7 @@ def embed_chatbot_html(request, project_id):
     }}
     
     .chat-header {{
+      {'display: none;' if hide_header else ''}
       padding: 20px 24px;
       background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
       color: #fff;
@@ -2474,7 +2502,7 @@ def embed_chatbot_html(request, project_id):
     
     .msg.assistant .bubble {{
       background: #ffffff;
-      color: #1e293b;
+      color: var(--font-color, #1e293b);
       border: 1px solid rgba(0, 0, 0, 0.06);
       border-bottom-left-radius: 6px;
     }}

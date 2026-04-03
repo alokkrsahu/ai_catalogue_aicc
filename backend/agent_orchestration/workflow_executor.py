@@ -646,13 +646,19 @@ class WorkflowExecutor:
                                     )
                             
                             # --- Chat file references (deployment chatbot uploads) ---
-                            if is_deployment and deployment_context and node_type == 'AssistantAgent':
-                                _has_node_refs = (
-                                    (isinstance(prompt_result, dict) and prompt_result.get('file_references')) if len(input_sources) > 1
-                                    else (isinstance(prompt_result_single, dict) and prompt_result_single.get('file_references')) if 'prompt_result_single' in dir() else False
-                                )
-                                # Attach file API references
-                                if not _has_node_refs and deployment_context.get('chat_file_references'):
+                            # Determine if this agent uses tool-calling (file refs conflict with tool calls in some providers)
+                            _uses_tool_calling = bool(node_data.get('doc_tool_calling'))
+                            _ws_handler_check = getattr(self.chat_manager, 'websearch_handler', None)
+                            if _ws_handler_check and _ws_handler_check.is_websearch_enabled(node) and _ws_handler_check.get_websearch_mode(node) != 'urls':
+                                _uses_tool_calling = True
+                            _da_handler_check = getattr(self.chat_manager, 'docaware_handler', None)
+                            if _da_handler_check and _da_handler_check.is_docaware_enabled(node):
+                                _uses_tool_calling = True
+
+                            if is_deployment and deployment_context:
+                                # Attach file API references to ALL agents (merged with project refs)
+                                # Skip for tool-calling mode (file refs + tool calls conflict in OpenAI)
+                                if not _uses_tool_calling and deployment_context.get('chat_file_references'):
                                     _chat_refs = deployment_context['chat_file_references']
                                     _provider = node_data.get('llm_provider', 'openai').lower()
                                     logger.info(f"📎 CHAT FILES: Attaching {len(_chat_refs)} session files to {node_name} ({_provider})")
@@ -667,6 +673,11 @@ class WorkflowExecutor:
                                             if _msg.get('role') == 'user':
                                                 if isinstance(_msg['content'], str):
                                                     _msg['content'] += _text_block
+                                                elif isinstance(_msg['content'], list):
+                                                    for _part in _msg['content']:
+                                                        if isinstance(_part, dict) and _part.get('type') == 'text':
+                                                            _part['text'] += _text_block
+                                                            break
                                                 break
                                     logger.info(f"📎 CHAT TEXT: Injected {len(deployment_context['chat_text_attachments'])} text attachments into {node_name}")
 
@@ -678,7 +689,30 @@ class WorkflowExecutor:
                             _ws_needs_tool_loop = _ws_enabled and _ws_handler.get_websearch_mode(node) != 'urls'
                             _da_handler = getattr(self.chat_manager, 'docaware_handler', None)
                             _da_enabled = _da_handler and _da_handler.is_docaware_enabled(node)
-                            if node_data.get('doc_tool_calling') or _ws_needs_tool_loop or _da_enabled:
+                            # Bypass: skip doc tool loop when chat uploads are the only content
+                            # (no project docs selected → info tools return ALL project docs, confusing the LLM)
+                            _doc_selected = node_data.get('doc_tool_calling_documents')
+                            _no_project_docs = isinstance(_doc_selected, list) and len(_doc_selected) == 0
+                            _has_chat_text = bool(
+                                is_deployment and deployment_context
+                                and deployment_context.get('chat_text_attachments')
+                            )
+                            _skip_doc_tool_for_chat_upload = (
+                                node_data.get('doc_tool_calling')
+                                and _no_project_docs
+                                and _has_chat_text
+                                and not _ws_needs_tool_loop
+                                and not _da_enabled
+                            )
+                            if _skip_doc_tool_for_chat_upload:
+                                logger.info(
+                                    f"⏭️ DOC TOOL BYPASS: Skipping tool loop for {node_name} — "
+                                    f"no project docs selected, "
+                                    f"{len(deployment_context.get('chat_text_attachments', []))} "
+                                    f"chat text attachment(s) already in context"
+                                )
+
+                            if (node_data.get('doc_tool_calling') or _ws_needs_tool_loop or _da_enabled) and not _skip_doc_tool_for_chat_upload:
                                 agent_response_text, _synthesis_citations = await self._execute_doc_tool_calling(
                                     node=node,
                                     node_name=node_name,
@@ -1654,12 +1688,8 @@ class WorkflowExecutor:
                     
                     # Chat file references (deployment chatbot uploads) — continue path
                     _is_deployment = deployment_context is not None and deployment_context.get('is_deployment', False)
-                    if _is_deployment and deployment_context and node_type == 'AssistantAgent':
-                        _has_node_refs = (
-                            (isinstance(prompt_result, dict) and prompt_result.get('file_references')) if len(input_sources) > 1
-                            else (isinstance(prompt_result_single, dict) and prompt_result_single.get('file_references')) if 'prompt_result_single' in dir() else False
-                        )
-                        if not _has_node_refs and deployment_context.get('chat_file_references'):
+                    if _is_deployment and deployment_context:
+                        if deployment_context.get('chat_file_references'):
                             _chat_refs = deployment_context['chat_file_references']
                             _provider = node_data.get('llm_provider', 'openai').lower()
                             logger.info(f"📎 CHAT FILES (continue): Attaching {len(_chat_refs)} session files to {node_name} ({_provider})")
@@ -1673,6 +1703,11 @@ class WorkflowExecutor:
                                     if _msg.get('role') == 'user':
                                         if isinstance(_msg['content'], str):
                                             _msg['content'] += _text_block
+                                        elif isinstance(_msg['content'], list):
+                                            for _part in _msg['content']:
+                                                if isinstance(_part, dict) and _part.get('type') == 'text':
+                                                    _part['text'] += _text_block
+                                                    break
                                         break
                             logger.info(f"📎 CHAT TEXT (continue): Injected {len(deployment_context['chat_text_attachments'])} text attachments into {node_name}")
 
@@ -2940,12 +2975,8 @@ class WorkflowExecutor:
                 
                 # Chat file references (deployment chatbot uploads) — parallel path
                 is_deployment = deployment_context is not None and deployment_context.get('is_deployment', False)
-                if is_deployment and deployment_context and node_type == 'AssistantAgent':
-                    _has_node_refs = (
-                        (isinstance(prompt_result, dict) and prompt_result.get('file_references')) if len(input_sources) > 1
-                        else (isinstance(prompt_result_single, dict) and prompt_result_single.get('file_references')) if 'prompt_result_single' in dir() else False
-                    )
-                    if not _has_node_refs and deployment_context.get('chat_file_references'):
+                if is_deployment and deployment_context:
+                    if deployment_context.get('chat_file_references'):
                         _chat_refs = deployment_context['chat_file_references']
                         _provider = node_data.get('llm_provider', 'openai').lower()
                         logger.info(f"📎 CHAT FILES (parallel): Attaching {len(_chat_refs)} session files to {node_name} ({_provider})")
@@ -2959,6 +2990,11 @@ class WorkflowExecutor:
                                 if _msg.get('role') == 'user':
                                     if isinstance(_msg['content'], str):
                                         _msg['content'] += _text_block
+                                    elif isinstance(_msg['content'], list):
+                                        for _part in _msg['content']:
+                                            if isinstance(_part, dict) and _part.get('type') == 'text':
+                                                _part['text'] += _text_block
+                                                break
                                     break
                         logger.info(f"📎 CHAT TEXT (parallel): Injected {len(deployment_context['chat_text_attachments'])} text attachments into {node_name}")
 
