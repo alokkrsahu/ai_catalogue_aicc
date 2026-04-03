@@ -134,10 +134,10 @@ class WorkflowDeploymentCORSMiddleware(MiddlewareMixin):
                 logger.warning(f"🚫 CORS: No active deployment for project {project_id}")
                 return False, None
             
-            # Check if origin is in allowed origins
+            # Allow requests with no origin header (e.g., from iframes, same-origin, or null origin)
             if not origin:
-                logger.warning(f"🚫 CORS: No origin header provided")
-                return False, deployment
+                logger.debug(f"✅ CORS: No origin header — allowing (likely iframe or same-origin)")
+                return True, deployment
             
             # Normalize origin (remove trailing slash, lowercase)
             normalized_origin = origin.rstrip('/').lower()
@@ -162,10 +162,11 @@ class WorkflowDeploymentCORSMiddleware(MiddlewareMixin):
     
     def _add_cors_headers(self, response, origin):
         """Add CORS headers to response"""
-        response['Access-Control-Allow-Origin'] = origin
+        response['Access-Control-Allow-Origin'] = origin or '*'
         response['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
         response['Access-Control-Allow-Headers'] = 'Origin, Content-Type, Accept, Authorization, X-Requested-With'
-        response['Access-Control-Allow-Credentials'] = 'true'
+        if origin:
+            response['Access-Control-Allow-Credentials'] = 'true'
         response['Access-Control-Max-Age'] = '86400'  # 24 hours
         
         # Special headers for streaming responses

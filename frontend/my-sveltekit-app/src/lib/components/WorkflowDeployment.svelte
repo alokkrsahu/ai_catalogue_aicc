@@ -61,7 +61,15 @@
       const embedUrl = endpointUrl.replace(/\/$/, '') + '/embed/';
       const resp = await fetch(embedUrl);
       if (resp.ok) {
-        fullHtmlCode = await resp.text();
+        let html = await resp.text();
+        // The server injects _SERVER_ENDPOINT using request.build_absolute_uri()
+        // which may return a Docker-internal hostname (e.g. http://backend:8000/...).
+        // Replace it with the correct browser-accessible endpointUrl.
+        const serverEndpointMatch = html.match(/const _SERVER_ENDPOINT = "([^"]+)"/);
+        if (serverEndpointMatch && serverEndpointMatch[1] !== endpointUrl) {
+          html = html.replace(serverEndpointMatch[1], endpointUrl);
+        }
+        fullHtmlCode = html;
       } else {
         fullHtmlCode = '<!-- Failed to load embed HTML -->';
       }
@@ -119,9 +127,11 @@
         fontColor = deployment.font_color || '#000000';
         fileUploadsEnabled = deployment.file_uploads_enabled || false;
 
-        // Construct endpoint URL
-        const baseUrl = typeof window !== 'undefined' ? window.location.origin : '';
-        endpointUrl = `${baseUrl}${deployment.endpoint_path}`;
+        // Construct endpoint URL:
+        // For embed code (external use): use VITE_BACKEND_URL (direct backend, works cross-origin)
+        // Fallback: window.location.origin (works in production where frontend=backend behind nginx)
+        const backendOrigin = import.meta.env.VITE_BACKEND_URL || (typeof window !== 'undefined' ? window.location.origin : '');
+        endpointUrl = `${backendOrigin}${deployment.endpoint_path}`;
         
         // Debug logging
         console.log('🔗 DEPLOYMENT: endpointUrl =', endpointUrl);

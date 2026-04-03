@@ -245,6 +245,7 @@ class DeploymentViewSet(viewsets.ViewSet):
                     'workflow_name': deployment.workflow.name if deployment.workflow else None,
                     'is_active': deployment.is_active,
                     'endpoint_path': deployment.endpoint_path,
+                    'endpoint_url': request.build_absolute_uri(deployment.endpoint_path),
                     'rate_limit_per_minute': deployment.rate_limit_per_minute,
                     'initial_greeting': getattr(deployment, 'initial_greeting', ''),
                     # Chatbot branding customization
@@ -348,6 +349,7 @@ class DeploymentViewSet(viewsets.ViewSet):
                 'workflow_name': deployment.workflow.name,
                 'is_active': deployment.is_active,
                 'endpoint_path': deployment.endpoint_path,
+                'endpoint_url': request.build_absolute_uri(deployment.endpoint_path),
                 'rate_limit_per_minute': deployment.rate_limit_per_minute,
                 'initial_greeting': getattr(deployment, 'initial_greeting', 'Hi! I am your AI assistant.'),
                 # Chatbot branding customization
@@ -2350,7 +2352,7 @@ def embed_chatbot_html(request, project_id):
       {'display: none;' if hide_header else ''}
       padding: 20px 24px;
       background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
-      color: #fff;
+      color: var(--font-color, #000);
       display: flex;
       align-items: center;
       gap: 14px;
@@ -2392,7 +2394,7 @@ def embed_chatbot_html(request, project_id):
     .header-logo-placeholder {{
       font-size: 20px;
       font-weight: 700;
-      color: #fff;
+      color: var(--font-color, #000);
       text-transform: uppercase;
     }}
     
@@ -2495,7 +2497,7 @@ def embed_chatbot_html(request, project_id):
     }}
     
     .msg.user .bubble {{
-      background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+      background: var(--font-color, #000);
       color: #fff;
       border-bottom-right-radius: 6px;
     }}
@@ -2554,7 +2556,7 @@ def embed_chatbot_html(request, project_id):
     .chat-input button {{
       width: 40px;
       height: 40px;
-      background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+      background: var(--font-color, #000);
       color: #fff;
       border: none;
       border-radius: 12px;
@@ -2568,7 +2570,7 @@ def embed_chatbot_html(request, project_id):
     
     .chat-input button:hover:not(:disabled) {{
       transform: scale(1.05);
-      box-shadow: 0 4px 12px rgba(var(--primary-rgb), 0.4);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
     }}
     
     .chat-input button:active:not(:disabled) {{
@@ -2835,7 +2837,7 @@ def embed_chatbot_html(request, project_id):
     }}
     
     .bubble markdown a {{
-      color: var(--primary-color);
+      color: var(--font-color, #000);
       text-decoration: underline;
     }}
     
@@ -2967,7 +2969,7 @@ def embed_chatbot_html(request, project_id):
     .file-attach-btn {{
       background: none;
       border: none;
-      color: #94a3b8;
+      color: var(--font-color, #000);
       cursor: pointer;
       padding: 6px;
       border-radius: 6px;
@@ -2977,7 +2979,7 @@ def embed_chatbot_html(request, project_id):
       flex-shrink: 0;
     }}
     .file-attach-btn:hover {{
-      color: var(--primary-color);
+      color: var(--font-color, #000);
       background: rgba(0,0,0,0.04);
     }}
     .file-attach-btn svg {{
@@ -3206,15 +3208,14 @@ def embed_chatbot_html(request, project_id):
 </div>
 
 <script>
-  // Resolve chat API from the page URL so POST /stream/ stays same-origin (proxied /api on :5173).
-  const _pathPartsForEndpoint = window.location.pathname.split('/').filter(Boolean);
-  const _wdIdx = _pathPartsForEndpoint.indexOf('workflow-deploy');
-  const _embedProjectId = (_wdIdx >= 0 && _wdIdx + 1 < _pathPartsForEndpoint.length)
-    ? _pathPartsForEndpoint[_wdIdx + 1]
-    : '';
-  const ENDPOINT_URL = _embedProjectId
-    ? (window.location.origin + '/api/workflow-deploy/' + _embedProjectId + '/')
-    : {json.dumps(endpoint_url)};
+  // Build API endpoint URL
+  // When served as iframe from the backend, use same-origin (window.location.origin).
+  // When hosted standalone (copied Full HTML on different server), use the server-injected URL.
+  const _SERVER_ENDPOINT = {json.dumps(endpoint_url)};
+  const _isServedFromBackend = window.location.pathname.indexOf('/api/workflow-deploy/') >= 0;
+  const ENDPOINT_URL = _isServedFromBackend
+    ? (window.location.origin + '/api/workflow-deploy/{str(project_id)}/')
+    : _SERVER_ENDPOINT;
   const STREAM_URL = ENDPOINT_URL.replace(/\\/$/, '') + '/stream/';
   const SUBMIT_INPUT_URL = ENDPOINT_URL.replace(/\\/$/, '') + '/submit-input/';
   const UPLOAD_URL = ENDPOINT_URL.replace(/\\/$/, '') + '/upload-file/';
@@ -3541,10 +3542,12 @@ def embed_chatbot_html(request, project_id):
       formData.append('file', file);
       formData.append('session_id', sessionId);
       var resp = await fetch(UPLOAD_URL, {{ method: 'POST', body: formData }});
-      var data = await resp.json();
       if (!resp.ok) {{
-        throw new Error(data.error || 'Upload failed');
+        var errText = await resp.text();
+        try {{ errText = JSON.parse(errText).error; }} catch(_) {{}}
+        throw new Error(errText || 'Upload failed (HTTP ' + resp.status + ')');
       }}
+      var data = await resp.json();
       entry.uploading = false;
       entry.attachment_id = data.attachment_id;
       entry.file_id = data.file_id;
@@ -4019,8 +4022,12 @@ def embed_chatbot_html(request, project_id):
 </body>
 </html>'''
         
-        return HttpResponse(html_content, content_type='text/html')
-        
+        response = HttpResponse(html_content, content_type='text/html')
+        # Remove restrictive headers that block fetch from cross-origin iframes
+        response['Cross-Origin-Opener-Policy'] = 'unsafe-none'
+        response['Cross-Origin-Embedder-Policy'] = 'unsafe-none'
+        return response
+
     except Exception as e:
         logger.error(f"❌ DEPLOYMENT: Error serving embed HTML: {e}", exc_info=True)
         return HttpResponse(
