@@ -42,6 +42,97 @@ SUPPORTED_FILE_TYPES = {
 }
 
 
+def _convert_docx_to_pdf(file_bytes: bytes) -> bytes:
+    """
+    Convert a DOCX file to PDF using python-docx (text extraction) + PyMuPDF (PDF creation).
+    Preserves paragraph structure, headings, and basic formatting.
+    """
+    import io
+    from docx import Document
+    import fitz  # PyMuPDF
+
+    doc = Document(io.BytesIO(file_bytes))
+    pdf = fitz.open()
+
+    # Page layout constants
+    PAGE_WIDTH, PAGE_HEIGHT = 595, 842  # A4
+    MARGIN_LEFT, MARGIN_RIGHT, MARGIN_TOP, MARGIN_BOTTOM = 60, 60, 60, 60
+    LINE_HEIGHT_BODY = 14
+    LINE_HEIGHT_HEADING = 20
+    MAX_X = PAGE_WIDTH - MARGIN_RIGHT
+    USABLE_WIDTH = MAX_X - MARGIN_LEFT
+
+    page = pdf.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    y = MARGIN_TOP
+
+    def _new_page():
+        nonlocal page, y
+        page = pdf.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+        y = MARGIN_TOP
+
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            y += LINE_HEIGHT_BODY * 0.5
+            if y > PAGE_HEIGHT - MARGIN_BOTTOM:
+                _new_page()
+            continue
+
+        is_heading = para.style.name.startswith('Heading')
+        fontsize = 14 if is_heading else 10
+        fontname = "helv"  # Helvetica (built-in)
+        line_height = LINE_HEIGHT_HEADING if is_heading else LINE_HEIGHT_BODY
+
+        # Word-wrap the paragraph
+        words = text.split()
+        lines = []
+        current_line = ""
+        for word in words:
+            test = f"{current_line} {word}".strip()
+            # Approximate: each char ~0.5 * fontsize width
+            if len(test) * fontsize * 0.45 > USABLE_WIDTH and current_line:
+                lines.append(current_line)
+                current_line = word
+            else:
+                current_line = test
+        if current_line:
+            lines.append(current_line)
+
+        for line in lines:
+            if y + line_height > PAGE_HEIGHT - MARGIN_BOTTOM:
+                _new_page()
+            page.insert_text(
+                (MARGIN_LEFT, y),
+                line,
+                fontsize=fontsize,
+                fontname=fontname,
+            )
+            y += line_height
+
+        # Extra spacing after headings
+        if is_heading:
+            y += 4
+
+    # Also include table text
+    for table in doc.tables:
+        for row in table.rows:
+            row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
+            if not row_text:
+                continue
+            if y + LINE_HEIGHT_BODY > PAGE_HEIGHT - MARGIN_BOTTOM:
+                _new_page()
+            # Truncate very wide rows
+            if len(row_text) > 120:
+                row_text = row_text[:120] + "..."
+            page.insert_text((MARGIN_LEFT, y), row_text, fontsize=9, fontname="helv")
+            y += LINE_HEIGHT_BODY
+
+    buf = io.BytesIO()
+    pdf.save(buf)
+    pdf.close()
+    return buf.getvalue()
+
+
 class LLMFileUploadService:
     """
     Service for uploading documents to LLM provider File APIs.
@@ -110,10 +201,15 @@ class LLMFileUploadService:
             Dict with 'file_id' or 'error'
         """
         # Deduplication: skip upload if document already has a file_id for this provider
+        # Exception: DOCX files uploaded to OpenAI need re-upload as PDF (Responses API only accepts PDF)
         existing_id = getattr(document, f'llm_file_id_{provider}', None)
-        if existing_id:
+        ext = os.path.splitext(document.original_filename)[1].lower()
+        needs_reupload = (provider == 'openai' and ext in ('.docx', '.doc', '.rtf') and existing_id)
+        if existing_id and not needs_reupload:
             logger.info(f"✅ LLM FILE SERVICE: Document {document.original_filename} already uploaded to {provider}: {existing_id[:30]}...")
             return {'file_id': existing_id, 'status': 'already_uploaded', 'reason': 'already_uploaded'}
+        if needs_reupload:
+            logger.info(f"🔄 LLM FILE SERVICE: Re-uploading {document.original_filename} as PDF for OpenAI Responses API")
         
         # Validate file size
         file_size_limit = FILE_SIZE_LIMITS.get(provider)
@@ -199,12 +295,25 @@ class LLMFileUploadService:
             if not default_storage.exists(file_path):
                 return {'error': 'File not found in storage', 'reason': 'file_not_found'}
             
-            # Open file and upload
+            # Open file — convert DOCX to PDF since OpenAI Responses API only accepts PDF
             with default_storage.open(file_path, 'rb') as f:
-                response = await sync_to_async(client.files.create)(
-                    file=(document.original_filename, f),
-                    purpose='user_data'
-                )
+                file_bytes = f.read()
+
+            upload_filename = document.original_filename
+            ext = os.path.splitext(upload_filename)[1].lower()
+            if ext in ('.docx', '.doc', '.rtf'):
+                try:
+                    file_bytes = await sync_to_async(_convert_docx_to_pdf)(file_bytes)
+                    upload_filename = os.path.splitext(upload_filename)[0] + '.pdf'
+                    logger.info(f"📄 LLM FILE SERVICE: Converted {document.original_filename} → PDF ({len(file_bytes)} bytes)")
+                except Exception as conv_err:
+                    logger.warning(f"⚠️ LLM FILE SERVICE: DOCX→PDF conversion failed for {document.original_filename}, uploading as-is: {conv_err}")
+
+            import io
+            response = await sync_to_async(client.files.create)(
+                file=(upload_filename, io.BytesIO(file_bytes)),
+                purpose='user_data'
+            )
             
             file_id = response.id
             logger.info(f"✅ LLM FILE SERVICE: Uploaded to OpenAI: {file_id}")
