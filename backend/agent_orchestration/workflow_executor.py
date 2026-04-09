@@ -646,26 +646,16 @@ class WorkflowExecutor:
                                     )
                             
                             # --- Chat file references (deployment chatbot uploads) ---
-                            # Determine if this agent uses tool-calling (file refs conflict with tool calls in some providers)
-                            _uses_tool_calling = bool(node_data.get('doc_tool_calling'))
-                            _ws_handler_check = getattr(self.chat_manager, 'websearch_handler', None)
-                            if _ws_handler_check and _ws_handler_check.is_websearch_enabled(node) and _ws_handler_check.get_websearch_mode(node) != 'urls':
-                                _uses_tool_calling = True
-                            _da_handler_check = getattr(self.chat_manager, 'docaware_handler', None)
-                            if _da_handler_check and _da_handler_check.is_docaware_enabled(node):
-                                _uses_tool_calling = True
-
                             if is_deployment and deployment_context:
-                                # Attach file API references to ALL agents (merged with project refs)
-                                # Skip for tool-calling mode (file refs + tool calls conflict in OpenAI)
-                                if not _uses_tool_calling and deployment_context.get('chat_file_references'):
+                                # Attach file API references to ALL agents via File API
+                                if deployment_context.get('chat_file_references'):
                                     _chat_refs = deployment_context['chat_file_references']
                                     _provider = node_data.get('llm_provider', 'openai').lower()
                                     logger.info(f"📎 CHAT FILES: Attaching {len(_chat_refs)} session files to {node_name} ({_provider})")
                                     llm_messages = self.chat_manager.format_messages_with_file_refs(
                                         llm_messages, _chat_refs, _provider
                                     )
-                                # Inject text-extracted attachments into last user message
+                                # Inject text-extracted attachments (fallback for files without File API support)
                                 if deployment_context.get('chat_text_attachments'):
                                     for _att in deployment_context['chat_text_attachments']:
                                         _text_block = f"\n\n--- Attached Document: {_att['filename']} ---\n{_att['text']}\n--- End Document ---"
@@ -693,14 +683,14 @@ class WorkflowExecutor:
                             # (no project docs selected → info tools return ALL project docs, confusing the LLM)
                             _doc_selected = node_data.get('doc_tool_calling_documents')
                             _no_project_docs = isinstance(_doc_selected, list) and len(_doc_selected) == 0
-                            _has_chat_text = bool(
+                            _has_chat_files = bool(
                                 is_deployment and deployment_context
-                                and deployment_context.get('chat_text_attachments')
+                                and (deployment_context.get('chat_file_references') or deployment_context.get('chat_text_attachments'))
                             )
                             _skip_doc_tool_for_chat_upload = (
                                 node_data.get('doc_tool_calling')
                                 and _no_project_docs
-                                and _has_chat_text
+                                and _has_chat_files
                                 and not _ws_needs_tool_loop
                                 and not _da_enabled
                             )
