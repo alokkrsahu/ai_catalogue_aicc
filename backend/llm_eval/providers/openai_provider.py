@@ -34,6 +34,7 @@ class OpenAIProvider(LLMProvider):
         """
         Build (instructions, input_items) for OpenAI Responses API from Chat-style messages.
         instructions = system message content; input_items = list of { role, content } with input_text / input_file parts.
+        Also handles assistant (with tool_calls) and tool result messages for tool-calling loops.
         File refs are included only in the last user message to avoid duplicate file refs and empty responses.
         """
         instructions = None
@@ -41,6 +42,7 @@ class OpenAIProvider(LLMProvider):
         for msg in messages:
             role = (msg.get("role") or "").strip().lower()
             content = msg.get("content")
+
             if role == "system":
                 if isinstance(content, str):
                     instructions = content
@@ -50,64 +52,108 @@ class OpenAIProvider(LLMProvider):
                 else:
                     instructions = str(content) if content else None
                 continue
-            if role != "user":
-                continue
-            parts = []
-            if isinstance(content, str):
-                if content.strip():
-                    parts.append({"type": "input_text", "text": content})
-            elif isinstance(content, list):
-                for p in content:
-                    if not isinstance(p, dict):
-                        continue
-                    t = p.get("type")
-                    if t == "text":
-                        text_val = p.get("text")
-                        if text_val is not None:
-                            parts.append({"type": "input_text", "text": str(text_val)})
-                    elif t == "file":
-                        file_id = (p.get("file") or {}).get("file_id") or p.get("file_id")
-                        if file_id:
-                            parts.append({"type": "input_file", "file_id": str(file_id)})
-            if parts:
-                input_items.append({"role": "user", "content": parts})
+
+            if role == "user":
+                parts = []
+                if isinstance(content, str):
+                    if content.strip():
+                        parts.append({"type": "input_text", "text": content})
+                elif isinstance(content, list):
+                    for p in content:
+                        if not isinstance(p, dict):
+                            continue
+                        t = p.get("type")
+                        if t == "text":
+                            text_val = p.get("text")
+                            if text_val is not None:
+                                parts.append({"type": "input_text", "text": str(text_val)})
+                        elif t == "file":
+                            file_id = (p.get("file") or {}).get("file_id") or p.get("file_id")
+                            if file_id:
+                                parts.append({"type": "input_file", "file_id": str(file_id)})
+                if parts:
+                    input_items.append({"role": "user", "content": parts})
+
+            elif role == "assistant":
+                # Assistant message — may have tool_calls or plain text
+                tool_calls = msg.get("tool_calls")
+                if tool_calls:
+                    # Convert Chat Completions tool_calls format to Responses API function_call items
+                    for tc in tool_calls:
+                        fn = tc.get("function", {})
+                        input_items.append({
+                            "type": "function_call",
+                            "id": tc.get("id", ""),
+                            "name": fn.get("name", ""),
+                            "arguments": fn.get("arguments", "{}"),
+                        })
+                elif content and isinstance(content, str) and content.strip():
+                    input_items.append({"role": "assistant", "content": [{"type": "output_text", "text": content}]})
+
+            elif role == "tool":
+                # Tool result message — convert to Responses API function_call_output
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": msg.get("tool_call_id", ""),
+                    "output": str(content) if content else "",
+                })
+
         # Include file refs only in the last user message to avoid API empty responses
-        if len(input_items) > 1:
-            last_item = input_items[-1]
+        user_items = [item for item in input_items if isinstance(item, dict) and item.get("role") == "user"]
+        if len(user_items) > 1:
+            last_user = user_items[-1]
             has_file = any(
                 isinstance(p, dict) and p.get("type") == "input_file"
-                for p in (last_item.get("content") or [])
+                for p in (last_user.get("content") or [])
             )
             if has_file:
-                for i in range(len(input_items) - 1):
-                    content = input_items[i].get("content") or []
+                for item in user_items[:-1]:
+                    content = item.get("content") or []
                     content_no_file = [p for p in content if not (isinstance(p, dict) and p.get("type") == "input_file")]
                     if len(content_no_file) != len(content):
-                        input_items[i]["content"] = content_no_file
+                        item["content"] = content_no_file
                         logger.info(f"🔍 OPENAI RESPONSES API: Removed file refs from non-last user message to avoid duplicate file refs")
         return instructions, input_items
     
-    @staticmethod
-    def _parse_responses_api_response(data: Dict[str, Any]) -> tuple[str, Optional[int]]:
-        """Extract aggregated text and total_tokens from Responses API response."""
+    def _parse_responses_api_response(self, data: Dict[str, Any]) -> tuple[str, Optional[int]]:
+        """Extract aggregated text, tool_calls, and total_tokens from Responses API response."""
         usage = data.get("usage") or {}
         token_count = usage.get("total_tokens")
         output = data.get("output") or []
         logger.info(f"🔍 OPENAI RESPONSES API: status={data.get('status')!r}, output_len={len(output)}, usage={token_count}")
         text_parts = []
+        tool_calls = []
         for item in output:
-            if not isinstance(item, dict) or item.get("type") != "message":
+            if not isinstance(item, dict):
                 continue
-            for part in (item.get("content") or []):
-                if isinstance(part, dict) and part.get("type") == "output_text":
-                    t = part.get("text")
-                    if t is not None:
-                        text_parts.append(str(t))
+            if item.get("type") == "message":
+                for part in (item.get("content") or []):
+                    if isinstance(part, dict) and part.get("type") == "output_text":
+                        t = part.get("text")
+                        if t is not None:
+                            text_parts.append(str(t))
+            elif item.get("type") == "function_call":
+                # Convert Responses API function_call to Chat Completions tool_calls format
+                tool_calls.append({
+                    "id": item.get("id", item.get("call_id", "")),
+                    "type": "function",
+                    "function": {
+                        "name": item.get("name", ""),
+                        "arguments": item.get("arguments", "{}"),
+                    }
+                })
         text = "".join(text_parts)
-        if not text and output:
-            logger.warning(f"🔍 OPENAI RESPONSES API: No output_text in output; output length={len(output)}")
-        if not text:
-            logger.warning(f"🔍 OPENAI RESPONSES API: Empty text; full output sample: {output[:2] if output else []}")
+        if tool_calls:
+            self._last_tool_calls = tool_calls
+            self._last_finish_reason = "tool_calls"
+            logger.info(f"🔍 OPENAI RESPONSES API: Found {len(tool_calls)} tool calls")
+        else:
+            self._last_tool_calls = None
+            self._last_finish_reason = "stop"
+        if not text and not tool_calls and output:
+            logger.warning(f"🔍 OPENAI RESPONSES API: No output_text or tool_calls in output; output length={len(output)}")
+        if not text and not tool_calls:
+            logger.warning(f"🔍 OPENAI RESPONSES API: Empty response; full output sample: {output[:2] if output else []}")
         return text, token_count
     
     def get_headers(self) -> Dict[str, str]:
@@ -278,12 +324,11 @@ class OpenAIProvider(LLMProvider):
             )
         
         try:
-            # When tools are provided, always use Chat Completions (Responses API
-            # does not support tool calling in the same way).
+            # Use Responses API when messages contain file refs (required for PDF attachments).
+            # Responses API supports both file attachments and tool calling.
+            has_files = bool(messages and self._messages_contain_file_refs(messages))
             has_tools = bool(kwargs.get("tools"))
-            use_responses_api = bool(
-                messages and self._messages_contain_file_refs(messages) and not has_tools
-            )
+            use_responses_api = has_files
             if use_responses_api:
                 instructions, input_items = self._build_responses_api_input(messages)
                 if not instructions and not input_items:
@@ -306,6 +351,21 @@ class OpenAIProvider(LLMProvider):
                     body["max_output_tokens"] = int(self.max_tokens)
                 if instructions:
                     body["instructions"] = instructions
+                # Include tools in Responses API format when present
+                if has_tools:
+                    tools_list = kwargs.get("tools", [])
+                    responses_tools = []
+                    for tool in tools_list:
+                        if tool.get("type") == "function":
+                            responses_tools.append({
+                                "type": "function",
+                                "name": tool["function"]["name"],
+                                "description": tool["function"].get("description", ""),
+                                "parameters": tool["function"].get("parameters", {}),
+                            })
+                    if responses_tools:
+                        body["tools"] = responses_tools
+                        logger.info(f"🔍 OPENAI: Responses API with {len(responses_tools)} tools + file attachments")
                 url = RESPONSES_API_BASE_URL
                 logger.info(f"🔍 OPENAI: Using Responses API for file attachments; model: {self.model!r}")
             else:
@@ -319,8 +379,9 @@ class OpenAIProvider(LLMProvider):
                     if isinstance(content, list):
                         part_types = [p.get("type", "?") for p in content if isinstance(p, dict)]
                         logger.info(f"🔍 OPENAI: Message[{i}] role={msg.get('role')!r} content_parts={part_types} (file refs present)")
-            timeout_sec = max(self.timeout, 120) if use_responses_api else self.timeout
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_sec)) as session:
+            timeout_sec = max(self.timeout, 300) if (use_responses_api or has_tools) else self.timeout
+            logger.info(f"🔍 OPENAI: Request timeout={timeout_sec}s, use_responses_api={use_responses_api}, self.timeout={self.timeout}")
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_sec, sock_read=timeout_sec, sock_connect=60)) as session:
                 async with session.post(url, headers=self.get_headers(), json=body) as response:
                     response_time_ms = int((time.time() - start_time) * 1000)
                     try:
@@ -471,6 +532,7 @@ class OpenAIProvider(LLMProvider):
         except Exception as e:
             response_time_ms = int((time.time() - start_time) * 1000)
             err_str = (str(e) or "Unknown error").strip() or "Unknown error"
+            logger.error(f"❌ OPENAI: Unhandled exception ({type(e).__name__}): {err_str}", exc_info=True)
             return LLMResponse(
                 text="",
                 model=self.model,

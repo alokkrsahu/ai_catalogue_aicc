@@ -153,7 +153,15 @@ class DocAwareHandler:
             
             for doc in documents:
                 file_id = getattr(doc, file_id_field, None)
-                
+
+                # OpenAI Responses API only accepts PDF — force re-upload for DOCX files
+                if file_id and llm_provider == 'openai':
+                    import os
+                    ext = os.path.splitext(doc.original_filename)[1].lower()
+                    if ext in ('.docx', '.doc', '.rtf'):
+                        logger.info(f"🔄 FILE ATTACHMENTS: Clearing cached file_id for {doc.original_filename} (DOCX→PDF re-upload)")
+                        file_id = None
+
                 if not file_id:
                     # Lazy upload: attempt to upload the document to the provider now
                     logger.info(f"📎 FILE ATTACHMENTS: Lazy uploading {doc.original_filename} to {llm_provider}...")

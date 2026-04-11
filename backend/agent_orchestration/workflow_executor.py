@@ -618,15 +618,19 @@ class WorkflowExecutor:
                                 )
                                 # Handle dict return with potential file_references (Full Document Mode)
                                 llm_messages = prompt_result.get('messages', prompt_result) if isinstance(prompt_result, dict) else prompt_result
-                                
+
                                 # Apply file reference formatting if file attachments are enabled
-                                if isinstance(prompt_result, dict) and prompt_result.get('file_references'):
+                                # Skip when doc_tool_calling is active — tools handle document access
+                                _doc_tool_calling_active_mi = node_data.get('doc_tool_calling')
+                                if isinstance(prompt_result, dict) and prompt_result.get('file_references') and not _doc_tool_calling_active_mi:
                                     logger.info(f"📎 FILE ATTACHMENTS: Formatting {len(prompt_result['file_references'])} file references for {node_name}")
                                     llm_messages = self.chat_manager.format_messages_with_file_refs(
                                         llm_messages,
                                         prompt_result['file_references'],
                                         prompt_result.get('provider', 'openai')
                                     )
+                                elif isinstance(prompt_result, dict) and prompt_result.get('file_references') and _doc_tool_calling_active_mi:
+                                    logger.info(f"⏭️ FILE ATTACHMENTS: Skipping file refs for {node_name} — doc_tool_calling is active, tools will handle document access")
                             else:
                                 # Use traditional single-input processing
                                 logger.info(f"📥 ORCHESTRATOR: Agent {node_name} has {len(input_sources)} input source - using single-input mode")
@@ -635,15 +639,20 @@ class WorkflowExecutor:
                                 )
                                 # Handle dict return with potential file_references (File Attachments)
                                 llm_messages = prompt_result_single.get('messages', prompt_result_single) if isinstance(prompt_result_single, dict) else prompt_result_single
-                                
+
                                 # Apply file reference formatting if file attachments are enabled
-                                if isinstance(prompt_result_single, dict) and prompt_result_single.get('file_references'):
+                                # Skip when doc_tool_calling is active — tools handle document access,
+                                # attaching files AND tools confuses the LLM into skipping tool calls
+                                _doc_tool_calling_active = node_data.get('doc_tool_calling')
+                                if isinstance(prompt_result_single, dict) and prompt_result_single.get('file_references') and not _doc_tool_calling_active:
                                     logger.info(f"📎 FILE ATTACHMENTS: Formatting {len(prompt_result_single['file_references'])} file references for {node_name}")
                                     llm_messages = self.chat_manager.format_messages_with_file_refs(
                                         llm_messages,
                                         prompt_result_single['file_references'],
                                         prompt_result_single.get('provider', 'openai')
                                     )
+                                elif isinstance(prompt_result_single, dict) and prompt_result_single.get('file_references') and _doc_tool_calling_active:
+                                    logger.info(f"⏭️ FILE ATTACHMENTS: Skipping file refs for {node_name} — doc_tool_calling is active, tools will handle document access")
                             
                             # --- Chat file references (deployment chatbot uploads) ---
                             if is_deployment and deployment_context:
@@ -2150,8 +2159,10 @@ class WorkflowExecutor:
             "role": "user",
             "content": (
                 f"{_plan_intro}"
-                "Use the document tools "
-                "to retrieve information. When you have gathered all the "
+                "You MUST use the document tools to retrieve verbatim content "
+                "from the documents before answering. Do NOT rely on tool "
+                "descriptions or summaries alone — you must call the tools to "
+                "read the actual document text. When you have gathered all the "
                 "information you need, provide your final answer WITHOUT "
                 "calling any more tools.\n\n"
                 "IMPORTANT — grounded citations:\n"
