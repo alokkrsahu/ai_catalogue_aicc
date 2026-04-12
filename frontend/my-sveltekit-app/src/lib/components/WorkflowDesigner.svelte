@@ -2409,7 +2409,7 @@
   
   <!-- AI Workflow Builder Chatbot (Right Panel) -->
   {#if showAIChatbot}
-    <div class="fixed right-0 top-0 bottom-0 w-80 z-50 shadow-xl">
+    <div class="fixed right-0 top-14 bottom-0 w-80 z-50 shadow-xl">
       <WorkflowAIChatbot
         {projectId}
         currentNodes={nodes}

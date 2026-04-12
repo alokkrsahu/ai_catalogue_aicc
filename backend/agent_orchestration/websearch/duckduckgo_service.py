@@ -86,7 +86,8 @@ class DuckDuckGoService:
             with DDGS() as ddgs:
                 # Perform text search
                 raw_results = list(ddgs.text(
-                    search_query, 
+                    search_query,
+                    region="us-en",
                     max_results=effective_max_results
                 ))
             
@@ -132,7 +133,8 @@ class DuckDuckGoService:
         try:
             with DDGS() as ddgs:
                 raw_results = list(ddgs.news(
-                    query, 
+                    query,
+                    region="us-en",
                     max_results=effective_max_results,
                     timelimit=timelimit
                 ))

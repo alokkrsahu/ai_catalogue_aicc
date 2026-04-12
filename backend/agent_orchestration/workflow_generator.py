@@ -137,6 +137,19 @@ WORKFLOW_TOOLS = [
                     "system_message": {
                         "type": "string",
                         "description": "Instructions for how to coordinate delegates"
+                    },
+                    "llm_provider": {
+                        "type": "string",
+                        "enum": ["openai", "anthropic", "google"],
+                        "description": "LLM provider for coordination (default: openai)"
+                    },
+                    "llm_model": {
+                        "type": "string",
+                        "description": "Model name for coordination (default: gpt-5.3-chat-latest)"
+                    },
+                    "temperature": {
+                        "type": "number",
+                        "description": "LLM temperature 0-2 (default: 0.7)"
                     }
                 },
                 "required": ["name", "system_message"]
@@ -180,6 +193,22 @@ WORKFLOW_TOOLS = [
                     "plan_mode": {
                         "type": "boolean",
                         "description": "Plan before executing tools (default: true)"
+                    },
+                    "doc_aware": {
+                        "type": "boolean",
+                        "description": "Enable RAG search over project documents (default: false)"
+                    },
+                    "web_search_enabled": {
+                        "type": "boolean",
+                        "description": "Enable web search capabilities (default: false)"
+                    },
+                    "web_search_max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of web search results per query (default: 5, range: 1-20)"
+                    },
+                    "temperature": {
+                        "type": "number",
+                        "description": "LLM temperature 0-2 (default: 0.7)"
                     },
                     "manager_name": {
                         "type": "string",
@@ -247,7 +276,7 @@ WORKFLOW_TOOLS = [
                     },
                     "properties": {
                         "type": "object",
-                        "description": "Properties to update — keys are property names (system_message, llm_model, temperature, documents, web_search_enabled, web_search_max_results, doc_tool_calling, etc.), values are new values. Only specified keys are changed; everything else stays the same.",
+                        "description": "Properties to update — keys are property names (system_message, llm_provider, llm_model, temperature, documents, web_search_enabled, web_search_max_results, doc_tool_calling, doc_aware, plan_mode, etc.), values are new values. Only specified keys are changed; everything else stays the same.",
                         "additionalProperties": True
                     }
                 },
@@ -345,9 +374,36 @@ doc_tool_calling (master toggle):
   • web_search_enabled — real-time internet search
   • plan_mode — agent plans before executing tool calls (default: on)
 
-  When you set documents=[...] or web_search_enabled=true, doc_tool_calling auto-enables.
+  When you set documents=[...], doc_aware=true, or web_search_enabled=true, doc_tool_calling auto-enables.
+
+DOCUMENT ACCESS — TWO MODES (can be used together):
+
+  documents (File API — targeted full-document access):
+    • Assigns specific files from the project for the agent to read in full
+    • Best for: analyzing 1-5 specific files, comparing documents side by side,
+      extracting structured data from a known file
+    • The agent gets the COMPLETE content of each assigned file via tool calls
+    • You must specify exact filenames from the available project documents list
+
+  doc_aware (RAG — semantic search across ALL project documents):
+    • Enables vector-based semantic chunk search across the entire document collection
+    • Best for: answering questions that could be in any document, finding info
+      across a large collection (10+ documents), discovering relevant content
+      without knowing which file contains it
+    • The agent searches by meaning and retrieves the most relevant chunks
+    • No need to specify filenames — it searches everything indexed in the project
+
+  WHEN TO USE WHICH:
+    • User asks about a specific named file → documents=["that_file.pdf"]
+    • User asks a broad question across many docs → doc_aware=true
+    • User needs both full file detail AND broad search → use BOTH together
+    • Small project with 1-3 docs → documents is usually sufficient
+    • Large project with 10+ docs → doc_aware is usually better
 
 web_search_max_results: 1-20 (default 5). Set higher for broad research tasks.
+
+temperature: Controls LLM creativity/randomness (0-2, default 0.7).
+  Use lower (0.1-0.3) for factual/analytical tasks, higher (0.8-1.2) for creative tasks.
 
 file_attachments: Independent of doc_tool_calling. For direct LLM file access.
 
@@ -590,9 +646,9 @@ class WorkflowBuilder:
                 "description": f"Coordinates specialist delegates: {name}",
                 "system_message": args.get("system_message", "You are a Group Chat Manager."),
                 "delegate_connections": [],
-                "llm_provider": "openai",
-                "llm_model": "gpt-5.3-chat-latest",
-                "temperature": 0.7,
+                "llm_provider": args.get("llm_provider", "openai"),
+                "llm_model": args.get("llm_model", "gpt-5.3-chat-latest"),
+                "temperature": args.get("temperature", 0.7),
             }
         })
         self.node_name_map[name] = node_id
@@ -617,6 +673,7 @@ class WorkflowBuilder:
                 "file_attachments_enabled": False,
                 "file_attachment_documents": [],
                 "inline_file_attachments": [],
+                "temperature": args.get("temperature", 0.7),
                 "can_only_connect_to": "GroupChatManager",
             }
         })
@@ -703,6 +760,11 @@ class WorkflowBuilder:
     def _update_node_property(self, args: Dict) -> str:
         node_name = args.get("node_name", "")
         properties = args.get("properties", {})
+
+        # LLM often sends flat args (system_message alongside node_name)
+        # instead of nesting under "properties" — handle both formats
+        if not properties:
+            properties = {k: v for k, v in args.items() if k != "node_name"}
 
         if not node_name or not properties:
             return "Error: node_name and properties are required"
@@ -1197,11 +1259,20 @@ async def generate_workflow(
         for n in cw_nodes:
             d = n.get("data", {})
             line = f'  - {n["type"]}: "{d.get("name", "?")}"'
+            if d.get("llm_provider") or d.get("llm_model"):
+                line += f" [{d.get('llm_provider', 'openai')}/{d.get('llm_model', '?')}]"
+            temp = d.get("temperature")
+            if temp is not None and temp != 0.7:
+                line += f" [temp={temp}]"
             docs = d.get("doc_tool_calling_documents", [])
             if docs:
                 line += f" [documents: {', '.join(docs)}]"
+            if d.get("doc_aware"):
+                line += " [doc_aware]"
             if d.get("web_search_enabled"):
                 line += " [web_search]"
+            if d.get("plan_mode") is False:
+                line += " [plan_mode=off]"
             cw_lines.append(line)
         cw_lines.append("Connections:")
         for e in cw_edges:
@@ -1333,8 +1404,97 @@ async def generate_workflow(
                 logger.info(f"🔧 WORKFLOW GEN (retry): {tc['function']['name']} → {result}")
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
 
-    # Auto-repair: fix common issues the LLM misses
+    # Auto-repair: fix common issues the LLM misses (deterministic)
     _auto_repair_connections(builder)
+
+    # ── Verification Agent: LLM reviews the graph and fixes issues ──
+    if builder.nodes and len(builder.nodes) >= 3:
+        try:
+            verify_graph = builder.build_graph_json()
+            v_nodes = verify_graph["nodes"]
+            v_edges = verify_graph["edges"]
+            node_id_to_name_v = {n["id"]: n.get("data", {}).get("name", "?") for n in v_nodes}
+
+            graph_desc_lines = ["Current workflow after auto-repair:"]
+            graph_desc_lines.append(f"Nodes ({len(v_nodes)}):")
+            for n in v_nodes:
+                d = n.get("data", {})
+                nid = n["id"]
+                inc = len([e for e in v_edges if e["target"] == nid])
+                out = len([e for e in v_edges if e["source"] == nid])
+                line = f'  {n["type"]}: "{d.get("name", "?")}" ({out} out, {inc} in)'
+                if d.get("llm_provider") or d.get("llm_model"):
+                    line += f" [{d.get('llm_provider', 'openai')}/{d.get('llm_model', '?')}]"
+                temp = d.get("temperature")
+                if temp is not None and temp != 0.7:
+                    line += f" [temp={temp}]"
+                if d.get("doc_tool_calling_documents"):
+                    line += f" [docs: {len(d['doc_tool_calling_documents'])}]"
+                if d.get("doc_aware"):
+                    line += " [doc_aware]"
+                if d.get("web_search_enabled"):
+                    line += " [web_search]"
+                if d.get("plan_mode") is False:
+                    line += " [plan_mode=off]"
+                graph_desc_lines.append(line)
+            graph_desc_lines.append(f"Connections ({len(v_edges)}):")
+            for e in v_edges:
+                src = node_id_to_name_v.get(e["source"], "?")
+                tgt = node_id_to_name_v.get(e["target"], "?")
+                graph_desc_lines.append(f"  {src} → {tgt} ({e.get('type', 'sequential')})")
+            graph_desc = "\n".join(graph_desc_lines)
+
+            verify_prompt = (
+                f"You are verifying a workflow that was just built. Here is the current state:\n\n"
+                f"{graph_desc}\n\n"
+                f"The user's original request was: \"{user_message[:500]}\"\n\n"
+                "VERIFY the following and FIX any issues using the available tools:\n"
+                "1. Does the orchestration make sense for the user's request? Are the right agents created with the right roles?\n"
+                "2. Are all connections valid? Does information flow logically from source to destination?\n"
+                "3. Is every agent reachable from StartNode? Does exactly one agent connect to EndNode?\n"
+                "4. Are web_search / doc_tool_calling / documents / doc_aware assigned correctly per each agent's role?\n"
+                "5. Are system_messages detailed enough for each agent to do its job?\n"
+                "6. Are LLM models and temperatures appropriate for each agent's task?\n\n"
+                "If everything looks correct, respond with 'Verification passed — workflow is valid.'\n"
+                "If there are issues, use update_node_property, delete_node, connect_nodes, or add_* tools to fix them.\n"
+                "Do NOT rebuild the workflow from scratch — only fix specific issues."
+            )
+
+            verify_messages = [{"role": "system", "content": system_content}]
+            verify_messages.append({"role": "user", "content": verify_prompt})
+
+            logger.info(f"🔍 WORKFLOW GEN: Running verification agent on {len(v_nodes)} nodes, {len(v_edges)} edges")
+
+            for v_iter in range(3):
+                v_response = await llm_provider.generate_response(messages=verify_messages, tools=WORKFLOW_TOOLS)
+                if v_response.error:
+                    logger.warning(f"⚠️ WORKFLOW GEN: Verification agent error: {v_response.error}")
+                    break
+                if v_response.text:
+                    explanation += f"\n\n**Verification:** {v_response.text}"
+                    logger.info(f"🔍 WORKFLOW GEN: Verification agent: {v_response.text[:200]}")
+                if not v_response.tool_calls:
+                    break
+                # Process verification tool calls
+                formatted_v_calls = []
+                for tc in v_response.tool_calls:
+                    fn = tc.get("function", {})
+                    raw_args = fn.get("arguments", tc.get("arguments", "{}"))
+                    args_str = json.dumps(raw_args) if isinstance(raw_args, dict) else str(raw_args)
+                    formatted_v_calls.append({
+                        "id": tc.get("id", f"call_{uuid.uuid4().hex[:8]}"),
+                        "type": "function",
+                        "function": {"name": fn.get("name", tc.get("name", "")), "arguments": args_str}
+                    })
+                verify_messages.append({"role": "assistant", "content": v_response.text or "", "tool_calls": formatted_v_calls})
+                for tc in formatted_v_calls:
+                    fn_args = json.loads(tc["function"]["arguments"]) if isinstance(tc["function"]["arguments"], str) else tc["function"]["arguments"]
+                    result = builder.execute_tool_call(tc["function"]["name"], fn_args)
+                    logger.info(f"🔧 WORKFLOW GEN (verify): {tc['function']['name']} → {result}")
+                    verify_messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+
+        except Exception as verify_err:
+            logger.warning(f"⚠️ WORKFLOW GEN: Verification agent failed: {verify_err}")
 
     # Build and validate
     graph_json = builder.build_graph_json()
