@@ -287,12 +287,15 @@ class WorkflowExecutor:
                             execution_record, messages, message_sequence, agents_involved,
                             total_response_time, providers_used, project_id,
                             deployment_context=deployment_context,
+                            event_callback=event_callback,
                         )
                         
                         # Update state from parallel execution results
                         for result in parallel_results:
                             if result.get('executed'):
-                                out_val = result['output']
+                                # Pack citations from parallel tool-calling into executed_nodes
+                                _par_cites = result.get('citations') or None
+                                out_val = pack_executed_output(result['output'], _par_cites)
                                 executed_nodes[result['node_id']] = out_val
                                 conversation_history += f"\n{result['node_name']}: {plain_executed_output(out_val)}"
                                 agents_involved.update(result.get('agents_involved', []))
@@ -621,15 +624,15 @@ class WorkflowExecutor:
 
                                 # Apply file reference formatting if file attachments are enabled
                                 # Skip when doc_tool_calling is active — tools handle document access
-                                _doc_tool_calling_active_mi = node_data.get('doc_tool_calling')
-                                if isinstance(prompt_result, dict) and prompt_result.get('file_references') and not _doc_tool_calling_active_mi:
+                                _doc_tool_calling_active = node_data.get('doc_tool_calling')
+                                if isinstance(prompt_result, dict) and prompt_result.get('file_references') and not _doc_tool_calling_active:
                                     logger.info(f"📎 FILE ATTACHMENTS: Formatting {len(prompt_result['file_references'])} file references for {node_name}")
                                     llm_messages = self.chat_manager.format_messages_with_file_refs(
                                         llm_messages,
                                         prompt_result['file_references'],
                                         prompt_result.get('provider', 'openai')
                                     )
-                                elif isinstance(prompt_result, dict) and prompt_result.get('file_references') and _doc_tool_calling_active_mi:
+                                elif isinstance(prompt_result, dict) and prompt_result.get('file_references') and _doc_tool_calling_active:
                                     logger.info(f"⏭️ FILE ATTACHMENTS: Skipping file refs for {node_name} — doc_tool_calling is active, tools will handle document access")
                             else:
                                 # Use traditional single-input processing
@@ -740,6 +743,9 @@ class WorkflowExecutor:
                                 )
                             else:
                                 # Standard single LLM call (existing path)
+                                if event_callback:
+                                    _agent_desc = node_data.get('system_message', '')[:300] or node_data.get('description', '') or f"Processing {node_name}"
+                                    event_callback("planning", {"agent": node_name, "content": _agent_desc})
                                 agent_response = await llm_provider.generate_response(
                                     messages=llm_messages
                                 )
@@ -759,9 +765,32 @@ class WorkflowExecutor:
                                     logger.error(f"❌ ORCHESTRATOR: agent_response.error={provider_error!r}, agent_response.text (first 200 chars)={repr((agent_response.text or '')[:200])}")
                                     raise Exception(error_msg)
                             
+                            # Parse citations from simple-path response (web search agents, etc.)
+                            # The LLM may produce ---CITATIONS--- blocks if instructed via system prompt
+                            if not _synthesis_citations and '---CITATIONS---' in agent_response_text:
+                                try:
+                                    from agent_orchestration.document_tool_service import (
+                                        _parse_citations_block,
+                                    )
+                                    _clean_text, _parsed_cites = _parse_citations_block(agent_response_text)
+                                    if _parsed_cites:
+                                        agent_response_text = _clean_text
+                                        _synthesis_citations = _parsed_cites
+                                        logger.info(f"📎 CITATION PARSE (simple path): Extracted {len(_parsed_cites)} citations from {node_name}")
+                                except Exception as _cite_err:
+                                    logger.warning(f"⚠️ CITATION PARSE: Failed for {node_name}: {_cite_err}")
+
                             logger.info(f"✅ ORCHESTRATOR: Agent {node_name} completed successfully - response length: {len(agent_response_text)} chars")
                             logger.info(f"🔍 DEBUG: Raw agent response for {node_name}: {agent_response_text[:200]}...")
-                            
+
+                            # Emit completion event for sequential agents
+                            if event_callback:
+                                event_callback("delegate_done", {
+                                    "agent": node_name,
+                                    "chars": len(agent_response_text),
+                                    "content": agent_response_text[:200],
+                                })
+
                             # CRITICAL FIX: Save agent message BEFORE reflection processing
                             # This ensures the message is recorded even if workflow pauses for reflection
                             # NOTE: Use 'messages' array (structured messages for storage), NOT 'llm_messages' (LLM-formatted)
@@ -952,9 +981,10 @@ class WorkflowExecutor:
                         # Note: json is already imported at module level
                         tool_request = None
                         
-                        # Get primary input from aggregated context (prefer plain text for MCP tool args)
+                        # Get first input from aggregated context (prefer plain text for MCP tool args)
                         if isinstance(aggregated_context, dict):
-                            primary_input = aggregated_context.get('primary_plain') or aggregated_context.get('primary_input', '')
+                            all_inputs = aggregated_context.get('all_inputs', [])
+                            primary_input = all_inputs[0].get('content_plain', all_inputs[0].get('content', '')) if all_inputs else ''
                         else:
                             primary_input = str(aggregated_context)
                         
@@ -1968,7 +1998,8 @@ class WorkflowExecutor:
             try:
                 from .llm_file_service import LLMFileUploadService
                 from users.models import ProjectDocument as _PWDoc
-                _prewarm_project = await sync_to_async(lambda: workflow.project)()
+                from users.models import IntelliDocProject as _IPrj
+                _prewarm_project = await sync_to_async(_IPrj.objects.get)(project_id=project_id)
                 _file_svc = LLMFileUploadService(_prewarm_project)
                 _doc_ids = list(set(tool_map.values()))
                 _prewarm_docs = await sync_to_async(list)(_PWDoc.objects.filter(document_id__in=_doc_ids))
@@ -2290,6 +2321,8 @@ class WorkflowExecutor:
                         f"{len(_raw_cit_map)} from LLM block, {len(_ordered_refs) - len(set(_ordered_refs) & set(_raw_cit_map.keys()))} recovered"
                     )
 
+                if event_callback:
+                    event_callback("delegate_done", {"agent": node_name, "chars": len(clean_text), "content": clean_text[:200]})
                 return _append_citations_block(clean_text, _new_citations), _new_citations
 
             # Record the assistant's tool-call turn in the conversation
@@ -2667,6 +2700,8 @@ class WorkflowExecutor:
                 f"{len(_raw_cit_map)} from LLM block, {len(_ordered_refs) - len(set(_ordered_refs) & set(_raw_cit_map.keys()))} recovered from notebook"
             )
 
+        if event_callback:
+            event_callback("delegate_done", {"agent": node_name, "chars": len(clean_text), "content": clean_text[:200]})
         return _append_citations_block(clean_text, _new_citations), _new_citations
 
     async def _save_messages_to_database(self, messages, execution_record):
@@ -2831,7 +2866,8 @@ class WorkflowExecutor:
                                         workflow, graph_json, executed_nodes, conversation_history,
                                         execution_record, messages, message_sequence, agents_involved,
                                         total_response_time, providers_used, project_id,
-                                        deployment_context: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+                                        deployment_context: Optional[Dict[str, Any]] = None,
+                                        event_callback=None) -> List[Dict[str, Any]]:
         """
         Execute multiple nodes in parallel using asyncio.gather
         
@@ -2862,7 +2898,12 @@ class WorkflowExecutor:
             
             try:
                 logger.info(f"🔀 PARALLEL: Executing {node_name} (type: {node_type})")
-                
+
+                # Emit start event for parallel agents with agent's role description
+                if event_callback:
+                    agent_desc = node_data.get('system_message', '')[:300] or node_data.get('description', '') or f"Executing {node_name}"
+                    event_callback("planning", {"agent": node_name, "content": agent_desc})
+
                 # Handle UserProxyAgent separately (can't parallelize if requires human input)
                 if node_type == 'UserProxyAgent' and node_data.get('require_human_input', True):
                     return {
@@ -2999,32 +3040,80 @@ class WorkflowExecutor:
                                     break
                         logger.info(f"📎 CHAT TEXT (parallel): Injected {len(deployment_context['chat_text_attachments'])} text attachments into {node_name}")
 
-                # Execute LLM call with structured messages
-                agent_response = await llm_provider.generate_response(messages=llm_messages)
-                
-                if agent_response.error:
-                    raise Exception(f"Agent {node_name} error: {agent_response.error}")
-                
-                agent_response_text = agent_response.text.strip()
-                response_time_ms = getattr(agent_response, 'response_time_ms', 0) if hasattr(agent_response, 'response_time_ms') else 0
-                
-                logger.info(f"✅ PARALLEL: {node_name} completed - {len(agent_response_text)} chars, {response_time_ms}ms")
-                
+                # Check for doc_tool_calling / web_search / docaware (same check as sequential path)
+                _ws_handler_p = getattr(self.chat_manager, 'websearch_handler', None)
+                _ws_enabled_p = _ws_handler_p and _ws_handler_p.is_websearch_enabled(node)
+                _ws_needs_tool_p = _ws_enabled_p and _ws_handler_p.get_websearch_mode(node) != 'urls'
+                _da_handler_p = getattr(self.chat_manager, 'docaware_handler', None)
+                _da_enabled_p = _da_handler_p and _da_handler_p.is_docaware_enabled(node)
+                _needs_tool_calling = node_data.get('doc_tool_calling') or _ws_needs_tool_p or _da_enabled_p
+
+                _local_messages = []
+                _local_citations = []
+
+                if _needs_tool_calling:
+                    # Full tool-calling loop with isolated message buffer
+                    logger.info(f"🔧 PARALLEL: {node_name} using doc_tool_calling/web_search/docaware path")
+                    try:
+                        agent_response_text, _local_citations = await self._execute_doc_tool_calling(
+                            node=node, node_name=node_name, node_type=node_type,
+                            llm_messages=llm_messages, llm_provider=llm_provider,
+                            agent_config=agent_config, project_id=str(project_id),
+                            messages=_local_messages, message_sequence=0,
+                            execution_record=execution_record, event_callback=event_callback,
+                        )
+                    except Exception as tool_err:
+                        logger.error(f"❌ PARALLEL: {node_name} tool-calling failed: {tool_err}, falling back to simple call")
+                        agent_response = await llm_provider.generate_response(messages=llm_messages)
+                        if agent_response.error:
+                            raise Exception(f"Agent {node_name} error: {agent_response.error}")
+                        agent_response_text = agent_response.text.strip()
+                    response_time_ms = 0
+                else:
+                    # Simple LLM call (no tools)
+                    agent_response = await llm_provider.generate_response(messages=llm_messages)
+                    if agent_response.error:
+                        raise Exception(f"Agent {node_name} error: {agent_response.error}")
+                    agent_response_text = agent_response.text.strip()
+                    response_time_ms = getattr(agent_response, 'response_time_ms', 0) if hasattr(agent_response, 'response_time_ms') else 0
+
+                    # Parse citations from simple-path response
+                    if '---CITATIONS---' in agent_response_text:
+                        try:
+                            from agent_orchestration.document_tool_service import _parse_citations_block
+                            _clean, _cites = _parse_citations_block(agent_response_text)
+                            if _cites:
+                                agent_response_text = _clean
+                                _local_citations = _cites
+                        except Exception:
+                            pass
+
+                logger.info(f"✅ PARALLEL: {node_name} completed - {len(agent_response_text)} chars")
+
+                # Emit completion event for parallel agents
+                if event_callback:
+                    event_callback("delegate_done", {
+                        "agent": node_name,
+                        "chars": len(agent_response_text),
+                        "content": agent_response_text[:200],
+                    })
+
                 return {
                     'node_id': node_id,
                     'node_name': node_name,
                     'executed': True,
                     'output': agent_response_text,
                     'response_time_ms': response_time_ms,
-                    'token_count': getattr(agent_response, 'token_count', None),
+                    'token_count': None,
                     'agents_involved': {node_name},
                     'providers_used': [agent_config['llm_provider']],
                     'metadata': {
                         'llm_provider': agent_config['llm_provider'],
                         'llm_model': agent_config['llm_model'],
-                        'cost_estimate': getattr(agent_response, 'cost_estimate', None)
                     },
-                    'index': idx
+                    'index': idx,
+                    'local_messages': _local_messages,
+                    'citations': _local_citations,
                 }
             except Exception as e:
                 logger.error(f"❌ PARALLEL: {node_name} failed: {e}")
@@ -3088,7 +3177,16 @@ class WorkflowExecutor:
                     # Individual delegate messages are logged in the sequential path
                     logger.info(f"💾 PARALLEL: GroupChatManager {result['node_name']} completed with {total_iterations} delegate iterations")
                 else:
-                    # Regular agent message
+                    # Merge local_messages from tool-calling parallel agents
+                    for lm in result.get('local_messages', []):
+                        lm['sequence'] = next_sequence
+                        new_messages.append(lm)
+                        next_sequence += 1
+
+                    # Regular agent message (final output)
+                    _par_metadata = result.get('metadata', {})
+                    if result.get('citations'):
+                        _par_metadata['citations'] = result['citations']
                     new_messages.append({
                         'sequence': next_sequence,
                         'agent_name': result['node_name'],
@@ -3098,7 +3196,7 @@ class WorkflowExecutor:
                         'timestamp': timezone.now().isoformat(),
                         'response_time_ms': result.get('response_time_ms', 0),
                         'token_count': result.get('token_count'),
-                        'metadata': result.get('metadata', {})
+                        'metadata': _par_metadata,
                     })
                     next_sequence += 1
         

@@ -954,33 +954,15 @@ class DocAwareHandler:
             Search query string extracted from aggregated inputs
         """
         logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Starting with {aggregated_context['input_count']} inputs")
-        logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Primary input: '{str(aggregated_context.get('primary_input', ''))[:200]}...'")
-        logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Secondary inputs count: {len(aggregated_context.get('secondary_inputs', []))}")
-        
-        # Combine all input content for search query
+
+        # Combine all input content for search query — all inputs treated equally
         query_parts = []
-        
-        # Add primary input (prefer plain text without upstream citation appendix for embedding)
-        primary_plain = aggregated_context.get('primary_plain')
-        if primary_plain:
-            query_parts.append(str(primary_plain))
-            logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Added primary_plain: '{str(primary_plain)[:100]}...'")
-        elif aggregated_context['primary_input']:
-            primary_input = str(aggregated_context['primary_input'])
-            query_parts.append(primary_input)
-            logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Added primary input: '{primary_input[:100]}...'")
-        
-        # Add secondary inputs
-        for i, secondary in enumerate(aggregated_context['secondary_inputs']):
-            sec_plain = secondary.get('content_plain')
-            if sec_plain:
-                query_parts.append(str(sec_plain))
-                logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Added secondary plain {i+1}: '{str(sec_plain)[:100]}...'")
-            elif secondary.get('content'):
-                secondary_content = str(secondary['content'])
-                query_parts.append(secondary_content)
-                logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Added secondary input {i+1}: '{secondary_content[:100]}...'")
-        
+        for i, inp in enumerate(aggregated_context.get('all_inputs', [])):
+            plain = inp.get('content_plain') or inp.get('content', '')
+            if plain:
+                query_parts.append(str(plain))
+                logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Added input {i+1} ({inp.get('name', '?')}): '{str(plain)[:100]}...'")
+
         # Combine and clean up
         combined_query = " ".join(query_parts).strip()
         logger.info(f"📚 AGGREGATED INPUT QUERY EXTRACTION: Combined query length: {len(combined_query)} characters")
@@ -1306,16 +1288,13 @@ Refined search query:"""
             List of conversation context strings
         """
         context_list = []
-        
-        # Add primary input as context
-        if aggregated_context['primary_input']:
-            context_list.append(str(aggregated_context['primary_input']))
-        
-        # Add secondary inputs as context
-        for secondary in aggregated_context['secondary_inputs']:
-            if secondary.get('content'):
-                context_list.append(f"{secondary['name']}: {secondary['content']}")
-        
+
+        # Add all inputs as context — treated equally
+        for inp in aggregated_context.get('all_inputs', []):
+            content = inp.get('content', '')
+            if content:
+                context_list.append(f"{inp.get('name', 'Input')}: {content}")
+
         logger.debug(f"📚 DOCAWARE: Extracted {len(context_list)} context items from aggregated input")
         return context_list
 

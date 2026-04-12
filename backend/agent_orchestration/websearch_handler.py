@@ -597,20 +597,11 @@ class WebSearchHandler:
         
         query_parts = []
         
-        # Prefer plain upstream text (omit citation appendix) for search query length/quality
-        primary_plain = aggregated_context.get('primary_plain')
-        if primary_plain:
-            query_parts.append(str(primary_plain))
-        elif aggregated_context.get('primary_input'):
-            primary_input = str(aggregated_context['primary_input'])
-            query_parts.append(primary_input)
-        
-        for secondary in aggregated_context.get('secondary_inputs', []):
-            sec_plain = secondary.get('content_plain')
-            if sec_plain:
-                query_parts.append(str(sec_plain))
-            elif secondary.get('content'):
-                query_parts.append(str(secondary['content']))
+        # Combine all inputs equally — prefer plain text (omit citation appendix) for search quality
+        for inp in aggregated_context.get('all_inputs', []):
+            plain = inp.get('content_plain') or inp.get('content', '')
+            if plain:
+                query_parts.append(str(plain))
         
         combined_query = " ".join(query_parts).strip()
         

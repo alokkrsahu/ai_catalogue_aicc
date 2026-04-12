@@ -12,6 +12,7 @@ from .executed_nodes_codec import (
     plain_executed_output,
     citations_from_executed_output,
     format_upstream_citations_block,
+    renumber_citations_globally,
 )
 
 logger = logging.getLogger('conversation_orchestrator')
@@ -357,11 +358,8 @@ class WorkflowParser:
         logger.info(f"🔄 MULTI-INPUT: Aggregating {len(input_sources)} input sources")
         
         aggregated_context = {
-            'primary_input': '',
-            'primary_plain': '',
-            'secondary_inputs': [],
-            'input_summary': '',
             'all_inputs': [],
+            'input_summary': '',
             'input_count': len(input_sources)
         }
         
@@ -407,20 +405,27 @@ class WorkflowParser:
             
             logger.info(f"📥 MULTI-INPUT: Processed input {i+1}: {input_name} ({input_type}) - {len(str(display_content))} chars (node_id: {input_id})")
         
-        # Set primary input (first/highest priority)
-        if input_contexts:
-            aggregated_context['primary_input'] = input_contexts[0]['content']
-            aggregated_context['primary_plain'] = input_contexts[0].get('content_plain', input_contexts[0]['content'])
-            aggregated_context['secondary_inputs'] = input_contexts[1:] if len(input_contexts) > 1 else []
-        
+        # Global citation renumbering — prevent [1] from Agent A colliding with [1] from Agent B
+        has_any_citations = any(ctx.get('citations') for ctx in input_contexts)
+        if has_any_citations:
+            next_ref = renumber_citations_globally(input_contexts)
+            # Rebuild display_content with renumbered citations
+            for ctx in input_contexts:
+                if ctx.get('citations'):
+                    ctx['content'] = ctx['content_plain'] + format_upstream_citations_block(ctx['name'], ctx['citations'])
+                else:
+                    ctx['content'] = ctx['content_plain']
+            logger.info(f"🔢 MULTI-INPUT: Renumbered citations globally across {len(input_contexts)} inputs (next ref: {next_ref})")
+
         # Create formatted summary
         summary_parts = []
         for ctx in input_contexts:
             summary_parts.append(f"Input {ctx['priority']} ({ctx['type']} - {ctx['name']}): {ctx['content'][:100]}{'...' if len(str(ctx['content'])) > 100 else ''}")
-        
+
         aggregated_context['input_summary'] = "\n".join(summary_parts)
-        
-        logger.info(f"✅ MULTI-INPUT: Aggregation complete - Primary: {len(str(aggregated_context['primary_input']))} chars, Secondary: {len(aggregated_context['secondary_inputs'])} inputs")
+
+        total_chars = sum(len(str(ctx['content'])) for ctx in input_contexts)
+        logger.info(f"✅ MULTI-INPUT: Aggregation complete - {len(input_contexts)} inputs, {total_chars} total chars")
         
         return aggregated_context
     
@@ -434,24 +439,20 @@ class WorkflowParser:
         Returns:
             Formatted string for inclusion in prompts
         """
-        if aggregated_context['input_count'] <= 1:
-            return aggregated_context['primary_input']
-        
+        all_inputs = aggregated_context.get('all_inputs', [])
+        if not all_inputs:
+            return ''
+
+        if len(all_inputs) == 1:
+            return all_inputs[0]['content']
+
         prompt_parts = []
-        prompt_parts.append(f"Multiple Input Sources ({aggregated_context['input_count']} total):")
+        prompt_parts.append(f"Input Sources ({len(all_inputs)} total):")
         prompt_parts.append("")
-        
-        # Add primary input
-        prompt_parts.append("PRIMARY INPUT:")
-        prompt_parts.append(aggregated_context['primary_input'])
-        prompt_parts.append("")
-        
-        # Add secondary inputs
-        if aggregated_context['secondary_inputs']:
-            prompt_parts.append("ADDITIONAL INPUTS:")
-            for i, secondary in enumerate(aggregated_context['secondary_inputs']):
-                prompt_parts.append(f"Input {i + 2} ({secondary['type']} - {secondary['name']}):")
-                prompt_parts.append(secondary['content'])
-                prompt_parts.append("")
-        
+
+        for i, inp in enumerate(all_inputs, 1):
+            prompt_parts.append(f"Input {i} ({inp['type']} - {inp['name']}):")
+            prompt_parts.append(inp['content'])
+            prompt_parts.append("")
+
         return "\n".join(prompt_parts)

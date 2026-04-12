@@ -205,7 +205,6 @@ Please provide your feedback, suggestions, or response:
                             }
                         ],
                         'input_count': 1,
-                        'primary_input': original_source_response,
                         # Reflection-specific context
                         'reflection_source': source_name,
                         'reflection_source_id': source_node.get('id'),  # CRITICAL FIX: Store node_id for accurate position calculation

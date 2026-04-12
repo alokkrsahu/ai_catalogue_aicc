@@ -2462,8 +2462,8 @@
                   <i class="fas fa-comments" style="color: white;"></i>
                 </div>
                 <div class="min-w-0">
-                  <h2 class="font-semibold text-white text-sm leading-tight truncate">
-                    {project?.name || 'Project'} <span class="font-normal text-white/60">/</span> {deployment?.chatbot_title || 'AI Assistant'}
+                  <h2 class="font-semibold text-sm leading-tight truncate" style="color: #ffffff !important;">
+                    {project?.name || 'Project'} <span class="font-normal" style="color: rgba(255,255,255,0.6);">/</span> {deployment?.chatbot_title || 'AI Assistant'}
                   </h2>
                 </div>
               </div>

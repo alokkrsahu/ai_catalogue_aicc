@@ -93,10 +93,10 @@ def intellidoc_addendum_for_node(
     node_type = agent_node.get("type") or "AssistantAgent"
     parts = [INTELLIDOC_CORE.strip()]
 
-    # Source-aware guidance
+    # Source-aware guidance — citation format for any agent that receives sources
     if has_sources:
         parts.append(INTELLIDOC_SOURCES_ADDENDUM.strip())
-        if node_type == "AssistantAgent":
+        if node_type in ("AssistantAgent", "UserProxyAgent", "GroupChatManager"):
             parts.append(CITATION_FORMAT_BLOCK.strip())
 
     # Per-type guidance (non-citation)

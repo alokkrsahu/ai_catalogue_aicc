@@ -188,6 +188,46 @@ class WorkflowDeploymentExecutor:
         cit = meta.get('citations')
         return list(cit) if isinstance(cit, list) else []
 
+    @staticmethod
+    def _collect_all_upstream_citations(messages: List[Dict], predecessor_name: str) -> List[Any]:
+        """
+        Collect citations from ALL agent messages (not just the predecessor),
+        renumber them globally so [N] markers don't collide across agents.
+        The predecessor's citations come first (highest priority), then upstream agents.
+        """
+        all_cites = []
+        seen_agents = set()
+        # Predecessor first
+        for msg in reversed(messages):
+            if not isinstance(msg, dict):
+                continue
+            name = msg.get('agent_name', '')
+            if name == predecessor_name and name not in seen_agents:
+                meta = msg.get('metadata', {})
+                if isinstance(meta, dict) and isinstance(meta.get('citations'), list):
+                    all_cites.extend(meta['citations'])
+                    seen_agents.add(name)
+                    break
+        # Then all other agents (excluding Start/End)
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            name = msg.get('agent_name', '')
+            agent_type = msg.get('agent_type', '')
+            if name in seen_agents or agent_type in ('StartNode', 'EndNode'):
+                continue
+            meta = msg.get('metadata', {})
+            if isinstance(meta, dict) and isinstance(meta.get('citations'), list):
+                cites = meta['citations']
+                if cites:
+                    all_cites.extend(cites)
+                    seen_agents.add(name)
+        # Renumber globally [1..N]
+        for i, c in enumerate(all_cites, 1):
+            if isinstance(c, dict):
+                c['ref'] = i
+        return all_cites
+
     def _extract_end_node_output(
         self,
         execution_result: Dict[str, Any],
@@ -312,7 +352,12 @@ class WorkflowDeploymentExecutor:
                                     f"✅ DEPLOYMENT: Merged citations from earlier message from '{predecessor_name}'"
                                 )
                                 break
-                    logger.info(f"✅ DEPLOYMENT: Using End node input from predecessor '{predecessor_name}': {chosen[:100]}...")
+                    # If predecessor still has no citations, collect from ALL upstream agents
+                    if not cites:
+                        cites = self._collect_all_upstream_citations(messages, predecessor_name)
+                        if cites:
+                            logger.info(f"✅ DEPLOYMENT: Collected {len(cites)} citations from upstream agents")
+                    logger.info(f"✅ DEPLOYMENT: Using End node input from predecessor '{predecessor_name}': {chosen[:100]}... ({len(cites)} citations)")
                     return chosen, cites
                 else:
                     logger.warning(f"⚠️ DEPLOYMENT: Found messages but content is empty")

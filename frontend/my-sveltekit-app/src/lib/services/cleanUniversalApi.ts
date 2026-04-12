@@ -1225,6 +1225,36 @@ export class CleanUniversalApiService {
   }
 
   // ============================================================================
+  // AI WORKFLOW GENERATION
+  // ============================================================================
+
+  /**
+   * Generate a workflow from natural language requirements using LLM tool-calling.
+   */
+  async generateWorkflow(projectId: string, message: string, conversationHistory: any[] = [], currentGraph: any = null): Promise<any> {
+    console.log(`🤖 WORKFLOW GEN: Generating workflow for project ${projectId}`);
+
+    const payload: any = { message, conversation_history: conversationHistory };
+    if (currentGraph) payload.current_graph = currentGraph;
+
+    const response = await this.handleAuthenticatedRequest(
+      `${API_BASE}/agent-orchestration/projects/${projectId}/generate-workflow/`,
+      {
+        method: 'POST',
+        headers: { ...this.getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    );
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Workflow generation failed: ${response.status}`);
+    }
+
+    return await response.json();
+  }
+
+  // ============================================================================
   // SYSTEM PERFORMANCE ANALYSIS
   // ============================================================================
 

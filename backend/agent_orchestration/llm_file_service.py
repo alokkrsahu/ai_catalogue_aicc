@@ -127,6 +127,15 @@ def _convert_docx_to_pdf(file_bytes: bytes) -> bytes:
             page.insert_text((MARGIN_LEFT, y), row_text, fontsize=9, fontname="helv")
             y += LINE_HEIGHT_BODY
 
+    # Warn about image loss — DOCX→PDF conversion only extracts text
+    try:
+        from docx.opc.constants import RELATIONSHIP_TYPE as RT
+        image_rels = [r for r in doc.part.rels.values() if "image" in r.reltype]
+        if image_rels:
+            logger.warning(f"⚠️ DOCX→PDF: {len(image_rels)} embedded image(s) lost during conversion (text-only extraction)")
+    except Exception:
+        pass
+
     buf = io.BytesIO()
     pdf.save(buf)
     pdf.close()
@@ -307,7 +316,8 @@ class LLMFileUploadService:
                     upload_filename = os.path.splitext(upload_filename)[0] + '.pdf'
                     logger.info(f"📄 LLM FILE SERVICE: Converted {document.original_filename} → PDF ({len(file_bytes)} bytes)")
                 except Exception as conv_err:
-                    logger.warning(f"⚠️ LLM FILE SERVICE: DOCX→PDF conversion failed for {document.original_filename}, uploading as-is: {conv_err}")
+                    logger.error(f"❌ LLM FILE SERVICE: DOCX→PDF conversion failed for {document.original_filename}: {conv_err}")
+                    return {'error': f'DOCX→PDF conversion failed: {conv_err}', 'reason': 'conversion_failed'}
 
             import io
             response = await sync_to_async(client.files.create)(

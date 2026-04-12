@@ -6,6 +6,7 @@ from .workflow_views import AgentWorkflowViewSet
 from .docaware_views import DocAwareConfigViewSet
 from .prompt_generation_views import PromptGenerationViewSet
 from . import human_input_views
+from .workflow_generation_views import generate_workflow_view
 
 # Create router for workflow endpoints
 router = DefaultRouter()
@@ -25,4 +26,7 @@ urlpatterns = [
     path('human-input/pending/', human_input_views.get_pending_human_inputs, name='pending_human_inputs'),
     path('human-input/submit/', human_input_views.submit_human_input, name='submit_human_input'), 
     path('human-input/history/', human_input_views.get_human_input_history, name='human_input_history'),
+
+    # AI Workflow Generation
+    path('projects/<uuid:project_id>/generate-workflow/', generate_workflow_view, name='generate_workflow'),
 ]

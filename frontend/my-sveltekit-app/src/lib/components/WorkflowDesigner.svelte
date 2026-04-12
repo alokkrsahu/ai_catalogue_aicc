@@ -8,6 +8,7 @@
   import { workflowStatus } from '$lib/stores/workflowStatus';
   import type { PendingHumanInput } from '$lib/services/humanInputService';
   import NodePropertiesPanel from './NodePropertiesPanel.svelte';
+  import WorkflowAIChatbot from './WorkflowAIChatbot.svelte';
   
   export let project: any;
   export let projectId: string;
@@ -91,6 +92,7 @@
   // UI state
   let showPalette = true;
   let showProperties = false;
+  let showAIChatbot = false;
   let saving = false;
   let showInstructions = true; // State for dismissable instructions overlay
   let isPanelMaximized = false; // Whether the properties panel is maximized as modal
@@ -872,6 +874,40 @@
     
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
+  }
+
+  // Apply AI-generated workflow to canvas
+  function applyGeneratedWorkflow(event: CustomEvent<{graphJson: any}>) {
+    const { graphJson } = event.detail;
+    if (!graphJson || !graphJson.nodes) return;
+
+    // Replace current graph
+    nodes = graphJson.nodes.map((node: any) => ({
+      id: node.id,
+      type: node.type,
+      position: node.position || { x: 0, y: 0 },
+      data: { ...node.data, label: node.data?.name || node.type }
+    }));
+    edges = graphJson.edges.map((edge: any) => ({
+      id: edge.id || `${edge.source}-${edge.target}`,
+      source: edge.source,
+      target: edge.target,
+      type: edge.type || 'sequential',
+      label: edge.label || '',
+      description: edge.description || '',
+      condition: edge.condition || '',
+      priority: edge.priority || 1,
+      retryCount: edge.retryCount || 0,
+      timeout: edge.timeout || 30,
+    }));
+
+    selectedNode = null;
+    selectedEdge = null;
+    showProperties = false;
+    showConnectionProperties = false;
+
+    saveWorkflowToDatabase(true);
+    setTimeout(() => centerView(), 150);
   }
 
   // Center view function
@@ -1842,6 +1878,15 @@
             >
               <i class="fas fa-crosshairs"></i>
             </button>
+            <!-- AI Chatbot toggle -->
+            <button
+              class="ml-2 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 {showAIChatbot ? 'bg-white text-[#002147] shadow-sm ring-1 ring-[#002147]/20' : 'bg-gradient-to-r from-violet-500 to-indigo-500 text-white shadow-md hover:shadow-lg hover:scale-105'}"
+              on:click={() => showAIChatbot = !showAIChatbot}
+              title="AI Workflow Builder"
+            >
+              <i class="fas fa-wand-magic-sparkles text-[10px]"></i>
+              {showAIChatbot ? 'Close AI' : 'AI Builder'}
+            </button>
 
           </div>
           
@@ -2362,6 +2407,19 @@
   
 
   
+  <!-- AI Workflow Builder Chatbot (Right Panel) -->
+  {#if showAIChatbot}
+    <div class="fixed right-0 top-0 bottom-0 w-80 z-50 shadow-xl">
+      <WorkflowAIChatbot
+        {projectId}
+        currentNodes={nodes}
+        currentEdges={edges}
+        on:applyWorkflow={applyGeneratedWorkflow}
+        on:close={() => showAIChatbot = false}
+      />
+    </div>
+  {/if}
+
   <!-- Node Properties Panel (Right Sidebar or Modal) -->
   {#if showProperties && selectedNode}
     {#if isPanelMaximized}

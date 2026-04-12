@@ -42,6 +42,53 @@ def citations_from_executed_output(value: Any) -> List[Dict[str, Any]]:
     return []
 
 
+def renumber_citations_globally(inputs: List[Dict[str, Any]], start_ref: int = 1) -> int:
+    """
+    Renumber citations across multiple aggregated inputs so [N] markers never collide.
+    Modifies inputs IN PLACE. Returns the next available ref number.
+
+    Each input dict must have 'content_plain' (str with [N] markers) and 'citations' (list of dicts with 'ref').
+    Uses two-pass placeholder approach to prevent collision: [old] → [__CITE_new__] → [new].
+    """
+    import re
+    current_ref = start_ref
+
+    for inp in inputs:
+        cites = inp.get("citations", [])
+        if not cites:
+            continue
+
+        content = inp.get("content_plain", "")
+
+        # Build old→new mapping from citation objects
+        old_refs = sorted({c.get("ref") for c in cites if c.get("ref") is not None})
+        if not old_refs:
+            continue
+
+        old_to_new = {}
+        for i, old in enumerate(old_refs):
+            old_to_new[old] = current_ref + i
+
+        # Pass 1: replace [old] with placeholder [__CITE_new__] (reverse order to avoid substring collision)
+        for old in sorted(old_refs, reverse=True):
+            content = content.replace(f"[{old}]", f"[__CITE_{old_to_new[old]}__]")
+
+        # Pass 2: replace placeholders with final [new]
+        for new in range(current_ref, current_ref + len(old_refs)):
+            content = content.replace(f"[__CITE_{new}__]", f"[{new}]")
+
+        # Update citation objects
+        for c in cites:
+            old = c.get("ref")
+            if old in old_to_new:
+                c["ref"] = old_to_new[old]
+
+        inp["content_plain"] = content
+        current_ref += len(old_refs)
+
+    return current_ref
+
+
 def format_upstream_citations_block(agent_name: str, citations: List[Dict[str, Any]]) -> str:
     """
     Human-readable block appended for downstream LLM prompts so [N] markers stay interpretable.

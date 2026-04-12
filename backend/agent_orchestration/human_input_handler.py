@@ -91,9 +91,8 @@ class HumanInputHandler:
         execution_record.human_input_agent_id = agent_id
         execution_record.human_input_context = {
             'agent_id': agent_id,
-            'input_sources': context['all_inputs'],
-            'input_count': context['input_count'],
-            'primary_input': context['primary_input']
+            'input_sources': context.get('all_inputs', []),
+            'input_count': context.get('input_count', 0),
         }
         execution_record.human_input_requested_at = timezone.now()
         execution_record.save()
