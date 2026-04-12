@@ -1607,6 +1607,7 @@ def public_chat_endpoint_stream(request, project_id):
             # Persist conversation (including full assistant response) BEFORE streaming
             # so the response survives even if the client disconnects mid-stream.
             stream_citations = execution_result.get('citations') or []
+            logger.info(f"🔍 DEPLOYMENT STREAM: citations from execution_result: {len(stream_citations)} items, keys in result: {list(execution_result.keys())}")
             assistant_history_entry = {
                 'role': 'assistant',
                 'content': assistant_response,
@@ -1650,9 +1651,13 @@ def public_chat_endpoint_stream(request, project_id):
                 import time
                 time.sleep(0.02)  # 20ms delay between words
 
-            # Send parsed citations as a separate event after content stream
-            if parsed_citations_json:
-                yield f"data: {json.dumps({'type': 'citations', 'citations': parsed_citations_json, 'request_id': request_id})}\n\n"
+            # Send citations as a separate SSE event after content stream.
+            # Use text-parsed citations if available, otherwise use structured
+            # citations from the execution result (metadata path).
+            _final_citations = parsed_citations_json or stream_citations
+            if _final_citations:
+                yield f"data: {json.dumps({'type': 'citations', 'citations': _final_citations, 'request_id': request_id})}\n\n"
+                logger.info(f"🔍 DEPLOYMENT STREAM: Sent citations SSE event with {len(_final_citations)} citations (source={'text_block' if parsed_citations_json else 'execution_result'})")
             
             # Save execution metadata in background (conversation already persisted above)
             background_thread = threading.Thread(
@@ -1674,6 +1679,7 @@ def public_chat_endpoint_stream(request, project_id):
             background_thread.start()
             
             # Send completion (stream_citations computed earlier, before streaming)
+            logger.info(f"🔍 DEPLOYMENT STREAM: Sending done event with {len(stream_citations)} citations, parsed_from_text={parsed_citations_json is not None}")
             yield f"data: {json.dumps({'type': 'done', 'request_id': request_id, 'execution_time_ms': execution_time_ms, 'citations': stream_citations})}\n\n"
             
         except Exception as e:
@@ -3889,17 +3895,20 @@ def embed_chatbot_html(request, project_id):
       let accumulatedContent = '';
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
-      
+      let _sseBuffer = '';
+
       while (true) {{
         const {{ done, value }} = await reader.read();
         if (done) break;
-        
-        const chunk = decoder.decode(value, {{ stream: true }});
-        const lines = chunk.split('\\n');
-        
-        for (const line of lines) {{
-          if (line.startsWith('data: ')) {{
-            try {{
+
+        _sseBuffer += decoder.decode(value, {{ stream: true }});
+        const parts = _sseBuffer.split('\\n\\n');
+        _sseBuffer = parts.pop() || '';
+
+        for (const part of parts) {{
+          const line = part.trim();
+          if (!line.startsWith('data: ')) continue;
+          try {{
               const data = JSON.parse(line.slice(6));
               
               if (data.type === 'planning' || data.type === 'delegate_start' ||
@@ -3925,10 +3934,14 @@ def embed_chatbot_html(request, project_id):
                 messagesEl.scrollTop = messagesEl.scrollHeight;
               }} else if (data.type === 'citations') {{
                 // Render citation chips below the streamed message
+                console.log('📎 Citations SSE received:', data.citations ? data.citations.length : 0, 'items');
                 if (markdownEl && Array.isArray(data.citations) && data.citations.length > 0) {{
                   _chatCitations = data.citations;
                   markdownEl.innerHTML = renderCitationChips(renderMarkdown(accumulatedContent), data.citations);
                   messagesEl.scrollTop = messagesEl.scrollHeight;
+                  console.log('📎 Citations rendered in markdownEl');
+                }} else {{
+                  console.warn('📎 Citations NOT rendered: markdownEl=', !!markdownEl, 'citations=', data.citations?.length);
                 }}
               }} else if (data.type === 'awaiting_human_input') {{
                 hideThinkingIndicator();
@@ -3950,16 +3963,22 @@ def embed_chatbot_html(request, project_id):
                 let citations = [];
                 if (Array.isArray(data.citations) && data.citations.length > 0) {{
                   citations = data.citations;
+                  console.log('📎 Done: using data.citations:', citations.length);
                 }} else if (_chatCitations.length > 0) {{
                   citations = _chatCitations;
+                  console.log('📎 Done: using _chatCitations:', citations.length);
                 }} else {{
                   citations = parsed.citations;
+                  console.log('📎 Done: using parsed citations:', citations.length);
                 }}
                 _chatCitations = citations;
+                console.log('📎 Done handler: total citations =', citations.length, 'markdownEl =', !!markdownEl, 'cleanContent has [1] =', cleanContent.includes('[1]'));
                 if (markdownEl) {{
-                  markdownEl.innerHTML = citations.length > 0
+                  var newHtml = citations.length > 0
                     ? renderCitationChips(renderMarkdown(cleanContent), citations)
                     : renderMarkdown(cleanContent);
+                  markdownEl.innerHTML = newHtml;
+                  console.log('📎 Done: rendered, has cite-chip =', newHtml.includes('cite-chip'));
                 }}
                 if (bubble) addCopyButton(bubble, cleanContent, citations);
                 messages.push({{ role: 'assistant', content: cleanContent }});
@@ -3972,7 +3991,6 @@ def embed_chatbot_html(request, project_id):
             }}
           }}
         }}
-      }}
     }} catch (e) {{
       console.error('Chat error:', e);
       hideThinkingIndicator();

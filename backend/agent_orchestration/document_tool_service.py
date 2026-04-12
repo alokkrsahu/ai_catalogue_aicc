@@ -634,7 +634,7 @@ async def execute_find_relevant_documents_tool(
     chunk_limit = max(limit * 6, 30)  # fetch more chunks to get good document coverage
 
     try:
-        service = EnhancedDocAwareAgentService(project_id)
+        service = await sync_to_async(EnhancedDocAwareAgentService)(project_id)
         results = await sync_to_async(service.search_documents)(
             query,
             search_method=SearchMethod.HYBRID_SEARCH,
