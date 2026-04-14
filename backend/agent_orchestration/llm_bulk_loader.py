@@ -26,7 +26,17 @@ class LLMBulkLoaderService:
     
     def __init__(self):
         self.is_loading = False
-        self.load_lock = asyncio.Lock()
+        self._load_lock = None
+
+    def _get_lock(self):
+        """Get or create an asyncio.Lock bound to the current event loop."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if self._load_lock is None or loop is not getattr(self._load_lock, '_loop', None):
+            self._load_lock = asyncio.Lock()
+        return self._load_lock
     
     def _get_cache_key(self, project=None) -> str:
         """Generate project-specific cache key"""
@@ -50,7 +60,7 @@ class LLMBulkLoaderService:
         Returns:
             Comprehensive model data with provider status and metadata
         """
-        async with self.load_lock:
+        async with self._get_lock():
             if self.is_loading:
                 logger.info("🔄 BULK LOADER: Loading already in progress, waiting...")
                 # Wait for existing load to complete
