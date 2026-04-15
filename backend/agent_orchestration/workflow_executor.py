@@ -756,9 +756,12 @@ class WorkflowExecutor:
                                 )
                             else:
                                 # Standard single LLM call (existing path)
+                                # Emit `agent_started`, NOT `planning` — there's no real plan to
+                                # show. Earlier this stuffed the system_message into a fake plan
+                                # event, which the chatbot UI then displayed as "Agent X created
+                                # a plan" with the system prompt as the body.
                                 if event_callback:
-                                    _agent_desc = node_data.get('system_message', '')[:300] or node_data.get('description', '') or f"Processing {node_name}"
-                                    event_callback("planning", {"agent": node_name, "content": _agent_desc})
+                                    event_callback("agent_started", {"agent": node_name, "agent_type": node_type})
                                 agent_response = await llm_provider.generate_response(
                                     messages=llm_messages
                                 )
@@ -3359,10 +3362,14 @@ class WorkflowExecutor:
             try:
                 logger.info(f"🔀 PARALLEL: Executing {node_name} (type: {node_type})")
 
-                # Emit start event for parallel agents with agent's role description
+                # Emit start event for parallel agents.
+                # NOTE: previously emitted "planning" with the agent's system_message
+                # as content — that surfaced in the chatbot UI as a fake "Agent X
+                # created a plan" with the system prompt as the body. Use the
+                # honest "agent_started" event instead; the real plan event only
+                # fires when plan_mode actually runs.
                 if event_callback:
-                    agent_desc = node_data.get('system_message', '')[:300] or node_data.get('description', '') or f"Executing {node_name}"
-                    event_callback("planning", {"agent": node_name, "content": agent_desc})
+                    event_callback("agent_started", {"agent": node_name, "agent_type": node_type})
 
                 # Handle UserProxyAgent separately (can't parallelize if requires human input)
                 if node_type == 'UserProxyAgent' and node_data.get('require_human_input', True):

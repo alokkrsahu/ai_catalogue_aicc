@@ -3664,6 +3664,7 @@ def embed_chatbot_html(request, project_id):
   const _activityIcons = {{
     planning: '📋', delegate_start: '🤝', delegate_plan: '📝',
     tool_result: '🔍', delegate_done: '✅', synthesizing: '⚙️',
+    agent_started: '▶️',
   }};
 
   function _ensureActivityPanel() {{
@@ -3707,6 +3708,9 @@ def embed_chatbot_html(request, project_id):
     switch (data.type) {{
       case 'planning':
         desc = '<b>' + (data.agent || '') + '</b> created a plan';
+        break;
+      case 'agent_started':
+        desc = '<b>' + (data.agent || '') + '</b> started';
         break;
       case 'delegate_start':
         desc = '<b>' + (data.agent || '') + '</b> started — ' +
