@@ -496,22 +496,48 @@
         };
       });
 
-      edges = graphData.edges.map((edge: any) => ({
-        id: edge.id || `${edge.source}-${edge.target}`,
-        source: edge.source,
-        target: edge.target,
-        type: edge.type || 'default',
-        label: edge.label || '',
-        description: edge.description || '',
-        condition: edge.condition || '',
-        priority: edge.priority || 1,
-        retryCount: edge.retryCount || 0,
-        timeout: edge.timeout || 30,
-        // Preserve source_handle (carries ClassifierAgent category UUID for
-        // routing branches; without it the executor can't prune correctly).
-        ...(edge.source_handle ? { source_handle: edge.source_handle } : {}),
-      }));
-      
+      // Backfill source_handle on legacy ClassifierAgent outgoing edges —
+      // earlier saves predate the per-category-handle UI, so these edges
+      // carry no UUID. The backend validator rejects them
+      // ("outgoing edge missing source_handle"), so we recover by assigning
+      // categories[i].id to the i-th outgoing edge in source order. After
+      // this load + next save, the data is permanently fixed.
+      const _classifierIndex = new Map<string, any>();
+      for (const n of nodes) {
+        if (n.type === 'ClassifierAgent') _classifierIndex.set(n.id, n);
+      }
+      const _classifierEdgeCounter = new Map<string, number>();
+
+      edges = graphData.edges.map((edge: any) => {
+        let sourceHandle = edge.source_handle;
+        if (!sourceHandle && _classifierIndex.has(edge.source)) {
+          const cls = _classifierIndex.get(edge.source);
+          const cats = cls?.data?.categories || [];
+          const idx = _classifierEdgeCounter.get(edge.source) || 0;
+          if (cats[idx]?.id) {
+            sourceHandle = cats[idx].id;
+            console.log(
+              `🔧 LEGACY EDGE: backfilled source_handle for classifier ` +
+              `'${cls?.data?.name}' edge #${idx + 1} → category '${cats[idx].name}'`
+            );
+          }
+          _classifierEdgeCounter.set(edge.source, idx + 1);
+        }
+        return {
+          id: edge.id || `${edge.source}-${edge.target}`,
+          source: edge.source,
+          target: edge.target,
+          type: edge.type || 'default',
+          label: edge.label || '',
+          description: edge.description || '',
+          condition: edge.condition || '',
+          priority: edge.priority || 1,
+          retryCount: edge.retryCount || 0,
+          timeout: edge.timeout || 30,
+          ...(sourceHandle ? { source_handle: sourceHandle } : {}),
+        };
+      });
+
       console.log(`✅ WORKFLOW DESIGNER: Loaded ${nodes.length} nodes, ${edges.length} edges`);
       
       // Auto-center view on loaded nodes

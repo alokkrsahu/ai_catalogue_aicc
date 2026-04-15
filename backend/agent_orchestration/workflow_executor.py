@@ -3210,13 +3210,27 @@ class WorkflowExecutor:
                 )
 
             # Every outgoing edge must reference a current category id.
+            # Tolerance for LEGACY graphs: edges saved before the per-category
+            # handle UI carry no source_handle. We backfill in source-order
+            # (i-th outgoing edge → i-th category's id) IN-PLACE on the graph,
+            # so subsequent execution reads the corrected values. Same heuristic
+            # the frontend's load-time backfill uses; this guard makes the
+            # system robust when the deployment runs straight from the DB
+            # without a frontend round-trip.
             outgoing = [e for e in edges if e.get('source') == nid]
+            cat_id_list = [c.get('id') for c in categories if isinstance(c, dict) and c.get('id')]
+            backfilled = 0
             for e_idx, edge in enumerate(outgoing):
                 handle = edge.get('source_handle')
                 if not handle:
+                    if e_idx < len(cat_id_list):
+                        edge['source_handle'] = cat_id_list[e_idx]
+                        backfilled += 1
+                        continue
                     errors.append(
                         f"ClassifierAgent '{name}' outgoing edge #{e_idx + 1} is "
-                        f"missing 'source_handle' (category id)."
+                        f"missing 'source_handle' (category id) and no category "
+                        f"available at index {e_idx} for backfill."
                     )
                     continue
                 if handle not in seen_ids:
@@ -3224,6 +3238,12 @@ class WorkflowExecutor:
                         f"ClassifierAgent '{name}' outgoing edge #{e_idx + 1} references "
                         f"unknown category id '{handle}' — the category may have been deleted."
                     )
+            if backfilled:
+                logger.warning(
+                    f"⚠️ CLASSIFIER VALIDATION: backfilled {backfilled} missing "
+                    f"source_handle(s) on '{name}' from category order — save the "
+                    f"workflow from the canvas to make this permanent."
+                )
 
         return errors
 

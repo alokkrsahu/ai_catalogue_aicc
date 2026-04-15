@@ -627,6 +627,18 @@ AVAILABLE LLM MODELS (configured for this project)
 
 {available_models_section}
 
+CRITICAL — provider/model selection rules:
+• ONLY pick providers from the list above. They are the providers this
+  project has API keys for in the API Management settings.
+• If you pick a provider that is NOT listed, the agent will FAIL at runtime
+  with "Failed to create LLM provider — check project API key configuration".
+• If multiple providers are listed, prefer the one that fits the task:
+  OpenAI for strong tool-calling and structured outputs; Anthropic for
+  long-context reasoning; Google for fast/cheap routing.
+• When unsure or the user didn't specify, pick the FIRST provider listed.
+• The platform will auto-substitute the first available provider if you pick
+  an unconfigured one — but it's better to choose correctly the first time.
+
 ═══════════════════════════════════════════════════════════
 YOUR PROCESS — FOLLOW THESE 3 PHASES
 ═══════════════════════════════════════════════════════════
@@ -660,12 +672,54 @@ GUIDELINES:
 class WorkflowBuilder:
     """Executes LLM tool calls to build a graph_json structure."""
 
-    def __init__(self, available_documents: Optional[List[str]] = None):
+    # Sensible default model per provider when we have to fall back because the
+    # LLM picked a provider the project has no API key for. Picked for cheap +
+    # reliable tool-calling behavior.
+    _PROVIDER_DEFAULT_MODELS = {
+        "openai": "gpt-4o-mini",
+        "anthropic": "claude-3-5-haiku-20241022",
+        "google": "gemini-2.0-flash",
+    }
+
+    def __init__(
+        self,
+        available_documents: Optional[List[str]] = None,
+        available_providers: Optional[List[str]] = None,
+    ):
         self.nodes: List[Dict[str, Any]] = []
         self.edges: List[Dict[str, Any]] = []
         self.node_name_map: Dict[str, str] = {}  # name → node_id
         self.tool_calls_log: List[Dict[str, Any]] = []
         self.available_documents: List[str] = available_documents or []
+        # If empty, no project keys were detected — we don't fall back; let
+        # the runtime error speak for itself rather than masking the issue.
+        self.available_providers: List[str] = available_providers or []
+
+    def _resolve_provider_and_model(
+        self,
+        requested_provider: Optional[str],
+        requested_model: Optional[str],
+    ) -> tuple[str, str]:
+        """Map (requested_provider, requested_model) to a (provider, model)
+        the project actually has an API key for. If the requested provider
+        is available, pass through. Otherwise pick the first available provider
+        and substitute its sensible default model. If no providers are
+        configured, return the request unchanged so the runtime error is
+        clear about the missing key.
+        """
+        provider = (requested_provider or "").lower().strip() or "openai"
+        model = requested_model or self._PROVIDER_DEFAULT_MODELS.get(provider, "")
+        if not self.available_providers:
+            return provider, model
+        if provider in self.available_providers:
+            return provider, model
+        fallback_provider = self.available_providers[0]
+        fallback_model = self._PROVIDER_DEFAULT_MODELS.get(fallback_provider, model)
+        logger.info(
+            f"🔑 WORKFLOW GEN: requested provider '{provider}' not configured; "
+            f"falling back to '{fallback_provider}' / {fallback_model}"
+        )
+        return fallback_provider, fallback_model
 
     def load_existing_graph(self, graph: Dict[str, Any]):
         """Load an existing workflow graph into the builder for modification. Deduplicates Start/End nodes."""
@@ -820,6 +874,10 @@ class WorkflowBuilder:
         if "documents" in args:
             args["documents"] = self._expand_documents(args.get("documents"))
         toggles = self._resolve_toggle_dependencies(args)
+        provider, model = self._resolve_provider_and_model(
+            args.get("llm_provider", "openai"),
+            args.get("llm_model", "gpt-5.3-chat-latest"),
+        )
         self.nodes.append({
             "id": node_id,
             "type": "AssistantAgent",
@@ -828,9 +886,9 @@ class WorkflowBuilder:
                 "name": name,
                 "system_message": args.get("system_message", "You are a helpful AI assistant."),
                 "description": args.get("description", f"AI assistant: {name}"),
-                "llm_provider": args.get("llm_provider", "openai"),
-                "llm_model": args.get("llm_model", "gpt-5.3-chat-latest"),
-                "llm_config": args.get("llm_model", "gpt-5.3-chat-latest"),
+                "llm_provider": provider,
+                "llm_model": model,
+                "llm_config": model,
                 **toggles,
                 "file_attachments_enabled": False,
                 "file_attachment_documents": [],
@@ -879,8 +937,10 @@ class WorkflowBuilder:
                 "description": f"Coordinates specialist delegates: {name}",
                 "system_message": args.get("system_message", "You are a Group Chat Manager."),
                 "delegate_connections": [],
-                "llm_provider": args.get("llm_provider", "openai"),
-                "llm_model": args.get("llm_model", "gpt-5.3-chat-latest"),
+                **dict(zip(("llm_provider", "llm_model"), self._resolve_provider_and_model(
+                    args.get("llm_provider", "openai"),
+                    args.get("llm_model", "gpt-5.3-chat-latest"),
+                ))),
                 "temperature": args.get("temperature", 0.7),
             }
         })
@@ -894,6 +954,10 @@ class WorkflowBuilder:
         if "documents" in args:
             args["documents"] = self._expand_documents(args.get("documents"))
         toggles = self._resolve_toggle_dependencies(args)
+        provider, model = self._resolve_provider_and_model(
+            args.get("llm_provider", "openai"),
+            args.get("llm_model", "gpt-5.3-chat-latest"),
+        )
         self.nodes.append({
             "id": node_id,
             "type": "DelegateAgent",
@@ -902,9 +966,9 @@ class WorkflowBuilder:
                 "name": name,
                 "system_message": args.get("system_message", "You are a specialized delegate."),
                 "description": f"Delegate: {name}",
-                "llm_provider": args.get("llm_provider", "openai"),
-                "llm_model": args.get("llm_model", "gpt-5.3-chat-latest"),
-                "llm_config": args.get("llm_model", "gpt-5.3-chat-latest"),
+                "llm_provider": provider,
+                "llm_model": model,
+                "llm_config": model,
                 **toggles,
                 "file_attachments_enabled": False,
                 "file_attachment_documents": [],
@@ -956,6 +1020,10 @@ class WorkflowBuilder:
             })
         if len(categories) < 2:
             return f"Error: ClassifierAgent '{name}' has fewer than 2 valid categories after normalization"
+        provider, model = self._resolve_provider_and_model(
+            args.get("llm_provider", "anthropic"),
+            args.get("llm_model", "claude-3-5-haiku-20241022"),
+        )
         self.nodes.append({
             "id": node_id,
             "type": "ClassifierAgent",
@@ -964,8 +1032,8 @@ class WorkflowBuilder:
                 "name": name,
                 "description": f"Routes input to one of {len(categories)} categories",
                 "categories": categories,
-                "llm_provider": args.get("llm_provider", "anthropic"),
-                "llm_model": args.get("llm_model", "claude-3-5-haiku-20241022"),
+                "llm_provider": provider,
+                "llm_model": model,
                 "temperature": args.get("temperature", 0.0),
             }
         })
@@ -1103,6 +1171,17 @@ class WorkflowBuilder:
             merged = {**node["data"], **properties}
             resolved = self._resolve_toggle_dependencies(merged)
             properties.update(resolved)
+
+        # If the LLM is changing llm_provider/llm_model, route through the
+        # availability resolver so it can't switch the agent to a provider
+        # the project has no API key for.
+        if "llm_provider" in properties or "llm_model" in properties:
+            current_data = node.get("data", {})
+            new_provider = properties.get("llm_provider", current_data.get("llm_provider", "openai"))
+            new_model = properties.get("llm_model", current_data.get("llm_model", ""))
+            resolved_provider, resolved_model = self._resolve_provider_and_model(new_provider, new_model)
+            properties["llm_provider"] = resolved_provider
+            properties["llm_model"] = resolved_model
 
         # Merge into node data
         updated_keys = []
@@ -1832,6 +1911,7 @@ async def generate_workflow(
     from asgiref.sync import sync_to_async
 
     available_models_lines = []
+    available_providers: List[str] = []  # Project actually has API keys for these
     provider_models = {
         "openai": "gpt-5.3-chat-latest (recommended), gpt-4o, gpt-4o-mini, o3-mini",
         "anthropic": "claude-sonnet-4-20250514, claude-3-5-haiku-20241022",
@@ -1843,18 +1923,23 @@ async def generate_workflow(
         for provider_name, models_str in provider_models.items():
             key = await sync_to_async(key_service.get_project_api_key)(project, provider_name)
             if key:
+                available_providers.append(provider_name)
                 label = provider_name.capitalize()
                 if provider_name == "openai":
                     label = "OpenAI"
                 available_models_lines.append(f"- {label}: {models_str}")
     except Exception as e:
         logger.warning(f"⚠️ WORKFLOW GEN: Could not check API keys: {e}")
-        # Fallback: show all providers
+        # Fallback when key lookup crashes: assume all three are available so
+        # we don't block the LLM. Runtime errors will be visible if a chosen
+        # provider has no key.
+        available_providers = list(provider_models.keys())
         for provider_name, models_str in provider_models.items():
             available_models_lines.append(f"- {provider_name.capitalize()}: {models_str}")
 
     if not available_models_lines:
         available_models_lines.append("No LLM providers configured. Use openai as default.")
+    logger.info(f"🔑 WORKFLOW GEN: available providers for project = {available_providers}")
 
     available_models_section = "\n".join(available_models_lines)
 
@@ -2013,8 +2098,13 @@ async def generate_workflow(
 
     # Call LLM with tools — pass available document filenames so the builder
     # can expand wildcard `documents=["*"]` to the full project document list.
+    # Also pass available_providers so handlers can fall back to a provider
+    # the project actually has an API key for.
     available_doc_filenames = [d.original_filename for d in project_docs]
-    builder = WorkflowBuilder(available_documents=available_doc_filenames)
+    builder = WorkflowBuilder(
+        available_documents=available_doc_filenames,
+        available_providers=available_providers,
+    )
     if current_graph and current_graph.get("nodes"):
         builder.load_existing_graph(current_graph)
     max_iterations = 10  # Allow multiple rounds of tool calls
