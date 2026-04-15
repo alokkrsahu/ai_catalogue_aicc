@@ -3741,6 +3741,12 @@ def embed_chatbot_html(request, project_id):
       detail = data.tasks.map(function(t, i) {{ return (i + 1) + '. ' + t; }}).join('\\n');
     }} else if (data.type === 'tool_result' && data.content) {{
       detail = data.content;
+    }} else if (data.type === 'delegate_done' && data.content) {{
+      // Show the agent's actual output (truncated upstream) as expandable
+      // detail. This was previously hidden — only the "X finished (N chars)"
+      // summary line was visible — leaving the user with no way to inspect
+      // what each agent produced.
+      detail = data.content;
     }}
 
     const item = document.createElement('div');

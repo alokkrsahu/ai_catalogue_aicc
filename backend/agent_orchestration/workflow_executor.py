@@ -804,7 +804,7 @@ class WorkflowExecutor:
                                 event_callback("delegate_done", {
                                     "agent": node_name,
                                     "chars": len(agent_response_text),
-                                    "content": agent_response_text[:200],
+                                    "content": agent_response_text[:2000],
                                 })
 
                             # CRITICAL FIX: Save agent message BEFORE reflection processing
@@ -2574,7 +2574,7 @@ class WorkflowExecutor:
                     )
 
                 if event_callback:
-                    event_callback("delegate_done", {"agent": node_name, "chars": len(clean_text), "content": clean_text[:200]})
+                    event_callback("delegate_done", {"agent": node_name, "chars": len(clean_text), "content": clean_text[:2000]})
                 return _append_citations_block(clean_text, _new_citations), _new_citations
 
             # Record the assistant's tool-call turn in the conversation
@@ -2953,7 +2953,7 @@ class WorkflowExecutor:
             )
 
         if event_callback:
-            event_callback("delegate_done", {"agent": node_name, "chars": len(clean_text), "content": clean_text[:200]})
+            event_callback("delegate_done", {"agent": node_name, "chars": len(clean_text), "content": clean_text[:2000]})
         return _append_citations_block(clean_text, _new_citations), _new_citations
 
     async def _save_messages_to_database(self, messages, execution_record):
@@ -3562,7 +3562,7 @@ class WorkflowExecutor:
                     event_callback("delegate_done", {
                         "agent": node_name,
                         "chars": len(agent_response_text),
-                        "content": agent_response_text[:200],
+                        "content": agent_response_text[:2000],
                     })
 
                 return {
