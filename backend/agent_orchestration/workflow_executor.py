@@ -24,6 +24,11 @@ from .executed_nodes_codec import (
     plain_executed_output,
     format_upstream_citations_block,
 )
+from .classifier_executor import (
+    execute_classifier,
+    ClassifierSelectionError,
+    CLASSIFIER_SKIPPED_SENTINEL,
+)
 
 logger = logging.getLogger('conversation_orchestrator')
 
@@ -155,6 +160,14 @@ class WorkflowExecutor:
                                 raise Exception(f"Execution sequence violation: {target_name} appears before dependency {source_name}")
             
             logger.info(f"✅ ORCHESTRATOR: Execution sequence validated - {len(execution_sequence)} nodes in correct dependency order")
+
+            # Validate ClassifierAgent-specific invariants before we start running.
+            classifier_errors = self._validate_classifier_nodes(graph_json)
+            if classifier_errors:
+                raise Exception(
+                    "Classifier validation failed:\n  - "
+                    + "\n  - ".join(classifier_errors)
+                )
             
             # Initialize conversation tracking
             conversation_history = ""
@@ -1087,7 +1100,139 @@ class WorkflowExecutor:
                         executed_nodes[node_id] = error_output
                         conversation_history += f"\n{node_name} (MCP Server): {error_output}"
                         raise mcp_error
-                    
+
+                elif node_type == 'ClassifierAgent':
+                    # ----------------------------------------------------------
+                    # Classifier: pick exactly one category via forced tool call,
+                    # then prune the subgraphs of non-selected categories.
+                    # Pass-through semantics: downstream receives the ORIGINAL
+                    # input text unchanged; the decision is surfaced via a stream
+                    # message for observability only.
+                    # ----------------------------------------------------------
+                    categories = node_data.get('categories') or []
+                    if len(categories) < 2:
+                        raise Exception(
+                            f"ClassifierAgent {node_name} must have at least 2 categories "
+                            f"(got {len(categories)})."
+                        )
+
+                    # Resolve the input text from upstream (same aggregation path
+                    # other agents use — StartNode.prompt or upstream agent output).
+                    input_sources = self.workflow_parser.find_multiple_inputs_to_node(node_id, graph_json)
+                    if not input_sources:
+                        raise Exception(
+                            f"ClassifierAgent {node_name} has no upstream input. "
+                            f"Connect a StartNode or an agent to its input."
+                        )
+                    aggregated_context = self.workflow_parser.aggregate_multiple_inputs(
+                        input_sources, executed_nodes
+                    )
+                    all_inputs = aggregated_context.get('all_inputs') or []
+                    if not all_inputs:
+                        raise Exception(
+                            f"ClassifierAgent {node_name} has no resolvable input "
+                            f"(all upstream branches were pruned)."
+                        )
+                    input_text = "\n\n".join(
+                        (ctx.get('content_plain') or '').strip()
+                        for ctx in all_inputs
+                        if (ctx.get('content_plain') or '').strip()
+                    )
+                    if not input_text:
+                        raise Exception(
+                            f"ClassifierAgent {node_name} resolved empty input text."
+                        )
+
+                    # Build the LLM provider using the classifier's own config.
+                    agent_config = {
+                        'llm_provider': node_data.get('llm_provider', 'anthropic'),
+                        'llm_model': node_data.get('llm_model', 'claude-3-5-haiku-20241022'),
+                    }
+                    project = await sync_to_async(lambda: workflow.project)()
+                    llm_provider = await self.llm_provider_manager.get_llm_provider(agent_config, project)
+                    if not llm_provider:
+                        raise Exception(
+                            f"Failed to create LLM provider for ClassifierAgent {node_name} "
+                            f"— check project API key configuration."
+                        )
+
+                    logger.info(
+                        f"🧭 ORCHESTRATOR: Executing ClassifierAgent {node_name} "
+                        f"(provider={agent_config['llm_provider']}, categories={len(categories)})"
+                    )
+
+                    try:
+                        decision = await execute_classifier(
+                            classifier_node=node,
+                            input_text=input_text,
+                            llm_provider=llm_provider,
+                            provider_name=agent_config['llm_provider'],
+                            event_callback=event_callback,
+                        )
+                    except ClassifierSelectionError as cls_err:
+                        logger.error(
+                            f"❌ ORCHESTRATOR: ClassifierAgent {node_name} failed: {cls_err}"
+                        )
+                        raise
+
+                    chosen_id = decision['category_id']
+                    chosen_name = decision['category_name']
+                    reasoning = decision.get('reasoning', '')
+
+                    # Pass-through: downstream sees the untouched input text.
+                    executed_nodes[node_id] = input_text
+
+                    # Prune the subgraphs reachable only via non-selected category handles.
+                    skipped = self._prune_unselected_branches(
+                        graph_json, node_id, chosen_id
+                    )
+                    for sk_id in skipped:
+                        # Mark pruned nodes so _find_ready_nodes treats them as done
+                        # and aggregate_multiple_inputs filters their sentinel out.
+                        if sk_id not in executed_nodes:
+                            executed_nodes[sk_id] = CLASSIFIER_SKIPPED_SENTINEL
+                    if skipped:
+                        logger.info(
+                            f"✂️ ORCHESTRATOR: Classifier {node_name} pruned "
+                            f"{len(skipped)} downstream node(s): {list(skipped)}"
+                        )
+
+                    # Emit a decision message into the stream for observability.
+                    # This is NOT injected into conversation_history — downstream
+                    # agents receive the untouched input (pure router semantics).
+                    decision_content = (
+                        f"Classified as: {chosen_name}"
+                        + (f" — {reasoning}" if reasoning else "")
+                    )
+                    messages.append({
+                        'sequence': message_sequence,
+                        'agent_name': node_name,
+                        'agent_type': 'ClassifierAgent',
+                        'content': decision_content,
+                        'message_type': 'classifier_decision',
+                        'timestamp': timezone.now().isoformat(),
+                        'response_time_ms': 0,
+                        'metadata': {
+                            'llm_provider': agent_config['llm_provider'],
+                            'llm_model': agent_config['llm_model'],
+                            'classifier_decision': {
+                                'category_id': chosen_id,
+                                'category_name': chosen_name,
+                                'reasoning': reasoning,
+                                'skipped_nodes': list(skipped),
+                            },
+                        },
+                    })
+                    message_sequence += 1
+                    agents_involved.add(node_name)
+                    if agent_config['llm_provider'] not in providers_used:
+                        providers_used.append(agent_config['llm_provider'])
+
+                    # Persist executed_nodes (incl. skip sentinels) + messages.
+                    execution_record.executed_nodes = executed_nodes
+                    execution_record.messages_data = messages
+                    await sync_to_async(execution_record.save)(update_fields=['executed_nodes', 'messages_data'])
+
                 elif node_type == 'EndNode':
                     # Handle end node
                     end_message = node_data.get('message', 'Workflow completed successfully.')
@@ -1887,11 +2032,115 @@ class WorkflowExecutor:
                     await sync_to_async(execution_record.save)(update_fields=['messages_data', 'conversation_history'])
                     logger.info(f"💾 CONTINUE WORKFLOW: Saved messages_data for {node_name} to database")
                     
+                elif node_type == 'ClassifierAgent':
+                    # Mirror of the main-executor classifier branch for the
+                    # continue (post-human-input) path. See execute_workflow for
+                    # design commentary.
+                    categories = node_data.get('categories') or []
+                    if len(categories) < 2:
+                        raise Exception(
+                            f"ClassifierAgent {node_name} must have at least 2 categories "
+                            f"(got {len(categories)})."
+                        )
+
+                    input_sources = self.workflow_parser.find_multiple_inputs_to_node(node_id, graph_json)
+                    if not input_sources:
+                        raise Exception(
+                            f"ClassifierAgent {node_name} has no upstream input."
+                        )
+                    aggregated_context = self.workflow_parser.aggregate_multiple_inputs(
+                        input_sources, executed_nodes
+                    )
+                    all_inputs = aggregated_context.get('all_inputs') or []
+                    if not all_inputs:
+                        raise Exception(
+                            f"ClassifierAgent {node_name} has no resolvable input."
+                        )
+                    input_text = "\n\n".join(
+                        (ctx.get('content_plain') or '').strip()
+                        for ctx in all_inputs
+                        if (ctx.get('content_plain') or '').strip()
+                    )
+                    if not input_text:
+                        raise Exception(
+                            f"ClassifierAgent {node_name} resolved empty input text."
+                        )
+
+                    cls_agent_config = {
+                        'llm_provider': node_data.get('llm_provider', 'anthropic'),
+                        'llm_model': node_data.get('llm_model', 'claude-3-5-haiku-20241022'),
+                    }
+                    cls_llm_provider = await self.llm_provider_manager.get_llm_provider(cls_agent_config, project)
+                    if not cls_llm_provider:
+                        raise Exception(
+                            f"Failed to create LLM provider for ClassifierAgent {node_name}."
+                        )
+
+                    try:
+                        decision = await execute_classifier(
+                            classifier_node=node,
+                            input_text=input_text,
+                            llm_provider=cls_llm_provider,
+                            provider_name=cls_agent_config['llm_provider'],
+                            event_callback=None,
+                        )
+                    except ClassifierSelectionError as cls_err:
+                        logger.error(
+                            f"❌ CONTINUE WORKFLOW: ClassifierAgent {node_name} failed: {cls_err}"
+                        )
+                        raise
+
+                    chosen_id = decision['category_id']
+                    chosen_name = decision['category_name']
+                    reasoning = decision.get('reasoning', '')
+
+                    executed_nodes[node_id] = input_text
+
+                    skipped = self._prune_unselected_branches(
+                        graph_json, node_id, chosen_id
+                    )
+                    for sk_id in skipped:
+                        if sk_id not in executed_nodes:
+                            executed_nodes[sk_id] = CLASSIFIER_SKIPPED_SENTINEL
+                    if skipped:
+                        logger.info(
+                            f"✂️ CONTINUE WORKFLOW: Classifier {node_name} pruned "
+                            f"{len(skipped)} downstream node(s)"
+                        )
+
+                    decision_content = (
+                        f"Classified as: {chosen_name}"
+                        + (f" — {reasoning}" if reasoning else "")
+                    )
+                    message_manager.add_message(
+                        agent_name=node_name,
+                        agent_type='ClassifierAgent',
+                        content=decision_content,
+                        message_type='classifier_decision',
+                        metadata={
+                            'llm_provider': cls_agent_config['llm_provider'],
+                            'llm_model': cls_agent_config['llm_model'],
+                            'classifier_decision': {
+                                'category_id': chosen_id,
+                                'category_name': chosen_name,
+                                'reasoning': reasoning,
+                                'skipped_nodes': list(skipped),
+                            },
+                        },
+                    )
+                    agents_involved.add(node_name)
+                    if cls_agent_config['llm_provider'] not in providers_used:
+                        providers_used.append(cls_agent_config['llm_provider'])
+
+                    execution_record.executed_nodes = executed_nodes
+                    execution_record.messages_data = message_manager.get_messages()
+                    await sync_to_async(execution_record.save)(update_fields=['executed_nodes', 'messages_data'])
+
                 elif node_type == 'EndNode':
                     # Handle end node
                     end_message = node_data.get('message', 'Workflow completed successfully.')
                     executed_nodes[node_id] = end_message
-                    
+
                     message, sequence = message_manager.add_message(
                         agent_name='End',
                         agent_type='EndNode',
@@ -2859,8 +3108,199 @@ class WorkflowExecutor:
                 # If this node's dependencies aren't satisfied, no nodes after it can be ready either
                 # (due to topological sort ordering)
                 break
-        
+
+        # Classifier nodes must run sequentially (not parallel) so that branch
+        # pruning completes before the next round of ready-nodes is computed.
+        # If any classifier is ready, return only the first one; the main loop
+        # will re-enter and pick up the rest of the batch after pruning.
+        classifier_ready = [
+            (idx, n) for idx, n in ready_nodes
+            if n.get('type') == 'ClassifierAgent'
+        ]
+        if classifier_ready:
+            return classifier_ready[:1]
+
         return ready_nodes
+
+    def _validate_classifier_nodes(self, graph_json: Dict[str, Any]) -> List[str]:
+        """
+        Static validation for ClassifierAgent nodes in a workflow graph.
+
+        Rules enforced:
+        1. Each ClassifierAgent must have 2-10 categories.
+        2. Every category must have a non-empty ``name`` and a non-null ``id``.
+        3. Category names within a single Classifier must be unique.
+        4. ``llm_provider`` and ``llm_model`` must be set.
+        5. Each Classifier must have at least one upstream input edge.
+        6. Every outgoing edge from a Classifier must carry a ``source_handle``
+           that matches one of its current category ``id``s.
+
+        (Dead-end category handles — categories with zero outgoing edges — are
+        not an error but the executor logs a warning when picked.)
+        """
+        errors: List[str] = []
+        nodes = graph_json.get('nodes', []) or []
+        edges = graph_json.get('edges', []) or []
+
+        classifier_nodes = [
+            n for n in nodes if n.get('type') == 'ClassifierAgent'
+        ]
+        if not classifier_nodes:
+            return errors
+
+        for node in classifier_nodes:
+            nid = node.get('id')
+            data = node.get('data', {}) or {}
+            name = data.get('name', nid)
+
+            categories = data.get('categories') or []
+            if not isinstance(categories, list) or len(categories) < 2:
+                errors.append(
+                    f"ClassifierAgent '{name}' must define at least 2 categories "
+                    f"(got {len(categories) if isinstance(categories, list) else 0})."
+                )
+                continue  # remaining per-category checks are moot
+
+            if len(categories) > 10:
+                errors.append(
+                    f"ClassifierAgent '{name}' exceeds the 10-category maximum "
+                    f"(got {len(categories)})."
+                )
+
+            seen_names: set = set()
+            seen_ids: set = set()
+            for cat_idx, cat in enumerate(categories):
+                if not isinstance(cat, dict):
+                    errors.append(
+                        f"ClassifierAgent '{name}' category #{cat_idx + 1} is not an object."
+                    )
+                    continue
+                cat_name = (cat.get('name') or '').strip()
+                cat_id = (cat.get('id') or '').strip()
+                if not cat_name:
+                    errors.append(
+                        f"ClassifierAgent '{name}' category #{cat_idx + 1} is missing 'name'."
+                    )
+                if not cat_id:
+                    errors.append(
+                        f"ClassifierAgent '{name}' category '{cat_name or cat_idx + 1}' "
+                        f"is missing 'id' (UUID)."
+                    )
+                if cat_name and cat_name.lower() in seen_names:
+                    errors.append(
+                        f"ClassifierAgent '{name}' has duplicate category name '{cat_name}'."
+                    )
+                seen_names.add(cat_name.lower())
+                if cat_id and cat_id in seen_ids:
+                    errors.append(
+                        f"ClassifierAgent '{name}' has duplicate category id '{cat_id}'."
+                    )
+                seen_ids.add(cat_id)
+
+            if not data.get('llm_provider') or not data.get('llm_model'):
+                errors.append(
+                    f"ClassifierAgent '{name}' must specify both 'llm_provider' and 'llm_model'."
+                )
+
+            incoming = [e for e in edges if e.get('target') == nid]
+            if not incoming:
+                errors.append(
+                    f"ClassifierAgent '{name}' has no upstream input — "
+                    f"connect a StartNode or an agent to its input."
+                )
+
+            # Every outgoing edge must reference a current category id.
+            outgoing = [e for e in edges if e.get('source') == nid]
+            for e_idx, edge in enumerate(outgoing):
+                handle = edge.get('source_handle')
+                if not handle:
+                    errors.append(
+                        f"ClassifierAgent '{name}' outgoing edge #{e_idx + 1} is "
+                        f"missing 'source_handle' (category id)."
+                    )
+                    continue
+                if handle not in seen_ids:
+                    errors.append(
+                        f"ClassifierAgent '{name}' outgoing edge #{e_idx + 1} references "
+                        f"unknown category id '{handle}' — the category may have been deleted."
+                    )
+
+        return errors
+
+    def _prune_unselected_branches(
+        self,
+        graph_json: Dict[str, Any],
+        classifier_node_id: str,
+        chosen_category_id: str,
+    ) -> set:
+        """
+        Compute the transitive closure of nodes that should be *skipped* because
+        the classifier did not pick their branch.
+
+        Algorithm
+        ---------
+        1. Seed ``skipped`` with the direct targets of edges leaving the
+           classifier whose ``source_handle`` (category UUID) differs from the
+           chosen one.
+        2. Iteratively extend: a downstream node ``N`` joins ``skipped`` iff
+           **every** incoming edge into ``N`` originates from either a skipped
+           node or from the classifier via a non-chosen category handle. This
+           respects joins — a node reachable from a non-pruned path stays live.
+        3. The classifier node itself is never skipped.
+
+        Edges with no ``source_handle`` (i.e., not from a classifier category)
+        are treated as "real" incoming paths.
+        """
+        edges = graph_json.get('edges', []) or []
+        nodes = graph_json.get('nodes', []) or []
+        node_ids = {n.get('id') for n in nodes}
+
+        def _edge_is_pruned_from_classifier(edge: Dict[str, Any]) -> bool:
+            return (
+                edge.get('source') == classifier_node_id
+                and edge.get('source_handle')
+                and edge.get('source_handle') != chosen_category_id
+            )
+
+        # Seed: targets of non-chosen classifier outgoing edges.
+        skipped: set = set()
+        for edge in edges:
+            if _edge_is_pruned_from_classifier(edge):
+                target = edge.get('target')
+                if target and target in node_ids and target != classifier_node_id:
+                    skipped.add(target)
+
+        # Iterate until stable.
+        changed = True
+        while changed:
+            changed = False
+            for node in nodes:
+                nid = node.get('id')
+                if nid in skipped or nid == classifier_node_id:
+                    continue
+                incoming = [e for e in edges if e.get('target') == nid]
+                if not incoming:
+                    continue
+                all_pruned = True
+                for e in incoming:
+                    src = e.get('source')
+                    if src == classifier_node_id:
+                        if e.get('source_handle') and e.get('source_handle') != chosen_category_id:
+                            # This edge is a pruned classifier branch.
+                            continue
+                        # Chosen-branch edge (or non-handle edge) from classifier — real input.
+                        all_pruned = False
+                        break
+                    if src in skipped:
+                        continue  # Skipped upstream — this edge contributes nothing.
+                    # Any other live source — real input.
+                    all_pruned = False
+                    break
+                if all_pruned:
+                    skipped.add(nid)
+                    changed = True
+
+        return skipped
     
     async def _execute_nodes_in_parallel(self, ready_nodes: List[Tuple[int, Dict[str, Any]]],
                                         workflow, graph_json, executed_nodes, conversation_history,

@@ -117,6 +117,11 @@
   
   // Drag and drop state
   let draggedNodeType: string | null = null;
+
+  // When a drag starts from a ClassifierAgent's per-category handle, remember
+  // which category it came from so the resulting edge carries a source_handle.
+  let sourceCategoryId: string | null = null;
+  let sourceCategoryName: string | null = null;
   let isDraggingNode = false;
   let dragOffset = { x: 0, y: 0 };
   let hasDraggedSignificantly = false;
@@ -290,6 +295,15 @@
       category: 'Integration',
       functionality: 'Connects to MCP servers to access external services, execute tools, and retrieve resources. Supports Google Drive, SharePoint, and other MCP-compatible services.',
       useCases: ['Google Drive integration', 'SharePoint integration', 'External service access', 'Document retrieval', 'File operations']
+    },
+    'ClassifierAgent': {
+      name: 'Classifier',
+      description: 'Routes workflow to exactly one of user-defined categories using LLM tool-calling',
+      icon: 'fa-list-check',
+      color: '#f59e0b',
+      category: 'Routing',
+      functionality: 'Receives text input from Start or an upstream agent, picks exactly one category via forced tool-call, and routes execution down that branch. The non-selected subgraphs are pruned for the run. Pure router — downstream agents receive the original input unchanged.',
+      useCases: ['Intent routing', 'Triage (bug vs. feature vs. billing)', 'Language branching', 'Conditional workflow flow']
     }
   };
   
@@ -325,6 +339,32 @@
   // Monitor selected elements for debugging
   $: if (selectedEdge) {
     console.log('🎯 DEBUG: Selected edge:', selectedEdge.id.slice(-8));
+  }
+
+  // CLASSIFIER CLEANUP: when categories are removed on a Classifier node, drop
+  // any edges whose source_handle no longer matches a current category id.
+  // Idempotent — this only rewrites `edges` when it finds something stale, so
+  // there is no reactive loop once the graph is consistent.
+  $: {
+    const classifierCatMap = new Map<string, Set<string>>();
+    for (const n of nodes) {
+      if (n.type === 'ClassifierAgent') {
+        classifierCatMap.set(
+          n.id,
+          new Set((n.data?.categories || []).map((c: any) => c.id).filter(Boolean))
+        );
+      }
+    }
+    if (classifierCatMap.size > 0) {
+      const staleEdges = edges.filter(e => {
+        const validIds = classifierCatMap.get(e.source);
+        return validIds && e.source_handle && !validIds.has(e.source_handle);
+      });
+      if (staleEdges.length > 0) {
+        console.log(`🧹 CLASSIFIER CLEANUP: removing ${staleEdges.length} stale edge(s) for deleted categories`);
+        edges = edges.filter(e => !staleEdges.includes(e));
+      }
+    }
   }
   
   onMount(async () => {
@@ -1043,6 +1083,17 @@
           selected_tools: [],
           parameters: {}
         };
+      case 'ClassifierAgent':
+        return {
+          name: `Classifier ${count}`,
+          description: 'Route input to exactly one category',
+          llm_provider: 'anthropic',
+          llm_model: 'claude-3-5-haiku-20241022',
+          categories: [
+            { id: uuidv4(), name: 'Category 1', description: '' },
+            { id: uuidv4(), name: 'Category 2', description: '' }
+          ]
+        };
       default:
         return {
           name: `${nodeType} ${count}`,
@@ -1165,21 +1216,25 @@
   
   // Connection creation handlers
 
-  function handleConnectionStart(event: MouseEvent, node: any) {
-    console.log('🟦 CONNECTION START: Event triggered on node', node.data.name);
+  function handleConnectionStart(event: MouseEvent, node: any, categoryId: string | null = null, categoryName: string | null = null) {
+    console.log('🟦 CONNECTION START: Event triggered on node', node.data.name, categoryId ? `(category: ${categoryName})` : '');
     event.preventDefault();
     event.stopPropagation();
-    
+
     if (isConnecting) {
       console.log('⚠️ CONNECTION START: Already connecting, canceling previous');
       // Reset any previous connection state
       isConnecting = false;
       sourceNode = null;
       tempConnection = null;
+      sourceCategoryId = null;
+      sourceCategoryName = null;
     }
-    
+
     isConnecting = true;
     sourceNode = node;
+    sourceCategoryId = categoryId;
+    sourceCategoryName = categoryName;
     
     console.log('🎆 CONNECTION START: Set isConnecting=true, sourceNode=', sourceNode.data.name);
     
@@ -1237,10 +1292,12 @@
         // Reset connection state
         isConnecting = false;
         sourceNode = null;
+        sourceCategoryId = null;
+        sourceCategoryName = null;
         tempConnection = null;
         mousePosition = { x: 0, y: 0 }; // Reset mouse position
       }
-      
+
       // Remove both listeners
       document.removeEventListener('mousemove', handleGlobalMouseMove);
       document.removeEventListener('mouseup', handleGlobalMouseUp);
@@ -1255,22 +1312,58 @@
     if (!sourceNode || sourceNode.id === targetNode.id) {
       isConnecting = false;
       sourceNode = null;
+      sourceCategoryId = null;
+      sourceCategoryName = null;
       return;
     }
-    
+
     createConnection(sourceNode, targetNode);
-    
+
     // Reset connection state
     isConnecting = false;
     sourceNode = null;
+    sourceCategoryId = null;
+    sourceCategoryName = null;
   }
   
   function createConnection(source: any, target: any) {
-    // Check for duplicate
-    const existingConnection = edges.find(edge => 
-      edge.source === source.id && edge.target === target.id
+    // CLASSIFIER VALIDATION: source handle must be a category if source is a Classifier.
+    if (source.type === 'ClassifierAgent' && !sourceCategoryId) {
+      console.log('❌ CANVAS: Classifier edges must originate from a category handle');
+      if (toasts && toasts.error) {
+        toasts.error('Drag from a specific category row on the Classifier (not the node body) to connect');
+      }
+      return;
+    }
+
+    // Classifier cannot emit to StartNode, other StartNode-ish inputs, or Delegates
+    if (source.type === 'ClassifierAgent' && target.type === 'StartNode') {
+      if (toasts && toasts.error) toasts.error('Classifier cannot connect back to the Start Node');
+      return;
+    }
+    if (source.type === 'ClassifierAgent' && target.type === 'DelegateAgent') {
+      if (toasts && toasts.error) toasts.error('Delegate agents can only connect to a Group Chat Manager');
+      return;
+    }
+
+    // Classifier can't be fed by EndNode, a Delegate, or an MCPServer
+    if (target.type === 'ClassifierAgent' && source.type === 'EndNode') {
+      if (toasts && toasts.error) toasts.error('EndNode cannot feed a Classifier');
+      return;
+    }
+    if (target.type === 'ClassifierAgent' && source.type === 'DelegateAgent') {
+      if (toasts && toasts.error) toasts.error('Delegate agents can only connect to Group Chat Manager');
+      return;
+    }
+
+    // Classifier fan-out: allow multiple edges from the SAME category handle (parallel).
+    // But de-dupe on (source, target, source_handle).
+    const existingConnection = edges.find(edge =>
+      edge.source === source.id &&
+      edge.target === target.id &&
+      (edge.source_handle || null) === (sourceCategoryId || null)
     );
-    
+
     if (existingConnection) {
       console.log('⚠️ CANVAS: Connection already exists');
       if (toasts && toasts.warning) {
@@ -1278,11 +1371,19 @@
       }
       return;
     }
-    
-    // ✅ END NODE VALIDATION: Only one incoming edge allowed
+
+    // ✅ END NODE VALIDATION: single-incoming by default, but relax when the
+    // incoming edge comes from a Classifier branch (fan-in from multiple
+    // category paths is intended).
     if (target.type === 'EndNode') {
       const incomingToEnd = edges.filter(edge => edge.target === target.id);
-      if (incomingToEnd.length >= 1) {
+      const comingFromClassifierBranch = source.type === 'ClassifierAgent' ||
+        // or from a node that's downstream of a classifier
+        incomingToEnd.every(e => {
+          const src = nodes.find(n => n.id === e.source);
+          return src?.type === 'ClassifierAgent';
+        });
+      if (incomingToEnd.length >= 1 && !comingFromClassifierBranch && source.type !== 'ClassifierAgent') {
         console.log('❌ CANVAS: End node already has an incoming connection');
         if (toasts && toasts.error) {
           toasts.error('End node can only receive input from a single agent');
@@ -1290,7 +1391,7 @@
         return;
       }
     }
-    
+
     // ✅ DELEGATE CONNECTION VALIDATION
     if (source.type === 'DelegateAgent' && target.type !== 'GroupChatManager') {
       console.log('❌ CANVAS: Delegate agents can only connect to GroupChatManager');
@@ -1299,7 +1400,7 @@
       }
       return;
     }
-    
+
     // Validate connection to DelegateAgent (only GroupChatManager can connect to delegates)
     if (target.type === 'DelegateAgent' && source.type !== 'GroupChatManager') {
       console.log('❌ CANVAS: Only GroupChatManager can connect to Delegate agents');
@@ -1308,19 +1409,21 @@
       }
       return;
     }
-    
+
     // Determine connection type based on agent types
     let connectionType = 'sequential';
-    
+
     // Special handling for GroupChatManager-DelegateAgent connections
     // These should use 'delegate' type to maintain proper connection visualization
     if ((source.type === 'GroupChatManager' && target.type === 'DelegateAgent') ||
         (source.type === 'DelegateAgent' && target.type === 'GroupChatManager')) {
       connectionType = 'delegate';
     }
-    
-    const newConnection = {
-      id: `${source.id}-${target.id}`,
+
+    const newConnection: any = {
+      id: sourceCategoryId
+        ? `${source.id}-${sourceCategoryId}-${target.id}`
+        : `${source.id}-${target.id}`,
       source: source.id,
       target: target.id,
       type: connectionType,
@@ -1331,7 +1434,11 @@
       retryCount: 0,
       timeout: 30
     };
-    
+    if (sourceCategoryId) {
+      newConnection.source_handle = sourceCategoryId;
+      newConnection.category_name = sourceCategoryName || '';
+    }
+
     edges = [...edges, newConnection];
     
     console.log('✅ CANVAS: Connection created:', newConnection);
@@ -1353,27 +1460,31 @@
   }
   
   // Connection rendering helpers
-  function getConnectionPath(sourceId: string, targetId: string): string {
+  function getConnectionPath(connectionOrSourceId: any, targetId?: string): string {
+    // Accept either a connection object OR the legacy (sourceId, targetId) signature.
+    const connection = (typeof connectionOrSourceId === 'string')
+      ? edges.find(e => e.source === connectionOrSourceId && e.target === targetId)
+      : connectionOrSourceId;
+    const sourceId = typeof connectionOrSourceId === 'string' ? connectionOrSourceId : connection?.source;
+    const tgtId = typeof connectionOrSourceId === 'string' ? targetId : connection?.target;
     const sourceNode = nodes.find(n => n.id === sourceId);
-    const targetNode = nodes.find(n => n.id === targetId);
-    
+    const targetNode = nodes.find(n => n.id === tgtId);
+
     if (!sourceNode || !targetNode) {
-      console.log('⚠️ CONNECTION PATH: Missing nodes for connection', sourceId, '->', targetId);
+      console.log('⚠️ CONNECTION PATH: Missing nodes for connection', sourceId, '->', tgtId);
       return '';
     }
-    
-    // Determine connection type
-    const connection = edges.find(e => e.source === sourceId && e.target === targetId);
+
     const connectionType = connection?.type || 'sequential';
-    
+
     // 🌟 ENHANCED CONNECTION POSITIONING: Handle different node types and connection points
     let sourcePos, targetPos;
-    
+
     // Calculate source position based on node type and connection type
     if (sourceNode.type === 'GroupChatManager') {
       const sourceWidth = 300;
       const sourceHeight = 120;
-      
+
       if (connectionType === 'delegate') {
         // Delegate connection from bottom of GroupChatManager
         sourcePos = {
@@ -1387,6 +1498,19 @@
           y: sourceNode.position.y + CANVAS_CENTER_Y + sourceHeight / 3  // Top third (output handle)
         };
       }
+    } else if (sourceNode.type === 'ClassifierAgent') {
+      // Per-category output handle: Y depends on which category row this edge originates from.
+      // Node layout: header (~50px) + 2px padding + category rows (32px each, 4px gap).
+      const sourceWidth = 260;
+      const handleId = connection?.source_handle;
+      const cats = sourceNode.data?.categories || [];
+      const catIdx = Math.max(0, cats.findIndex((c: any) => c.id === handleId));
+      // 50 (header) + 8 (padding/border gap) + catIdx*(32+4) + 16 (center of row)
+      const yInNode = 50 + 8 + catIdx * 36 + 16;
+      sourcePos = {
+        x: sourceNode.position.x + CANVAS_CENTER_X + sourceWidth,
+        y: sourceNode.position.y + CANVAS_CENTER_Y + yInNode,
+      };
     } else {
       // Standard node positioning
       const sourceWidth = 250;
@@ -1421,6 +1545,12 @@
         x: targetNode.position.x + CANVAS_CENTER_X,              // Left edge
         y: targetNode.position.y + CANVAS_CENTER_Y + targetHeight / 2  // Center height
       };
+    } else if (targetNode.type === 'ClassifierAgent') {
+      // Classifier's input handle is fixed at y=50 in node-local coordinates (header center).
+      targetPos = {
+        x: targetNode.position.x + CANVAS_CENTER_X,
+        y: targetNode.position.y + CANVAS_CENTER_Y + 50,
+      };
     } else {
       // Standard node positioning
       const targetHeight = 80;
@@ -1448,14 +1578,14 @@
     
     // Debug log for path updates
     console.log('📏 ENHANCED CONNECTION:', {
-      connection: `${sourceId.slice(-4)} -> ${targetId.slice(-4)}`,
+      connection: `${(sourceId || '').slice(-4)} -> ${(tgtId || '').slice(-4)}`,
       type: connectionType,
       sourceType: sourceNode.type,
       targetType: targetNode.type,
       sourcePos,
       targetPos
     });
-    
+
     return path;
   }
   
@@ -1642,6 +1772,7 @@
       case 'DelegateAgent': return 'fa-handshake';
       case 'EndNode': return 'fa-stop';
       case 'MCPServer': return 'fa-server';
+      case 'ClassifierAgent': return 'fa-list-check';
       default: return 'fa-cog';
     }
   }
@@ -1660,6 +1791,7 @@
       case 'DelegateAgent': return '#f59e0b';
       case 'EndNode': return '#ef4444';
       case 'MCPServer': return '#8b5cf6';
+      case 'ClassifierAgent': return '#f59e0b';
       default: return '#6b7280';
     }
   }
@@ -1673,10 +1805,11 @@
       case 'StartNode': return 'Start Node';
       case 'EndNode': return 'End Node';
       case 'MCPServer': return 'MCP Server';
+      case 'ClassifierAgent': return 'Classifier';
       default: return agentType;
     }
   }
-  
+
   function getShortDescription(agentType: string): string {
     switch (agentType) {
       case 'UserProxyAgent': return 'Human-in-the-loop agent';
@@ -1686,6 +1819,7 @@
       case 'StartNode': return 'Workflow entry point';
       case 'EndNode': return 'Workflow termination';
       case 'MCPServer': return 'External service integration';
+      case 'ClassifierAgent': return 'Route by category';
       default: return 'Custom agent type';
     }
   }
@@ -1779,7 +1913,7 @@
       
       <div class="p-4 space-y-3 flex-1 overflow-y-auto">
         <!-- All Agent Types (ensuring DelegateAgent is always included) -->
-        {#each ['StartNode', 'UserProxyAgent', 'AssistantAgent', 'GroupChatManager', 'DelegateAgent', 'MCPServer', 'EndNode'].filter(type => agentTypes[type]) as agentType}
+        {#each ['StartNode', 'UserProxyAgent', 'AssistantAgent', 'GroupChatManager', 'DelegateAgent', 'ClassifierAgent', 'MCPServer', 'EndNode'].filter(type => agentTypes[type]) as agentType}
           <div
             class="agent-component p-3 border border-gray-200 rounded-lg bg-white hover:border-oxford-blue hover:shadow-sm transition-all cursor-move select-none"
             draggable="true"
@@ -2038,8 +2172,9 @@
             {@const isValidTarget = isConnecting && sourceNode && node.id !== sourceNode.id}
             {@const isCurrentSource = isConnecting && sourceNode && node.id === sourceNode.id}
             {@const isRequiringInput = agentsRequiringInput.has(node.id)}
-            {@const nodeWidth = node.type === 'GroupChatManager' ? 300 : 250}
-            {@const nodeHeight = node.type === 'GroupChatManager' ? 120 : 80}
+            {@const nodeWidth = node.type === 'GroupChatManager' ? 300 : (node.type === 'ClassifierAgent' ? 260 : 250)}
+            {@const classifierCatCount = node.type === 'ClassifierAgent' ? ((node.data?.categories || []).length || 2) : 0}
+            {@const nodeHeight = node.type === 'GroupChatManager' ? 120 : (node.type === 'ClassifierAgent' ? (76 + 36 * classifierCatCount) : 80)}
             <div 
               class="agent-node absolute bg-white border-2 rounded-xl shadow-lg transition-all duration-200 hover:shadow-xl cursor-pointer select-none {selectedNode?.id === node.id ? 'border-oxford-blue ring-2 ring-oxford-blue ring-opacity-20' : isRequiringInput ? 'border-orange-400 ring-2 ring-orange-400 ring-opacity-30 animate-pulse human-input-node' : isValidTarget ? 'border-green-400 ring-2 ring-green-400 ring-opacity-30' : isCurrentSource ? 'border-blue-500 ring-2 ring-blue-500 ring-opacity-30' : 'border-gray-300 hover:border-oxford-blue'}"
               style="left: {node.position.x + CANVAS_CENTER_X}px; top: {node.position.y + CANVAS_CENTER_Y}px; width: {nodeWidth}px; height: {nodeHeight}px; pointer-events: auto;"
@@ -2099,17 +2234,60 @@
                     </div>
                   {/if}
                 </div>
+              {:else if node.type === 'ClassifierAgent'}
+                <!-- Classifier Layout: header + per-category rows with handles -->
+                <div class="h-full flex flex-col p-2">
+                  <!-- Header -->
+                  <div class="flex items-center space-x-2 mb-2 pb-2 border-b border-gray-100">
+                    <div
+                      class="w-9 h-9 rounded-lg flex items-center justify-center text-white shadow-md flex-shrink-0"
+                      style="background-color: {getAgentColor(node.type)};"
+                    >
+                      <i class="fas {getAgentIcon(node.type)} text-sm"></i>
+                    </div>
+                    <div class="flex-1 min-w-0">
+                      <div class="font-semibold text-gray-900 truncate text-sm">
+                        {node.data?.name || 'Classifier'}
+                      </div>
+                      <div class="text-xs text-gray-500">Classify</div>
+                    </div>
+                  </div>
+                  <!-- Category rows -->
+                  <div class="flex-1 flex flex-col gap-1 relative">
+                    {#each (node.data?.categories || []) as cat, catIdx (cat.id)}
+                      <div
+                        class="relative flex items-center px-3 py-2 rounded-md bg-gray-50 border border-gray-200 text-sm text-gray-800"
+                        style="height: 32px;"
+                        title={cat.description || cat.name}
+                      >
+                        <div class="truncate flex-1 pr-4">{cat.name || `Category ${catIdx + 1}`}</div>
+                        <!-- Per-category output handle -->
+                        <div
+                          class="connection-handle absolute right-0 w-4 h-4 rounded-full border-2 border-white shadow-md cursor-crosshair hover:scale-110 transition-all duration-200 {isCurrentSource && sourceCategoryId === cat.id ? 'bg-blue-500' : 'bg-amber-500'}"
+                          style="top: 50%; transform: translate(50%, -50%); z-index: 100;"
+                          title="Drag to connect this category's branch"
+                          on:mousedown|stopPropagation={(e) => {
+                            console.log('🧭 CLASSIFIER HANDLE: category', cat.name, 'clicked for', node.data.name);
+                            handleConnectionStart(e, node, cat.id, cat.name);
+                          }}
+                        >
+                          <div class="absolute inset-0 rounded-full opacity-30 {isCurrentSource && sourceCategoryId === cat.id ? 'bg-blue-400 animate-pulse' : 'bg-amber-400'}"></div>
+                        </div>
+                      </div>
+                    {/each}
+                  </div>
+                </div>
               {:else}
                 <!-- Standard Agent Layout -->
                 <div class="h-full flex items-center p-3 space-x-3">
                   <!-- Agent Icon -->
-                  <div 
+                  <div
                     class="w-12 h-12 rounded-lg flex items-center justify-center text-white shadow-md"
                     style="background-color: {getAgentColor(node.type)};"
                   >
                     <i class="fas {getAgentIcon(node.type)} text-lg"></i>
                   </div>
-                  
+
                   <!-- Agent Info -->
                   <div class="flex-1 min-w-0">
                     <div class="font-semibold text-gray-900 truncate text-sm">
@@ -2181,7 +2359,7 @@
                 </div>
               {:else if node.type === 'DelegateAgent'}
                 <!-- Delegate Agent - Special connection to GroupChatManager only -->
-                <div 
+                <div
                   class="connection-handle absolute right-0 top-1/2 w-4 h-4 rounded-full border-2 border-white shadow-lg cursor-crosshair hover:scale-110 transition-all duration-200 {isCurrentSource ? 'bg-blue-500' : 'bg-orange-500'}"
                   style="transform: translate(50%, -50%); z-index: 100;"
                   title="Connect to Group Chat Manager only"
@@ -2192,12 +2370,20 @@
                 >
                   <div class="absolute inset-0 rounded-full opacity-30 {isCurrentSource ? 'bg-blue-400 animate-pulse' : 'bg-orange-400'}"></div>
                 </div>
-                
+
                 <!-- Input Handle (Left side) -->
-                <div 
+                <div
                   class="absolute left-0 top-1/2 w-4 h-4 rounded-full border-2 border-white shadow-md transition-all {isValidTarget ? 'bg-green-500 scale-110 animate-pulse' : 'bg-orange-400'}"
                   style="transform: translate(-50%, -50%); z-index: 50;"
                   title="Connection from Group Chat Manager"
+                ></div>
+              {:else if node.type === 'ClassifierAgent'}
+                <!-- Classifier: per-category output handles are rendered inside the node body;
+                     here we only render the single input handle on the left. -->
+                <div
+                  class="absolute left-0 top-[50px] w-4 h-4 rounded-full border-2 border-white shadow-md transition-all {isValidTarget ? 'bg-green-500 scale-110 animate-pulse' : 'bg-amber-400'}"
+                  style="transform: translate(-50%, -50%); z-index: 50;"
+                  title="Connection input (text to classify)"
                 ></div>
               {:else}
                 <!-- Standard Agent Connection Handles -->
@@ -2273,7 +2459,7 @@
           {#each edges as connection (connection.id)}
             {@const style = getConnectionStyle(connection)}
             <!-- Force path recalculation by including connectionUpdateTrigger -->
-            {@const path = connectionUpdateTrigger >= 0 ? getConnectionPath(connection.source, connection.target) : ''}
+            {@const path = connectionUpdateTrigger >= 0 ? getConnectionPath(connection) : ''}
             
             <!-- Render connection path -->
             

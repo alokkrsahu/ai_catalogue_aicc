@@ -356,13 +356,29 @@ class WorkflowParser:
             Dict with aggregated context information
         """
         logger.info(f"🔄 MULTI-INPUT: Aggregating {len(input_sources)} input sources")
-        
+
+        # Drop inputs whose upstream was pruned by a Classifier node (sentinel
+        # value in executed_nodes). These branches weren't selected and must not
+        # contribute any content or citations to the downstream prompt.
+        from .classifier_executor import CLASSIFIER_SKIPPED_SENTINEL
+        filtered_sources = []
+        for src in input_sources:
+            raw = executed_nodes.get(src.get('source_id'))
+            if raw == CLASSIFIER_SKIPPED_SENTINEL:
+                logger.info(
+                    f"⏭️ MULTI-INPUT: Skipping input from '{src.get('name')}' "
+                    f"(pruned by Classifier)"
+                )
+                continue
+            filtered_sources.append(src)
+        input_sources = filtered_sources
+
         aggregated_context = {
             'all_inputs': [],
             'input_summary': '',
             'input_count': len(input_sources)
         }
-        
+
         # Sort inputs by type priority (StartNode first, then others)
         sorted_inputs = sorted(input_sources, key=lambda x: (
             0 if x['type'] == 'StartNode' else

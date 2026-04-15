@@ -160,6 +160,21 @@
 
   // Initialize defaults for new nodes
   function initializeNodeDefaults() {
+    // ClassifierAgent minimal defaults — handled up front because the big
+    // if/else below is scoped to other agent types.
+    if (node.type === 'ClassifierAgent') {
+      if (!nodeConfig.llm_provider) {
+        nodeConfig.llm_provider = 'anthropic';
+        nodeConfig.llm_model = 'claude-3-5-haiku-20241022';
+      }
+      if (!Array.isArray(nodeConfig.categories) || nodeConfig.categories.length < 2) {
+        nodeConfig.categories = [
+          { id: crypto.randomUUID(), name: 'Category 1', description: '' },
+          { id: crypto.randomUUID(), name: 'Category 2', description: '' },
+        ];
+      }
+    }
+
     // Initialize default LLM configuration if not present
     if (['AssistantAgent', 'DelegateAgent', 'GroupChatManager'].includes(node.type)) {
       if (!nodeConfig.llm_provider) {
@@ -1935,7 +1950,7 @@
     {/if}
     
     <!-- LLM PROVIDER - For AI agents (excluding UserProxyAgent which has special handling) -->
-    {#if ['AssistantAgent', 'DelegateAgent', 'GroupChatManager'].includes(node.type)}
+    {#if ['AssistantAgent', 'DelegateAgent', 'GroupChatManager', 'ClassifierAgent'].includes(node.type)}
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-2">LLM Provider</label>
         {#if hasValidApiKeys}
@@ -3274,6 +3289,112 @@
       </div>
     {/if}
     
+    <!-- CLASSIFIER CONFIGURATION -->
+    {#if node.type === 'ClassifierAgent'}
+      <div class="space-y-4 border-t border-gray-200 pt-4 mt-4">
+        <div class="p-3 bg-amber-50 border border-amber-200 rounded-lg">
+          <p class="text-xs text-amber-800">
+            <i class="fas fa-info-circle mr-1"></i>
+            The Classifier picks exactly one category via a forced tool call.
+            Downstream agents receive the <strong>original input</strong> unchanged —
+            the classifier is a pure router.
+          </p>
+        </div>
+
+        <!-- Input (read-only summary of upstream source) -->
+        {#if workflowData?.edges}
+          {@const upstream = (workflowData.edges || []).filter((e: any) => e.target === node.id).map((e: any) => (workflowData.nodes || []).find((n: any) => n.id === e.source)).filter(Boolean)}
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-2">Input</label>
+            {#if upstream.length === 0}
+              <div class="px-3 py-2 border border-dashed border-amber-300 rounded-lg bg-amber-50 text-sm text-amber-700">
+                <i class="fas fa-exclamation-triangle mr-1"></i>
+                Connect a Start Node or an agent to this Classifier's input handle.
+              </div>
+            {:else}
+              <div class="flex items-center px-3 py-2 border border-gray-200 rounded-lg bg-gray-50">
+                <i class="fas fa-link text-gray-400 mr-2"></i>
+                <span class="text-sm text-gray-800 flex-1 truncate">
+                  {upstream.map((n: any) => n?.data?.name || n?.type).join(' + ')}.output
+                </span>
+                <span class="text-[10px] font-mono uppercase tracking-wide bg-gray-200 text-gray-700 px-1.5 py-0.5 rounded">string</span>
+              </div>
+              <p class="text-xs text-gray-500 mt-1">
+                The text from the upstream node is what gets classified.
+              </p>
+            {/if}
+          </div>
+        {/if}
+
+        <!-- Categories -->
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <label class="block text-sm font-medium text-gray-700">
+              Categories
+              <span class="text-xs text-gray-400 ml-1">({(nodeConfig.categories || []).length}/10)</span>
+            </label>
+            <button
+              type="button"
+              class="px-3 py-1 text-xs bg-amber-500 text-white rounded-md hover:bg-amber-600 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center space-x-1"
+              disabled={(nodeConfig.categories || []).length >= 10}
+              on:click={() => {
+                const cats = Array.isArray(nodeConfig.categories) ? [...nodeConfig.categories] : [];
+                cats.push({ id: crypto.randomUUID(), name: `Category ${cats.length + 1}`, description: '' });
+                nodeConfig.categories = cats;
+                updateNodeData();
+              }}
+            >
+              <i class="fas fa-plus text-[10px]"></i>
+              <span>Add</span>
+            </button>
+          </div>
+
+          {#each (nodeConfig.categories || []) as cat, catIdx (cat.id)}
+            <div class="p-2 mb-2 border border-gray-200 rounded-lg bg-white">
+              <div class="flex items-center space-x-2 mb-2">
+                <input
+                  type="text"
+                  bind:value={cat.name}
+                  on:input={() => { nodeConfig.categories = [...nodeConfig.categories]; updateNodeData(); }}
+                  placeholder={`Category ${catIdx + 1}`}
+                  class="flex-1 px-2 py-1 text-sm border border-gray-300 rounded focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
+                />
+                <button
+                  type="button"
+                  class="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                  title={((nodeConfig.categories || []).length <= 2) ? 'At least 2 categories required' : 'Remove category'}
+                  disabled={(nodeConfig.categories || []).length <= 2}
+                  on:click={() => {
+                    if ((nodeConfig.categories || []).length <= 2) return;
+                    if (!confirm(`Remove category "${cat.name || `Category ${catIdx + 1}`}"? Any connections from this category will also be removed.`)) return;
+                    nodeConfig.categories = (nodeConfig.categories || []).filter((c: any) => c.id !== cat.id);
+                    updateNodeData();
+                  }}
+                >
+                  <i class="fas fa-times text-xs"></i>
+                </button>
+              </div>
+              <input
+                type="text"
+                bind:value={cat.description}
+                on:input={() => { nodeConfig.categories = [...nodeConfig.categories]; updateNodeData(); }}
+                placeholder="Describe when to pick this category (optional, improves accuracy)"
+                maxlength="300"
+                class="w-full px-2 py-1 text-xs border border-gray-200 rounded focus:border-amber-400 focus:ring-1 focus:ring-amber-400 text-gray-600"
+              />
+            </div>
+          {/each}
+
+          {#if (nodeConfig.categories || []).length < 2}
+            <p class="text-xs text-red-600 mt-1">
+              <i class="fas fa-exclamation-triangle mr-1"></i>
+              At least 2 categories are required.
+            </p>
+          {/if}
+        </div>
+      </div>
+    {/if}
+
     <!-- MCP SERVER CONFIGURATION -->
     {#if node.type === 'MCPServer'}
       <div class="space-y-4 border-t border-gray-200 pt-4 mt-4">

@@ -172,6 +172,35 @@ class GeminiProvider(LLMProvider):
                         "parameters": gemini_params,
                     })
                 body["tools"] = [{"functionDeclarations": func_decls}]
+                # Map OpenAI-style tool_choice onto Gemini's toolConfig.functionCallingConfig.mode.
+                # "required"/{"type":"any"} → ANY (force one call); {"type":"function","function":{"name":...}}
+                # → ANY with allowed_function_names. "none" → NONE. Default → AUTO.
+                tool_choice = kwargs.get("tool_choice")
+                if tool_choice is not None:
+                    mode = "AUTO"
+                    allowed_names = None
+                    if isinstance(tool_choice, str):
+                        if tool_choice == "required":
+                            mode = "ANY"
+                        elif tool_choice == "none":
+                            mode = "NONE"
+                        elif tool_choice == "auto":
+                            mode = "AUTO"
+                    elif isinstance(tool_choice, dict):
+                        tc_type = tool_choice.get("type")
+                        if tc_type == "any":
+                            mode = "ANY"
+                        elif tc_type == "none":
+                            mode = "NONE"
+                        elif tc_type == "function":
+                            mode = "ANY"
+                            fn_name = (tool_choice.get("function") or {}).get("name")
+                            if fn_name:
+                                allowed_names = [fn_name]
+                    fc_config: Dict[str, Any] = {"mode": mode}
+                    if allowed_names:
+                        fc_config["allowed_function_names"] = allowed_names
+                    body["toolConfig"] = {"functionCallingConfig": fc_config}
             return body
         elif prompt:
             # Fallback to prompt string (backward compatibility)
