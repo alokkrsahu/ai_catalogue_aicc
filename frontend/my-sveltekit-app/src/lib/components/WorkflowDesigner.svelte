@@ -93,6 +93,12 @@
   let showPalette = true;
   let showProperties = false;
   let showAIChatbot = false;
+  let aiChatbotMinimized = false;
+  // Undo stack for AI Workflow Builder — snapshot of {nodes, edges} taken
+  // before each AI-applied change, so the user can roll back.
+  const AI_HISTORY_MAX = 10;
+  let aiWorkflowHistory: Array<{nodes: any[]; edges: any[]}> = [];
+  $: canUndoAI = aiWorkflowHistory.length > 0;
   let saving = false;
   let showInstructions = true; // State for dismissable instructions overlay
   let isPanelMaximized = false; // Whether the properties panel is maximized as modal
@@ -921,6 +927,16 @@
     const { graphJson } = event.detail;
     if (!graphJson || !graphJson.nodes) return;
 
+    // Snapshot current state before overwriting so the user can undo.
+    // Deep-clone so later mutations to nodes/edges don't leak into the snapshot.
+    aiWorkflowHistory = [
+      ...aiWorkflowHistory,
+      {
+        nodes: JSON.parse(JSON.stringify(nodes)),
+        edges: JSON.parse(JSON.stringify(edges)),
+      },
+    ].slice(-AI_HISTORY_MAX);
+
     // Replace current graph
     nodes = graphJson.nodes.map((node: any) => ({
       id: node.id,
@@ -939,7 +955,29 @@
       priority: edge.priority || 1,
       retryCount: edge.retryCount || 0,
       timeout: edge.timeout || 30,
+      // Preserve source_handle for ClassifierAgent branches — it carries the
+      // category UUID that tells the executor which branch this edge represents.
+      ...(edge.source_handle ? { source_handle: edge.source_handle } : {}),
     }));
+
+    selectedNode = null;
+    selectedEdge = null;
+    showProperties = false;
+    showConnectionProperties = false;
+
+    saveWorkflowToDatabase(true);
+    setTimeout(() => centerView(), 150);
+  }
+
+  // Restore the most recent pre-AI snapshot (undo the last AI Builder change).
+  function undoAIWorkflow() {
+    if (aiWorkflowHistory.length === 0) return;
+    const snapshot = aiWorkflowHistory[aiWorkflowHistory.length - 1];
+    aiWorkflowHistory = aiWorkflowHistory.slice(0, -1);
+
+    // Deep-clone on restore so the snapshot isn't aliased to the live graph.
+    nodes = JSON.parse(JSON.stringify(snapshot.nodes));
+    edges = JSON.parse(JSON.stringify(snapshot.edges));
 
     selectedNode = null;
     selectedEdge = null;
@@ -2595,12 +2633,15 @@
   
   <!-- AI Workflow Builder Chatbot (Right Panel) -->
   {#if showAIChatbot}
-    <div class="fixed right-0 top-14 bottom-0 w-80 z-50 shadow-xl">
+    <div class="fixed right-0 top-14 bottom-0 z-50 {aiChatbotMinimized ? 'w-0' : 'w-80 shadow-xl'}">
       <WorkflowAIChatbot
         {projectId}
         currentNodes={nodes}
         currentEdges={edges}
+        {canUndoAI}
+        bind:minimized={aiChatbotMinimized}
         on:applyWorkflow={applyGeneratedWorkflow}
+        on:undo={undoAIWorkflow}
         on:close={() => showAIChatbot = false}
       />
     </div>

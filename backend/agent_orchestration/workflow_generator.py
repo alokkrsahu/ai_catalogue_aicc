@@ -1409,6 +1409,7 @@ async def generate_workflow(
     user_message: str,
     conversation_history: Optional[List[Dict]] = None,
     current_graph: Optional[Dict[str, Any]] = None,
+    attached_files_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Generate a workflow from natural language requirements.
@@ -1417,6 +1418,10 @@ async def generate_workflow(
         project: IntelliDocProject instance
         user_message: The user's requirements
         conversation_history: Previous messages in the conversation
+        attached_files_text: Optional pre-extracted text from files the user
+            attached to this turn. When present, it is appended to the user
+            message under an "ATTACHED FILES" header so the LLM treats the
+            content as additional context for the workflow it builds.
 
     Returns:
         {graph_json, explanation, tool_calls, errors}
@@ -1555,10 +1560,21 @@ async def generate_workflow(
 
     # Build messages — fill in dynamic sections
     system_content = SYSTEM_PROMPT.replace("{available_models_section}", available_models_section) + doc_listing + current_workflow_section
+    # If the caller passed pre-extracted text from user-attached files, fold it
+    # into the user turn so the LLM sees the document content as context.
+    effective_user_message = user_message
+    if attached_files_text:
+        effective_user_message = (
+            f"{user_message}\n\n"
+            "The user attached the following file(s) to this message — "
+            "use this content as context for the workflow you build:\n\n"
+            f"{attached_files_text}"
+        )
+
     messages = [{"role": "system", "content": system_content}]
     if conversation_history:
         messages.extend(conversation_history)
-    messages.append({"role": "user", "content": user_message})
+    messages.append({"role": "user", "content": effective_user_message})
 
     # Call LLM with tools — pass available document filenames so the builder
     # can expand wildcard `documents=["*"]` to the full project document list.

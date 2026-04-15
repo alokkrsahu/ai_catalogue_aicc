@@ -9,12 +9,24 @@
 
   const dispatch = createEventDispatcher();
 
-  let messages: Array<{role: string; content: string; toolCalls?: any[]}> = [];
+  let messages: Array<{role: string; content: string; toolCalls?: any[]; attachments?: string[]}> = [];
   let inputText = '';
   let loading = false;
   let conversationHistory: any[] = [];
   let messagesContainer: HTMLElement;
   let lastGraphJson: any = null;
+
+  // File attachments staged for the next outgoing message
+  let attachedFiles: File[] = [];
+  let fileInputEl: HTMLInputElement;
+  const MAX_FILES = 5;
+  const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB — matches DocumentProcessor
+  // Minimized is `export let` with `bind:` support so the parent can shrink
+  // the outer fixed-position container and the pill can float freely.
+  export let minimized: boolean = false;
+
+  // Let the parent know whether undo is available — shows/hides the undo button
+  export let canUndoAI: boolean = false;
 
   // Persistence
   $: storageKey = `wf_ai_chat_${projectId}`;
@@ -48,10 +60,19 @@
 
   async function sendMessage() {
     const text = inputText.trim();
-    if (!text || loading) return;
+    if ((!text && attachedFiles.length === 0) || loading) return;
 
-    // Add user message
-    messages = [...messages, { role: 'user', content: text }];
+    // Snapshot the files so we can clear the staging area immediately while
+    // the request is in-flight.
+    const filesForThisTurn = attachedFiles;
+    attachedFiles = [];
+
+    // Add user message — include attachment names so chips render in history
+    const userMsg: any = { role: 'user', content: text };
+    if (filesForThisTurn.length > 0) {
+      userMsg.attachments = filesForThisTurn.map(f => f.name);
+    }
+    messages = [...messages, userMsg];
     inputText = '';
     loading = true;
     scrollToBottom();
@@ -59,7 +80,7 @@
     try {
       // Pass current canvas state so the LLM can modify existing workflows
       const currentGraph = (currentNodes.length > 0) ? JSON.parse(JSON.stringify({ nodes: currentNodes, edges: currentEdges })) : null;
-      const result = await cleanUniversalApi.generateWorkflow(projectId, text, conversationHistory, currentGraph);
+      const result = await cleanUniversalApi.generateWorkflow(projectId, text, conversationHistory, currentGraph, filesForThisTurn);
 
       // Add assistant response
       const assistantMsg: any = { role: 'assistant', content: result.explanation || 'Workflow generated.' };
@@ -136,10 +157,65 @@
     messages = [];
     conversationHistory = [];
     lastGraphJson = null;
+    attachedFiles = [];
     try { localStorage.removeItem(storageKey); } catch (_) {}
+  }
+
+  function formatBytes(n: number): string {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function onPickFiles(e: Event) {
+    const input = e.target as HTMLInputElement;
+    const picked = input.files ? Array.from(input.files) : [];
+    addFiles(picked);
+    // Reset so picking the SAME file again still fires `change`
+    input.value = '';
+  }
+
+  function addFiles(picked: File[]) {
+    if (picked.length === 0) return;
+    const errors: string[] = [];
+    const accepted: File[] = [];
+    for (const f of picked) {
+      if (f.size > MAX_FILE_SIZE) {
+        errors.push(`${f.name}: exceeds 50 MB limit`);
+        continue;
+      }
+      // Skip duplicates (by name + size)
+      if (attachedFiles.some(a => a.name === f.name && a.size === f.size)) continue;
+      accepted.push(f);
+    }
+    let next = [...attachedFiles, ...accepted];
+    if (next.length > MAX_FILES) {
+      errors.push(`Only ${MAX_FILES} files per message — extra files were dropped.`);
+      next = next.slice(0, MAX_FILES);
+    }
+    attachedFiles = next;
+    if (errors.length > 0) {
+      messages = [...messages, { role: 'system', content: errors.join(' ') }];
+      scrollToBottom();
+    }
+  }
+
+  function removeAttached(idx: number) {
+    attachedFiles = attachedFiles.filter((_, i) => i !== idx);
   }
 </script>
 
+{#if minimized}
+  <!-- Minimized: a small floating pill that restores the chat on click -->
+  <button
+    class="wf-chatbot-pill"
+    title="Open AI Workflow Builder"
+    on:click={() => { minimized = false; scrollToBottom(); }}
+  >
+    <i class="fas fa-wand-magic-sparkles text-violet-500"></i>
+    <span>AI Builder</span>
+  </button>
+{:else}
 <div class="wf-chatbot">
   <div class="wf-chatbot-header">
     <div class="flex items-center gap-2">
@@ -147,6 +223,11 @@
       <span class="font-semibold text-sm text-gray-800">AI Workflow Builder</span>
     </div>
     <div class="flex items-center gap-1">
+      {#if canUndoAI}
+        <button class="icon-btn" title="Undo last AI change" on:click={() => dispatch('undo')}>
+          <i class="fas fa-rotate-left text-xs"></i>
+        </button>
+      {/if}
       {#if lastGraphJson}
         <button class="icon-btn" title="Re-apply workflow" on:click={reapplyWorkflow}>
           <i class="fas fa-redo text-xs"></i>
@@ -154,6 +235,9 @@
       {/if}
       <button class="icon-btn" title="Clear chat" on:click={clearChat}>
         <i class="fas fa-trash text-xs"></i>
+      </button>
+      <button class="icon-btn" title="Minimize" on:click={() => minimized = true}>
+        <i class="fas fa-minus text-xs"></i>
       </button>
       <button class="icon-btn" title="Close" on:click={() => dispatch('close')}>
         <i class="fas fa-times text-xs"></i>
@@ -182,7 +266,21 @@
       {#each messages as msg}
         <div class="msg {msg.role}">
           {#if msg.role === 'user'}
-            <div class="msg-bubble user-bubble">{msg.content}</div>
+            <div class="msg-bubble user-bubble">
+              {#if msg.attachments && msg.attachments.length > 0}
+                <div class="user-attachments">
+                  {#each msg.attachments as fname}
+                    <div class="user-attachment-chip">
+                      <i class="fas fa-paperclip text-[10px]"></i>
+                      <span>{fname}</span>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+              {#if msg.content}
+                <div class="whitespace-pre-wrap break-words">{msg.content}</div>
+              {/if}
+            </div>
           {:else if msg.role === 'assistant'}
             <div class="msg-bubble assistant-bubble">
               <div class="whitespace-pre-wrap">{msg.content}</div>
@@ -218,19 +316,52 @@
     {/if}
   </div>
 
-  <div class="wf-chatbot-input">
-    <textarea
-      bind:value={inputText}
-      on:keydown={handleKeydown}
-      placeholder="Describe the workflow you need..."
-      rows="2"
-      disabled={loading}
-    ></textarea>
-    <button on:click={sendMessage} disabled={loading || !inputText.trim()} class="send-btn">
-      <i class="fas fa-paper-plane"></i>
-    </button>
+  <div class="wf-chatbot-input-wrap">
+    {#if attachedFiles.length > 0}
+      <div class="staged-attachments">
+        {#each attachedFiles as f, i (f.name + f.size)}
+          <div class="staged-chip" title={`${f.name} (${formatBytes(f.size)})`}>
+            <i class="fas fa-paperclip text-[10px]"></i>
+            <span class="staged-name">{f.name}</span>
+            <span class="staged-size">{formatBytes(f.size)}</span>
+            <button class="staged-remove" title="Remove" on:click={() => removeAttached(i)}>
+              <i class="fas fa-times text-[10px]"></i>
+            </button>
+          </div>
+        {/each}
+      </div>
+    {/if}
+    <div class="wf-chatbot-input">
+      <input
+        type="file"
+        bind:this={fileInputEl}
+        on:change={onPickFiles}
+        multiple
+        accept=".pdf,.txt,.md,.markdown,.docx,.doc,.csv,.json,.html,.htm,.xlsx,.xls"
+        style="display: none;"
+      />
+      <button
+        class="attach-btn"
+        title={attachedFiles.length >= MAX_FILES ? `Max ${MAX_FILES} files` : 'Attach a document'}
+        disabled={loading || attachedFiles.length >= MAX_FILES}
+        on:click={() => fileInputEl?.click()}
+      >
+        <i class="fas fa-paperclip"></i>
+      </button>
+      <textarea
+        bind:value={inputText}
+        on:keydown={handleKeydown}
+        placeholder={attachedFiles.length > 0 ? 'Add an instruction for these file(s)…' : 'Describe the workflow you need...'}
+        rows="2"
+        disabled={loading}
+      ></textarea>
+      <button on:click={sendMessage} disabled={loading || (!inputText.trim() && attachedFiles.length === 0)} class="send-btn">
+        <i class="fas fa-paper-plane"></i>
+      </button>
+    </div>
   </div>
 </div>
+{/if}
 
 <style>
   .wf-chatbot {
@@ -307,12 +438,21 @@
     border-radius: 12px;
     font-size: 13px;
     line-height: 1.5;
+    overflow-wrap: break-word;
+    word-break: break-word;
   }
 
   .user-bubble {
     background: #002147 !important;
     color: #ffffff !important;
     border-bottom-right-radius: 4px;
+  }
+  /* Force white on every descendant inside the navy user bubble — the
+     wrapper div for whitespace/word-break preservation otherwise reverts to
+     a darker default from project-wide Tailwind preflight rules. */
+  .user-bubble,
+  .user-bubble * {
+    color: #ffffff !important;
   }
 
   .assistant-bubble {
@@ -391,4 +531,116 @@
   }
   .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   .send-btn:hover:not(:disabled) { background: #003366; }
+
+  /* File attachment UI ---------------------------------------------------- */
+  .wf-chatbot-input-wrap {
+    border-top: 1px solid #e2e8f0;
+    background: #f8fafc;
+  }
+  .wf-chatbot-input-wrap .wf-chatbot-input {
+    border-top: none;  /* parent draws the border now */
+  }
+
+  .attach-btn {
+    width: 36px;
+    height: 36px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    color: #64748b;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .attach-btn:hover:not(:disabled) {
+    background: #e2e8f0;
+    color: #002147;
+  }
+  .attach-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Staged attachments shown above the textarea before send */
+  .staged-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 12px 0 12px;
+  }
+  .staged-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    padding: 4px 8px;
+    background: #ffffff;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    font-size: 11px;
+    color: #1e293b;
+  }
+  .staged-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 140px;
+  }
+  .staged-size { color: #64748b; }
+  .staged-remove {
+    border: none;
+    background: transparent;
+    color: #64748b;
+    cursor: pointer;
+    padding: 0 2px;
+    line-height: 1;
+  }
+  .staged-remove:hover { color: #dc2626; }
+
+  /* Attachment chips inside a sent user-message bubble */
+  .user-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 6px;
+  }
+  .user-attachment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    background: rgba(255, 255, 255, 0.18);
+    border-radius: 4px;
+    font-size: 11px;
+    max-width: 100%;
+  }
+  .user-attachment-chip span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 180px;
+  }
+
+  /* Minimized pill — small floating anchor that restores the chat */
+  .wf-chatbot-pill {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    border-radius: 999px;
+    border: 1px solid #e2e8f0;
+    background: #ffffff;
+    color: #1e293b;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 6px 16px rgba(15, 23, 42, 0.12);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+  .wf-chatbot-pill:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 10px 20px rgba(15, 23, 42, 0.18);
+  }
 </style>

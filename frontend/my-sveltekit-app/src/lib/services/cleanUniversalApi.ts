@@ -1230,21 +1230,48 @@ export class CleanUniversalApiService {
 
   /**
    * Generate a workflow from natural language requirements using LLM tool-calling.
+   *
+   * @param files Optional file attachments. When present, the request switches
+   *              to multipart/form-data so the backend can extract text from
+   *              each file (PDF, DOCX, TXT, MD, CSV…) and append it to the
+   *              user message before calling the LLM.
    */
-  async generateWorkflow(projectId: string, message: string, conversationHistory: any[] = [], currentGraph: any = null): Promise<any> {
-    console.log(`🤖 WORKFLOW GEN: Generating workflow for project ${projectId}`);
+  async generateWorkflow(
+    projectId: string,
+    message: string,
+    conversationHistory: any[] = [],
+    currentGraph: any = null,
+    files: File[] = [],
+  ): Promise<any> {
+    console.log(`🤖 WORKFLOW GEN: Generating workflow for project ${projectId}` +
+      (files.length > 0 ? ` with ${files.length} file(s) attached` : ''));
 
-    const payload: any = { message, conversation_history: conversationHistory };
-    if (currentGraph) payload.current_graph = currentGraph;
+    const url = `${API_BASE}/agent-orchestration/projects/${projectId}/generate-workflow/`;
 
-    const response = await this.handleAuthenticatedRequest(
-      `${API_BASE}/agent-orchestration/projects/${projectId}/generate-workflow/`,
-      {
+    let init: RequestInit;
+    if (files && files.length > 0) {
+      // Multipart path — let the browser set the boundary header itself; do
+      // NOT send Content-Type ourselves or fetch will omit the boundary.
+      const fd = new FormData();
+      fd.append('message', message);
+      fd.append('conversation_history', JSON.stringify(conversationHistory));
+      if (currentGraph) fd.append('current_graph', JSON.stringify(currentGraph));
+      for (const f of files) fd.append('files', f, f.name);
+
+      const headers = this.getAuthHeaders() as Record<string, string>;
+      delete headers['Content-Type'];
+      init = { method: 'POST', headers, body: fd };
+    } else {
+      const payload: any = { message, conversation_history: conversationHistory };
+      if (currentGraph) payload.current_graph = currentGraph;
+      init = {
         method: 'POST',
         headers: { ...this.getAuthHeaders(), 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-      }
-    );
+      };
+    }
+
+    const response = await this.handleAuthenticatedRequest(url, init);
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
