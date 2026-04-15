@@ -581,13 +581,30 @@ temperature: Controls LLM creativity/randomness (0-2, default 0.7).
 file_attachments: Independent of doc_tool_calling. For direct LLM file access.
 
 ═══════════════════════════════════════════════════════════
-MODIFYING EXISTING WORKFLOWS
+MODIFYING EXISTING WORKFLOWS — PRESERVATION IS THE DEFAULT
 ═══════════════════════════════════════════════════════════
 
-When a current workflow is shown, use targeted modifications:
+PRESERVATION IS THE DEFAULT. Do NOT delete existing agents unless the user
+EXPLICITLY uses words like: "remove", "delete", "rebuild", "replace",
+"start over", "wipe", "clear", "from scratch", "redo", "recreate".
+
+When a current workflow is shown:
+• ADD or UPDATE in place. New requirements → add new agents and connect them.
+  Behavioral changes → update_node_property on the existing agent.
+• A long pasted system prompt or specification is NOT permission to delete
+  existing structure. Treat it as either:
+    (a) A new system_message for an EXISTING agent (use update_node_property),
+        when the prompt's role matches an existing agent's role; OR
+    (b) The system_message for a NEW agent you add via add_assistant_agent
+        and connect into the existing graph.
+• If genuinely unsure between modification and rebuild, choose preservation.
+  The user can always ask you to "start over" explicitly if they want a fresh build.
+
+Tools for modifications:
 • update_node_property — change a specific agent's settings
-• delete_node — remove one agent
-• clear_all_agents — wipe everything except Start/End (for "start over" requests)
+• delete_node — remove one agent (only when user explicitly asked)
+• clear_all_agents — wipe everything except Start/End (only for explicit
+  "start over" requests)
 • add_* + connect_nodes — add new agents to existing workflow
 
 Surgical edits — PREFER these on existing workflows over delete + recreate:
@@ -603,8 +620,6 @@ Surgical edits — PREFER these on existing workflows over delete + recreate:
 • rewire_edge(source, old_target, new_target [, source_category]) — re-point
   an edge atomically. Equivalent to delete_edge + connect_nodes but rolls back
   if the new edge can't be created.
-
-Only rebuild what the user asked to change.
 
 ═══════════════════════════════════════════════════════════
 AVAILABLE LLM MODELS (configured for this project)
@@ -1746,7 +1761,10 @@ async def _run_planning_phase(
     plan_prompt = (
         "Before building, output a structured PLAN as a numbered list:\n"
         "1. List every agent you will ADD (with role and one-line system_message gist).\n"
-        "2. List every agent you will REMOVE (by name).\n"
+        "2. List every agent you will REMOVE (by name). REMOVE ONLY if the user "
+        "EXPLICITLY asked to delete/remove/rebuild/replace/start over. "
+        "If they did not use those words, this list MUST be empty — preserve "
+        "all existing agents.\n"
         "3. List every agent you will UPDATE (by name) and which properties change.\n"
         "4. List every edge you will ADD or REMOVE.\n"
         "5. State the final flow as: Start → ... → End.\n\n"
@@ -1941,8 +1959,16 @@ async def generate_workflow(
                     handle_suffix = f" [category: {cat_name}]"
             cw_lines.append(f"  - {src} → {tgt} ({e.get('type', 'sequential')}){handle_suffix}")
         cw_lines.append("")
-        cw_lines.append("The user wants to MODIFY this existing workflow. You should rebuild it with the requested changes.")
-        cw_lines.append("Recreate all nodes and connections, keeping existing agents that don't need changes and adding/removing/modifying as requested.")
+        cw_lines.append(
+            "The user wants to MODIFY this existing workflow. PRESERVE all "
+            "current agents and edges by default. Use update_node_property, "
+            "add_*, connect_nodes, delete_edge, add_category, etc. for "
+            "incremental edits. Only delete agents if the user explicitly "
+            "asked to remove them (words like remove/delete/rebuild/replace/"
+            "start over). A pasted system prompt is NOT a delete request — "
+            "it's either a new system_message for an existing agent or for a "
+            "new agent you add."
+        )
         current_workflow_section = "\n".join(cw_lines)
 
     # Build messages — fill in dynamic sections
@@ -2189,7 +2215,11 @@ async def generate_workflow(
                 "7. For any ClassifierAgent: 2-10 categories with unique non-empty names and "
                 "clear descriptions; every outgoing edge specifies a source_category matching "
                 "an existing category name; each category branch leads somewhere meaningful.\n"
-                + ("8. Did the build follow the plan above? Note any drift and fix it.\n\n" if plan_text else "\n")
+                "8. Did you remove existing agents? If yes, did the user EXPLICITLY request "
+                "removal (words like remove/delete/rebuild/replace/start over)? If you removed "
+                "agents WITHOUT explicit user request, that is a regression — RESTORE them via "
+                "add_assistant_agent (or the appropriate add_*) + connect_nodes.\n"
+                + ("9. Did the build follow the plan above? Note any drift and fix it.\n\n" if plan_text else "\n")
                 + "If everything looks correct, respond with 'Verification passed — workflow is valid.'\n"
                 "If there are issues, use update_node_property, delete_node, connect_nodes, or add_* tools to fix them.\n"
                 "Do NOT rebuild the workflow from scratch — only fix specific issues."

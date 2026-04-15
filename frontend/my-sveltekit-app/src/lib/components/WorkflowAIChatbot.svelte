@@ -9,7 +9,7 @@
 
   const dispatch = createEventDispatcher();
 
-  let messages: Array<{role: string; content: string; toolCalls?: any[]; attachments?: string[]; plan?: string; diff?: any; graphJson?: any; planExpanded?: boolean}> = [];
+  let messages: Array<{role: string; content: string; toolCalls?: any[]; attachments?: string[]; plan?: string; diff?: any; graphJson?: any; planExpanded?: boolean; destructionConfirmed?: boolean}> = [];
   let inputText = '';
   let loading = false;
   let conversationHistory: any[] = [];
@@ -260,6 +260,19 @@
     if (diff.removed_edges?.length) parts.push(`-${diff.removed_edges.length} edge(s)`);
     return parts.length ? parts.join(', ') : 'no structural changes';
   }
+
+  // Destruction guard — multi-agent removal triggers a confirmation gate
+  // before Apply enables. Threshold > 1: single deletes don't need this.
+  function isDestructive(diff: any): boolean {
+    return (diff?.removed_nodes?.length || 0) > 1;
+  }
+
+  function toggleDestructionConfirm(msgIdx: number) {
+    messages = messages.map((m, i) => i === msgIdx
+      ? { ...m, destructionConfirmed: !m.destructionConfirmed }
+      : m
+    );
+  }
 </script>
 
 {#if minimized}
@@ -364,6 +377,23 @@
                 <span class="font-semibold text-gray-800 text-xs">Preview changes</span>
                 <span class="text-xs text-gray-500">— {summarizeDiff(msg.diff)}</span>
               </div>
+              {#if isDestructive(msg.diff)}
+                <div class="destruction-warn">
+                  <i class="fas fa-triangle-exclamation"></i>
+                  <div>
+                    <strong>This change will DELETE {msg.diff.removed_nodes.length} agents:</strong>
+                    <div class="destruction-list">{msg.diff.removed_nodes.join(', ')}</div>
+                  </div>
+                </div>
+                <label class="destruction-confirm">
+                  <input
+                    type="checkbox"
+                    checked={!!msg.destructionConfirmed}
+                    on:change={() => toggleDestructionConfirm(msgIdx)}
+                  />
+                  <span>I understand {msg.diff.removed_nodes.length} agent(s) will be permanently deleted</span>
+                </label>
+              {/if}
               {#if msg.plan}
                 <button class="plan-toggle" on:click={() => togglePlan(msgIdx)}>
                   <i class="fas fa-chevron-{msg.planExpanded ? 'down' : 'right'} text-[10px]"></i>
@@ -395,7 +425,11 @@
               </div>
               <div class="preview-actions">
                 <button class="preview-discard" on:click={() => discardPreview(msgIdx)}>Discard</button>
-                <button class="preview-apply" on:click={() => applyPreview(msgIdx)}>Apply</button>
+                <button
+                  class="preview-apply"
+                  disabled={isDestructive(msg.diff) && !msg.destructionConfirmed}
+                  on:click={() => applyPreview(msgIdx)}
+                >Apply</button>
               </div>
             </div>
           {/if}
@@ -777,7 +811,42 @@
     background: #002147;
     color: #ffffff;
   }
-  .preview-apply:hover { background: #003366; }
+  .preview-apply:hover:not(:disabled) { background: #003366; }
+  .preview-apply:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  /* Fix B — destruction guard banner + confirm checkbox */
+  .destruction-warn {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    background: #fef2f2;
+    border-left: 3px solid #dc2626;
+    color: #991b1b;
+    padding: 8px 10px;
+    margin-bottom: 6px;
+    font-size: 12px;
+    border-radius: 4px;
+  }
+  .destruction-warn i { padding-top: 2px; }
+  .destruction-list {
+    margin-top: 2px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+  }
+  .destruction-confirm {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+    font-size: 11px;
+    color: #991b1b;
+    cursor: pointer;
+    user-select: none;
+  }
+  .destruction-confirm input { margin: 0; }
 
   /* Attachment chips inside a sent user-message bubble */
   .user-attachments {

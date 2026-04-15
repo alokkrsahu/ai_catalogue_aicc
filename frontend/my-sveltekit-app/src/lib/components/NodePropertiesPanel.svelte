@@ -3374,14 +3374,15 @@
                   <i class="fas fa-times text-xs"></i>
                 </button>
               </div>
-              <input
-                type="text"
+              <textarea
                 bind:value={cat.description}
                 on:input={() => { nodeConfig.categories = [...nodeConfig.categories]; updateNodeData(); }}
                 placeholder="Describe when to pick this category (optional, improves accuracy)"
                 maxlength="300"
-                class="w-full px-2 py-1 text-xs border border-gray-200 rounded focus:border-amber-400 focus:ring-1 focus:ring-amber-400 text-gray-600"
-              />
+                rows="3"
+                class="w-full px-2 py-1.5 text-xs border border-gray-200 rounded focus:border-amber-400 focus:ring-1 focus:ring-amber-400 text-gray-600 resize-y overflow-auto leading-snug"
+                style="min-height: 56px; max-height: 200px;"
+              ></textarea>
             </div>
           {/each}
 
