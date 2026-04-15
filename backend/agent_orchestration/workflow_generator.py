@@ -384,6 +384,10 @@ DOCUMENT ACCESS — TWO MODES (can be used together):
       extracting structured data from a known file
     • The agent gets the COMPLETE content of each assigned file via tool calls
     • You must specify exact filenames from the available project documents list
+    • SHORTCUT: documents=["*"] or documents=["all"] assigns ALL available project
+      documents to the agent. Use when the user explicitly asks for "all documents"
+      or when the agent genuinely needs broad access to the entire project library —
+      avoids having to enumerate every filename and scales to large collections.
 
   doc_aware (RAG — semantic search across ALL project documents):
     • Enables vector-based semantic chunk search across the entire document collection
@@ -458,11 +462,12 @@ GUIDELINES:
 class WorkflowBuilder:
     """Executes LLM tool calls to build a graph_json structure."""
 
-    def __init__(self):
+    def __init__(self, available_documents: Optional[List[str]] = None):
         self.nodes: List[Dict[str, Any]] = []
         self.edges: List[Dict[str, Any]] = []
         self.node_name_map: Dict[str, str] = {}  # name → node_id
         self.tool_calls_log: List[Dict[str, Any]] = []
+        self.available_documents: List[str] = available_documents or []
 
     def load_existing_graph(self, graph: Dict[str, Any]):
         """Load an existing workflow graph into the builder for modification. Deduplicates Start/End nodes."""
@@ -528,7 +533,10 @@ class WorkflowBuilder:
     @staticmethod
     def _resolve_toggle_dependencies(args: Dict) -> Dict:
         """Enforce toggle dependency chain: doc_tool_calling → doc_aware, web_search, plan_mode."""
-        has_docs = bool(args.get("documents"))
+        # Read from "documents" OR already-stored "doc_tool_calling_documents" so
+        # updates via _update_node_property (which pops "documents") don't wipe the list.
+        docs_val = args.get("documents") or args.get("doc_tool_calling_documents", [])
+        has_docs = bool(docs_val)
         doc_tool_calling = has_docs or args.get("doc_tool_calling", False)
         web_search = args.get("web_search_enabled", False)
         doc_aware = args.get("doc_aware", False)
@@ -544,7 +552,7 @@ class WorkflowBuilder:
 
         return {
             "doc_tool_calling": doc_tool_calling,
-            "doc_tool_calling_documents": args.get("documents", []),
+            "doc_tool_calling_documents": docs_val,
             "plan_mode": args.get("plan_mode", True) if doc_tool_calling else False,
             "doc_aware": doc_aware,
             "search_method": "hybrid_search" if doc_aware else "",
@@ -556,6 +564,23 @@ class WorkflowBuilder:
             "web_search_urls": [],
             "web_search_domains": [],
         }
+
+    def _expand_documents(self, docs: Any) -> List[str]:
+        """Expand wildcard ('*' or 'all') to the full list of available project documents.
+
+        Accepts a list, a single string (auto-wrapped), or falsy (returns []).
+        If any element in the list is '*', 'all', or 'ALL' (case-insensitive), returns
+        the complete available_documents list. Otherwise passes the list through unchanged.
+        """
+        if not docs:
+            return []
+        if isinstance(docs, str):
+            docs = [docs]
+        if not isinstance(docs, list):
+            return []
+        if any(isinstance(d, str) and d.strip().lower() in ("*", "all") for d in docs):
+            return list(self.available_documents)
+        return docs
 
     # ── Node creators ──
 
@@ -586,6 +611,9 @@ class WorkflowBuilder:
     def _add_assistant_agent(self, args: Dict) -> str:
         node_id = str(uuid.uuid4())
         name = args["name"]
+        # Expand wildcard "*"/"all" to full document list before resolving toggles
+        if "documents" in args:
+            args["documents"] = self._expand_documents(args.get("documents"))
         toggles = self._resolve_toggle_dependencies(args)
         self.nodes.append({
             "id": node_id,
@@ -657,6 +685,9 @@ class WorkflowBuilder:
     def _add_delegate_agent(self, args: Dict) -> str:
         node_id = str(uuid.uuid4())
         name = args["name"]
+        # Expand wildcard "*"/"all" to full document list before resolving toggles
+        if "documents" in args:
+            args["documents"] = self._expand_documents(args.get("documents"))
         toggles = self._resolve_toggle_dependencies(args)
         self.nodes.append({
             "id": node_id,
@@ -778,8 +809,9 @@ class WorkflowBuilder:
             return f"Error: node '{node_name}' not found in nodes list"
 
         # Handle 'documents' shortcut → sets doc_tool_calling_documents + auto-enables
+        # Also expand wildcard "*"/"all" to the full available-documents list.
         if "documents" in properties:
-            docs = properties.pop("documents")
+            docs = self._expand_documents(properties.pop("documents"))
             properties["doc_tool_calling_documents"] = docs
             if docs:
                 properties["doc_tool_calling"] = True
@@ -1245,7 +1277,10 @@ async def generate_workflow(
             "\n\nAVAILABLE PROJECT DOCUMENTS:\n"
             + "\n".join(doc_lines)
             + "\n\nWhen creating agents that need document access, use the `documents` parameter "
-            "with the exact filenames from the list above. Only assign documents relevant to each agent's task."
+            "with exact filenames from the list above. By default, assign only documents relevant "
+            "to each agent's task. If the user explicitly asks for all documents on all agents "
+            "(or similar bulk assignment), use documents=[\"*\"] as a shortcut instead of "
+            "enumerating every filename."
         )
 
     # Build current workflow description (if modifying an existing workflow)
@@ -1291,8 +1326,10 @@ async def generate_workflow(
         messages.extend(conversation_history)
     messages.append({"role": "user", "content": user_message})
 
-    # Call LLM with tools
-    builder = WorkflowBuilder()
+    # Call LLM with tools — pass available document filenames so the builder
+    # can expand wildcard `documents=["*"]` to the full project document list.
+    available_doc_filenames = [d.original_filename for d in project_docs]
+    builder = WorkflowBuilder(available_documents=available_doc_filenames)
     if current_graph and current_graph.get("nodes"):
         builder.load_existing_graph(current_graph)
     max_iterations = 10  # Allow multiple rounds of tool calls
