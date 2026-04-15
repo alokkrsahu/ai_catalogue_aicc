@@ -1158,12 +1158,28 @@ class WorkflowBuilder:
         if len(end_nodes) > 1:
             errors.append("Workflow should have only one EndNode")
 
-        # EndNode should have exactly 1 incoming edge
+        # EndNode should have exactly 1 incoming edge — UNLESS all incoming trace
+        # back to a ClassifierAgent (classifier branches each independently terminate).
         if end_nodes:
             end_id = end_nodes[0]["id"]
             incoming = [e for e in self.edges if e["target"] == end_id]
             if len(incoming) > 1:
-                errors.append(f"EndNode has {len(incoming)} incoming connections (max 1)")
+                node_type_by_id = {n["id"]: n["type"] for n in self.nodes}
+
+                def _traces_back_to_classifier(src_id, seen=None):
+                    seen = seen if seen is not None else set()
+                    if src_id in seen:
+                        return False
+                    seen.add(src_id)
+                    if node_type_by_id.get(src_id) == "ClassifierAgent":
+                        return True
+                    upstream = [e for e in self.edges if e["target"] == src_id]
+                    if not upstream:
+                        return False
+                    return all(_traces_back_to_classifier(e["source"], seen) for e in upstream)
+
+                if not all(_traces_back_to_classifier(e["source"]) for e in incoming):
+                    errors.append(f"EndNode has {len(incoming)} incoming connections (max 1)")
             if len(incoming) == 0:
                 errors.append("EndNode has no incoming connections")
 
@@ -1285,17 +1301,31 @@ def _auto_repair_connections(builder: WorkflowBuilder):
     sources = {e["source"] for e in builder.edges}
     targets = {e["target"] for e in builder.edges}
 
-    # Fix 2: Agents with no outgoing → connect to the last agent or EndNode
-    # Strategy: find agents that are "sinks" (no outgoing) and connect them forward
+    # Fix 2: Agents with no outgoing → connect to the last agent or EndNode.
+    # Strategy: find agents that are "sinks" (no outgoing) and connect them forward.
     # The last agent in the list is likely the synthesizer/final agent.
     # Skip ClassifierAgent: its outgoing edges are per-category and cannot be
     # auto-added here (we'd need a source_handle / category UUID).
+    # EXCEPTION: if an agent has an incoming edge directly from a ClassifierAgent,
+    # it's a branch terminal — connect it straight to EndNode, not to last_agent
+    # (otherwise classifier branches get incorrectly chained through a shared agent).
+    classifier_ids = {n["id"] for n in builder.nodes if n["type"] == "ClassifierAgent"}
+
+    def _is_classifier_branch(agent_id):
+        return any(
+            e["target"] == agent_id and e["source"] in classifier_ids
+            for e in builder.edges
+        )
+
     last_agent = agents[-1] if agents else None
     for a in agents:
         if a["type"] == "ClassifierAgent":
             continue
         if a["id"] not in sources:
-            if a == last_agent:
+            if _is_classifier_branch(a["id"]):
+                # Classifier branch terminal → goes directly to End
+                _add_edge(a["id"], end["id"])
+            elif a == last_agent:
                 # Last agent connects to EndNode
                 _add_edge(a["id"], end["id"])
             else:
