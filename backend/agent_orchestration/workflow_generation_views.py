@@ -177,6 +177,11 @@ def generate_workflow_view(request, project_id):
             "explanation": result["explanation"],
             "tool_calls": result["tool_calls"],
             "errors": result["errors"],
+            # Pillar 1: plan from the planning phase (empty for fresh builds)
+            "plan": result.get("plan", ""),
+            # Pillar 4: diff for preview UX (None for fresh builds — frontend
+            # then auto-applies as before)
+            "diff": result.get("diff"),
         }, status=status.HTTP_200_OK)
 
     except Exception as e:

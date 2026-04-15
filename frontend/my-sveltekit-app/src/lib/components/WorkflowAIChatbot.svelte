@@ -9,7 +9,7 @@
 
   const dispatch = createEventDispatcher();
 
-  let messages: Array<{role: string; content: string; toolCalls?: any[]; attachments?: string[]}> = [];
+  let messages: Array<{role: string; content: string; toolCalls?: any[]; attachments?: string[]; plan?: string; diff?: any; graphJson?: any; planExpanded?: boolean}> = [];
   let inputText = '';
   let loading = false;
   let conversationHistory: any[] = [];
@@ -99,8 +99,22 @@
       // Store the generated graph
       if (result.graph_json && result.graph_json.nodes && result.graph_json.nodes.length > 0) {
         lastGraphJson = result.graph_json;
-        // Auto-apply to canvas
-        dispatch('applyWorkflow', { graphJson: result.graph_json });
+
+        // Pillar 4: when modifying an existing workflow, the backend returns
+        // a `diff`. Show a preview card and DEFER applyWorkflow until the
+        // user clicks Apply. For fresh builds (diff === null), keep the
+        // current auto-apply behavior — there's nothing to compare against.
+        if (result.diff) {
+          messages = [...messages, {
+            role: 'preview',
+            content: result.explanation || '',
+            plan: result.plan || '',
+            diff: result.diff,
+            graphJson: result.graph_json,
+          } as any];
+        } else {
+          dispatch('applyWorkflow', { graphJson: result.graph_json });
+        }
       } else if (!result.graph_json || !result.graph_json?.nodes?.length) {
         messages = [...messages, {
           role: 'system',
@@ -203,6 +217,49 @@
   function removeAttached(idx: number) {
     attachedFiles = attachedFiles.filter((_, i) => i !== idx);
   }
+
+  // Pillar 4 — preview-card actions
+  function applyPreview(msgIdx: number) {
+    const m = messages[msgIdx];
+    if (!m || !m.graphJson) return;
+    dispatch('applyWorkflow', { graphJson: m.graphJson });
+    // Convert the preview into a confirmed system message so the chat history
+    // shows what was applied without keeping the Apply/Discard buttons live.
+    const summary = summarizeDiff(m.diff);
+    messages = messages.map((mm, i) => i === msgIdx
+      ? { role: 'system', content: `Applied: ${summary}` }
+      : mm
+    );
+    scrollToBottom();
+  }
+
+  function discardPreview(msgIdx: number) {
+    const m = messages[msgIdx];
+    if (!m) return;
+    messages = messages.map((mm, i) => i === msgIdx
+      ? { role: 'system', content: 'Discarded — canvas unchanged.' }
+      : mm
+    );
+    scrollToBottom();
+  }
+
+  function togglePlan(msgIdx: number) {
+    messages = messages.map((mm, i) => i === msgIdx
+      ? { ...mm, planExpanded: !mm.planExpanded }
+      : mm
+    );
+  }
+
+  function summarizeDiff(diff: any): string {
+    if (!diff) return 'no changes';
+    const parts: string[] = [];
+    if (diff.added_nodes?.length) parts.push(`+${diff.added_nodes.length} agent(s)`);
+    if (diff.removed_nodes?.length) parts.push(`-${diff.removed_nodes.length} agent(s)`);
+    if (diff.updated_nodes?.length) parts.push(`~${diff.updated_nodes.length} agent(s)`);
+    if (diff.added_edges?.length) parts.push(`+${diff.added_edges.length} edge(s)`);
+    if (diff.removed_edges?.length) parts.push(`-${diff.removed_edges.length} edge(s)`);
+    return parts.length ? parts.join(', ') : 'no structural changes';
+  }
 </script>
 
 {#if minimized}
@@ -263,7 +320,7 @@
         </div>
       </div>
     {:else}
-      {#each messages as msg}
+      {#each messages as msg, msgIdx}
         <div class="msg {msg.role}">
           {#if msg.role === 'user'}
             <div class="msg-bubble user-bubble">
@@ -300,6 +357,47 @@
             </div>
           {:else if msg.role === 'system'}
             <div class="msg-bubble system-bubble">{msg.content}</div>
+          {:else if msg.role === 'preview'}
+            <div class="preview-card">
+              <div class="preview-header">
+                <i class="fas fa-eye text-amber-600"></i>
+                <span class="font-semibold text-gray-800 text-xs">Preview changes</span>
+                <span class="text-xs text-gray-500">— {summarizeDiff(msg.diff)}</span>
+              </div>
+              {#if msg.plan}
+                <button class="plan-toggle" on:click={() => togglePlan(msgIdx)}>
+                  <i class="fas fa-chevron-{msg.planExpanded ? 'down' : 'right'} text-[10px]"></i>
+                  Plan
+                </button>
+                {#if msg.planExpanded}
+                  <div class="plan-body whitespace-pre-wrap">{msg.plan}</div>
+                {/if}
+              {/if}
+              {#if msg.content}
+                <div class="preview-explanation whitespace-pre-wrap">{msg.content}</div>
+              {/if}
+              <div class="diff-list">
+                {#each (msg.diff?.added_nodes || []) as n}
+                  <div class="diff-line diff-add">+ agent {n}</div>
+                {/each}
+                {#each (msg.diff?.removed_nodes || []) as n}
+                  <div class="diff-line diff-rm">– agent {n}</div>
+                {/each}
+                {#each (msg.diff?.updated_nodes || []) as u}
+                  <div class="diff-line diff-up">~ agent {u.name} ({u.fields.join(', ')})</div>
+                {/each}
+                {#each (msg.diff?.added_edges || []) as e}
+                  <div class="diff-line diff-add">+ edge {e.source} → {e.target}{e.category ? ` [${e.category}]` : ''}</div>
+                {/each}
+                {#each (msg.diff?.removed_edges || []) as e}
+                  <div class="diff-line diff-rm">– edge {e.source} → {e.target}{e.category ? ` [${e.category}]` : ''}</div>
+                {/each}
+              </div>
+              <div class="preview-actions">
+                <button class="preview-discard" on:click={() => discardPreview(msgIdx)}>Discard</button>
+                <button class="preview-apply" on:click={() => applyPreview(msgIdx)}>Apply</button>
+              </div>
+            </div>
           {/if}
         </div>
       {/each}
@@ -595,6 +693,91 @@
     line-height: 1;
   }
   .staged-remove:hover { color: #dc2626; }
+
+  /* Pillar 4 — preview card (modify mode) */
+  .msg.preview { justify-content: stretch; }
+  .preview-card {
+    width: 100%;
+    border: 1px solid #f59e0b;
+    background: #fffbeb;
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 12px;
+    color: #1e293b;
+  }
+  .preview-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+  .plan-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border: none;
+    background: transparent;
+    color: #475569;
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 0;
+  }
+  .plan-toggle:hover { color: #002147; }
+  .plan-body {
+    margin: 4px 0 8px 0;
+    padding: 6px 8px;
+    background: #ffffff;
+    border-left: 2px solid #f59e0b;
+    border-radius: 4px;
+    font-size: 11px;
+    color: #475569;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .preview-explanation {
+    margin-bottom: 8px;
+    color: #475569;
+  }
+  .diff-list {
+    margin: 6px 0;
+    padding: 6px 8px;
+    background: #ffffff;
+    border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .diff-line { padding: 1px 0; }
+  .diff-add { color: #16a34a; }
+  .diff-rm  { color: #dc2626; }
+  .diff-up  { color: #b45309; }
+  .preview-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .preview-discard,
+  .preview-apply {
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+  }
+  .preview-discard {
+    background: #f1f5f9;
+    color: #475569;
+    border: 1px solid #cbd5e1;
+  }
+  .preview-discard:hover { background: #e2e8f0; }
+  .preview-apply {
+    background: #002147;
+    color: #ffffff;
+  }
+  .preview-apply:hover { background: #003366; }
 
   /* Attachment chips inside a sent user-message bubble */
   .user-attachments {

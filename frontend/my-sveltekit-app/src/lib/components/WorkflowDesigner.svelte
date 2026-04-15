@@ -475,16 +475,27 @@
       console.log('🔄 LOADING WORKFLOW GRAPH:', workflow?.workflow_id, workflow?.graph_json);
       const graphData = workflow.graph_json || { nodes: [], edges: [] };
       
-      nodes = graphData.nodes.map((node: any) => ({
-        id: node.id,
-        type: node.type,
-        position: node.position || getAutoPosition(node.id),
-        data: {
-          ...node.data,
-          label: node.data?.name || node.type
+      nodes = graphData.nodes.map((node: any) => {
+        const data: any = { ...node.data, label: node.data?.name || node.type };
+        // Backfill missing category UUIDs on legacy ClassifierAgent nodes —
+        // without this, the keyed each in the canvas crashes with
+        // "duplicate key undefined" and breaks all UI interaction.
+        if (node.type === 'ClassifierAgent' && Array.isArray(data.categories)) {
+          data.categories = data.categories.map((c: any) => ({
+            ...c,
+            id: c?.id || (typeof crypto !== 'undefined' && crypto.randomUUID
+              ? crypto.randomUUID()
+              : `cat_${Math.random().toString(36).slice(2)}_${Date.now()}`),
+          }));
         }
-      }));
-      
+        return {
+          id: node.id,
+          type: node.type,
+          position: node.position || getAutoPosition(node.id),
+          data,
+        };
+      });
+
       edges = graphData.edges.map((edge: any) => ({
         id: edge.id || `${edge.source}-${edge.target}`,
         source: edge.source,
@@ -495,7 +506,10 @@
         condition: edge.condition || '',
         priority: edge.priority || 1,
         retryCount: edge.retryCount || 0,
-        timeout: edge.timeout || 30
+        timeout: edge.timeout || 30,
+        // Preserve source_handle (carries ClassifierAgent category UUID for
+        // routing branches; without it the executor can't prune correctly).
+        ...(edge.source_handle ? { source_handle: edge.source_handle } : {}),
       }));
       
       console.log(`✅ WORKFLOW DESIGNER: Loaded ${nodes.length} nodes, ${edges.length} edges`);
@@ -2292,7 +2306,7 @@
                   </div>
                   <!-- Category rows -->
                   <div class="flex-1 flex flex-col gap-1 relative">
-                    {#each (node.data?.categories || []) as cat, catIdx (cat.id)}
+                    {#each (node.data?.categories || []) as cat, catIdx (cat.id || `__cat_${catIdx}`)}
                       <div
                         class="relative flex items-center px-3 py-2 rounded-md bg-gray-50 border border-gray-200 text-sm text-gray-800"
                         style="height: 32px;"

@@ -374,6 +374,93 @@ WORKFLOW_TOOLS = [
             }
         }
     },
+    # ─── Surgical-edit tools (Pillar 3) — prefer these over delete_node + recreate
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_edge",
+            "description": "Remove a specific edge between two existing agents WITHOUT deleting the agents. For ClassifierAgent sources, pass source_category to disambiguate which branch to remove.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source_name": {"type": "string", "description": "Source agent name"},
+                    "target_name": {"type": "string", "description": "Target agent name"},
+                    "source_category": {
+                        "type": "string",
+                        "description": "REQUIRED when source is a ClassifierAgent and you want to remove only one branch — the category name."
+                    }
+                },
+                "required": ["source_name", "target_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_category",
+            "description": "Add ONE new category to an existing ClassifierAgent without re-passing the entire categories array. Use this for incremental category additions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "classifier_name": {"type": "string", "description": "Name of the ClassifierAgent"},
+                    "name": {"type": "string", "description": "New category name (must be unique within this classifier)"},
+                    "description": {"type": "string", "description": "When to pick this category — guides the LLM's choice"}
+                },
+                "required": ["classifier_name", "name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_category",
+            "description": "Remove ONE category from an existing ClassifierAgent by name. Also cascade-deletes any outgoing edges that referenced this category. Errors if it would drop the classifier below 2 categories.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "classifier_name": {"type": "string", "description": "Name of the ClassifierAgent"},
+                    "name": {"type": "string", "description": "Category name to remove"}
+                },
+                "required": ["classifier_name", "name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "change_edge_type",
+            "description": "Switch the type of an existing edge between 'sequential' and 'reflection' without recreating the agents.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source_name": {"type": "string", "description": "Source agent name"},
+                    "target_name": {"type": "string", "description": "Target agent name"},
+                    "new_type": {"type": "string", "enum": ["sequential", "reflection"], "description": "New edge type"}
+                },
+                "required": ["source_name", "target_name", "new_type"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rewire_edge",
+            "description": "Re-point an existing edge from old_target_name to new_target_name in one atomic call. Equivalent to delete_edge + connect_nodes but cannot half-fail. For ClassifierAgent sources, pass source_category.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source_name": {"type": "string", "description": "Source agent name"},
+                    "old_target_name": {"type": "string", "description": "Current target — the edge to detach"},
+                    "new_target_name": {"type": "string", "description": "New target — the edge will point here"},
+                    "source_category": {
+                        "type": "string",
+                        "description": "REQUIRED when source is a ClassifierAgent — the category name whose branch is being rewired."
+                    }
+                },
+                "required": ["source_name", "old_target_name", "new_target_name"]
+            }
+        }
+    },
 ]
 
 SYSTEM_PROMPT = """You are an AI workflow architect. You design multi-agent orchestration workflows.
@@ -503,6 +590,20 @@ When a current workflow is shown, use targeted modifications:
 • clear_all_agents — wipe everything except Start/End (for "start over" requests)
 • add_* + connect_nodes — add new agents to existing workflow
 
+Surgical edits — PREFER these on existing workflows over delete + recreate:
+• delete_edge(source, target [, source_category]) — remove one specific connection
+  without deleting the agents.
+• add_category(classifier_name, name, description) — add ONE category to an
+  existing ClassifierAgent. Don't replace the whole array via update_node_property
+  unless the user wants to wipe all categories.
+• remove_category(classifier_name, name) — remove ONE category. Cascade-deletes
+  branch edges. Errors if it would drop below the 2-category minimum.
+• change_edge_type(source, target, new_type) — flip an edge between
+  'sequential' and 'reflection'.
+• rewire_edge(source, old_target, new_target [, source_category]) — re-point
+  an edge atomically. Equivalent to delete_edge + connect_nodes but rolls back
+  if the new edge can't be created.
+
 Only rebuild what the user asked to change.
 
 ═══════════════════════════════════════════════════════════
@@ -602,6 +703,12 @@ class WorkflowBuilder:
             "update_node_property": self._update_node_property,
             "delete_node": self._delete_node,
             "clear_all_agents": self._clear_all_agents,
+            # ── Surgical-edit tools for modifications (Pillar 3) ──
+            "delete_edge": self._delete_edge,
+            "add_category": self._add_category,
+            "remove_category": self._remove_category,
+            "change_edge_type": self._change_edge_type,
+            "rewire_edge": self._rewire_edge,
         }.get(tool_name)
 
         if not handler:
@@ -1047,6 +1154,130 @@ class WorkflowBuilder:
 
         return f"Cleared {len(removed_names)} node(s): {', '.join(removed_names)}. Kept 1 StartNode + 1 EndNode."
 
+    # ── Surgical-edit tools (Pillar 3) ──
+    # Prefer these on existing workflows over delete_node + recreate.
+
+    def _delete_edge(self, args: Dict) -> str:
+        source_name = args.get("source_name", "")
+        target_name = args.get("target_name", "")
+        source_category = (args.get("source_category") or "").strip()
+        src_id = self.node_name_map.get(source_name)
+        tgt_id = self.node_name_map.get(target_name)
+        if not src_id or not tgt_id:
+            return f"Error: edge endpoint not found ({source_name} → {target_name})"
+
+        candidates = [e for e in self.edges if e["source"] == src_id and e["target"] == tgt_id]
+        if not candidates:
+            return f"Error: no edge {source_name} → {target_name}"
+
+        # If source is a classifier and source_category given, narrow to that branch
+        src_node = next((n for n in self.nodes if n["id"] == src_id), None)
+        if src_node and src_node.get("type") == "ClassifierAgent" and source_category:
+            cats = src_node.get("data", {}).get("categories", []) or []
+            match = next((c for c in cats if (c.get("name") or "").strip().lower() == source_category.lower()), None)
+            if not match:
+                return f"Error: classifier '{source_name}' has no category '{source_category}'"
+            candidates = [e for e in candidates if e.get("source_handle") == match.get("id")]
+            if not candidates:
+                return f"Error: no edge for category '{source_category}' from {source_name}"
+
+        for e in candidates:
+            self.edges.remove(e)
+        suffix = f" [{source_category}]" if source_category else ""
+        return f"Deleted {len(candidates)} edge(s): {source_name} → {target_name}{suffix}"
+
+    def _add_category(self, args: Dict) -> str:
+        classifier_name = args.get("classifier_name", "")
+        cat_name = (args.get("name") or "").strip()
+        desc = (args.get("description") or "").strip()
+        if not cat_name:
+            return "Error: category name is required"
+        cls_id = self.node_name_map.get(classifier_name)
+        if not cls_id:
+            return f"Error: classifier '{classifier_name}' not found"
+        node = next((n for n in self.nodes if n["id"] == cls_id), None)
+        if not node or node.get("type") != "ClassifierAgent":
+            return f"Error: '{classifier_name}' is not a ClassifierAgent"
+        cats = node["data"].setdefault("categories", [])
+        if any((c.get("name") or "").strip().lower() == cat_name.lower() for c in cats):
+            return f"Error: category '{cat_name}' already exists in '{classifier_name}'"
+        if len(cats) >= 10:
+            return f"Error: '{classifier_name}' already has the max 10 categories"
+        cats.append({"id": str(uuid.uuid4()), "name": cat_name, "description": desc})
+        return f"Added category '{cat_name}' to '{classifier_name}' (now {len(cats)} categories)"
+
+    def _remove_category(self, args: Dict) -> str:
+        classifier_name = args.get("classifier_name", "")
+        cat_name = (args.get("name") or "").strip()
+        cls_id = self.node_name_map.get(classifier_name)
+        if not cls_id:
+            return f"Error: classifier '{classifier_name}' not found"
+        node = next((n for n in self.nodes if n["id"] == cls_id), None)
+        if not node or node.get("type") != "ClassifierAgent":
+            return f"Error: '{classifier_name}' is not a ClassifierAgent"
+        cats = node["data"].get("categories", []) or []
+        match = next((c for c in cats if (c.get("name") or "").strip().lower() == cat_name.lower()), None)
+        if not match:
+            return f"Error: classifier '{classifier_name}' has no category '{cat_name}'"
+        if len(cats) <= 2:
+            return (
+                f"Error: '{classifier_name}' has only {len(cats)} categories — cannot drop below the minimum of 2. "
+                "Add a replacement category first, then remove this one."
+            )
+        cat_id = match.get("id")
+        node["data"]["categories"] = [c for c in cats if c is not match]
+        # Cascade-delete edges that referenced this category's source_handle
+        removed_edges = [e for e in self.edges if e.get("source") == cls_id and e.get("source_handle") == cat_id]
+        for e in removed_edges:
+            self.edges.remove(e)
+        edge_note = f" (and {len(removed_edges)} branch edge(s))" if removed_edges else ""
+        return f"Removed category '{cat_name}' from '{classifier_name}'{edge_note}"
+
+    def _change_edge_type(self, args: Dict) -> str:
+        source_name = args.get("source_name", "")
+        target_name = args.get("target_name", "")
+        new_type = args.get("new_type", "")
+        if new_type not in ("sequential", "reflection"):
+            return "Error: new_type must be 'sequential' or 'reflection'"
+        src_id = self.node_name_map.get(source_name)
+        tgt_id = self.node_name_map.get(target_name)
+        if not src_id or not tgt_id:
+            return f"Error: edge endpoint not found ({source_name} → {target_name})"
+        edges = [e for e in self.edges if e["source"] == src_id and e["target"] == tgt_id]
+        if not edges:
+            return f"Error: no edge {source_name} → {target_name}"
+        for e in edges:
+            e["type"] = new_type
+        return f"Changed {len(edges)} edge(s) {source_name} → {target_name} to type '{new_type}'"
+
+    def _rewire_edge(self, args: Dict) -> str:
+        source_name = args.get("source_name", "")
+        old_target = args.get("old_target_name", "")
+        new_target = args.get("new_target_name", "")
+        source_category = (args.get("source_category") or "").strip()
+        # Snapshot the edge list before mutating so we can roll back if the
+        # add half fails — no half-rewires that leave the graph orphaned.
+        edges_snapshot = list(self.edges)
+        del_result = self._delete_edge({
+            "source_name": source_name,
+            "target_name": old_target,
+            "source_category": source_category,
+        })
+        if del_result.startswith("Error:"):
+            return f"Rewire failed at delete: {del_result}"
+        add_result = self._connect_nodes({
+            "source_name": source_name,
+            "target_name": new_target,
+            "source_category": source_category,
+            "edge_type": "sequential",
+        })
+        if add_result.startswith("Error:"):
+            # Roll back — restore the original edges
+            self.edges = edges_snapshot
+            return f"Rewire failed at add (rolled back): {add_result}"
+        suffix = f" [{source_category}]" if source_category else ""
+        return f"Rewired{suffix}: {source_name} → {old_target} replaced with {source_name} → {new_target}"
+
     # ── Auto-layout ──
 
     def auto_layout(self):
@@ -1402,6 +1633,144 @@ def _auto_repair_connections(builder: WorkflowBuilder):
                 logger.info(f"🔧 AUTO-REPAIR: Removed extra EndNode edge {e['id']}")
 
 
+# ── Diff helper (Pillar 4) ─────────────────────────────────────────────
+
+def _compute_graph_diff(
+    before: Optional[Dict[str, Any]],
+    after: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Compute a by-name diff between the previous canvas and the freshly built
+    graph so the preview UI can show "+ X, - Y, ~ Z" before the user accepts.
+
+    Returns None for fresh builds (no preview needed — there's nothing to
+    compare against).
+
+    Operates by NAME, not UUID, because every rebuild reassigns node IDs.
+    """
+    if not before or not before.get("nodes"):
+        return None
+
+    before_nodes = before.get("nodes", []) or []
+    after_nodes = (after or {}).get("nodes", []) or []
+    before_edges = before.get("edges", []) or []
+    after_edges = (after or {}).get("edges", []) or []
+
+    before_by_name = {
+        n["data"].get("name"): n
+        for n in before_nodes
+        if n.get("data", {}).get("name")
+    }
+    after_by_name = {
+        n["data"].get("name"): n
+        for n in after_nodes
+        if n.get("data", {}).get("name")
+    }
+
+    added = [name for name in after_by_name if name not in before_by_name]
+    removed = [name for name in before_by_name if name not in after_by_name]
+
+    # Watch only fields that meaningfully change agent behavior
+    watched = (
+        "system_message", "llm_provider", "llm_model", "temperature",
+        "doc_aware", "web_search_enabled", "doc_tool_calling_documents",
+        "categories", "prompt", "type",
+    )
+    updated: List[Dict[str, Any]] = []
+    for name, after_n in after_by_name.items():
+        before_n = before_by_name.get(name)
+        if not before_n:
+            continue
+        if before_n.get("type") != after_n.get("type"):
+            updated.append({"name": name, "fields": ["type"]})
+            continue
+        bd = before_n.get("data", {}) or {}
+        ad = after_n.get("data", {}) or {}
+        changed = [k for k in watched if bd.get(k) != ad.get(k)]
+        if changed:
+            updated.append({"name": name, "fields": changed})
+
+    # Edges keyed by (source_name, target_name, source_handle) — handle is the
+    # classifier category UUID, so it survives rebuilds only if the category
+    # name does. Fall back to the human category name for cross-rebuild parity.
+    def _edge_key(edge: Dict[str, Any], nodes: List[Dict[str, Any]]) -> tuple:
+        id_to_name = {n["id"]: n.get("data", {}).get("name", n["id"]) for n in nodes}
+        # Resolve source_handle (UUID) to category name when the source is a classifier
+        cat_name = None
+        h = edge.get("source_handle")
+        if h:
+            src_node = next((n for n in nodes if n["id"] == edge.get("source")), None)
+            if src_node and src_node.get("type") == "ClassifierAgent":
+                cats = src_node.get("data", {}).get("categories") or []
+                cat = next((c for c in cats if c.get("id") == h), None)
+                if cat:
+                    cat_name = cat.get("name")
+        return (
+            id_to_name.get(edge.get("source")),
+            id_to_name.get(edge.get("target")),
+            cat_name,
+        )
+
+    before_edge_set = {_edge_key(e, before_nodes) for e in before_edges}
+    after_edge_set = {_edge_key(e, after_nodes) for e in after_edges}
+
+    added_edges = [
+        {"source": k[0], "target": k[1], "category": k[2]}
+        for k in (after_edge_set - before_edge_set)
+    ]
+    removed_edges = [
+        {"source": k[0], "target": k[1], "category": k[2]}
+        for k in (before_edge_set - after_edge_set)
+    ]
+
+    return {
+        "added_nodes": added,
+        "removed_nodes": removed,
+        "updated_nodes": updated,
+        "added_edges": added_edges,
+        "removed_edges": removed_edges,
+    }
+
+
+# ── Planning helper (Pillar 1) ─────────────────────────────────────────
+
+async def _run_planning_phase(
+    llm_provider,
+    system_content: str,
+    conversation_history: Optional[List[Dict]],
+    user_message: str,
+) -> str:
+    """First-pass planning call that mirrors the AssistantAgent's `plan_mode`:
+    NO `tools` parameter is passed, so the LLM physically cannot tool-call.
+    Returns the plan text (empty string on any failure — gracefully degrades).
+    """
+    plan_prompt = (
+        "Before building, output a structured PLAN as a numbered list:\n"
+        "1. List every agent you will ADD (with role and one-line system_message gist).\n"
+        "2. List every agent you will REMOVE (by name).\n"
+        "3. List every agent you will UPDATE (by name) and which properties change.\n"
+        "4. List every edge you will ADD or REMOVE.\n"
+        "5. State the final flow as: Start → ... → End.\n\n"
+        "Output ONLY the numbered plan. No tool calls, no prose preamble. "
+        "Be specific — name actual agents and properties, not generic placeholders."
+    )
+    plan_messages: List[Dict[str, Any]] = [{"role": "system", "content": system_content}]
+    if conversation_history:
+        plan_messages.extend(conversation_history)
+    plan_messages.append({"role": "user", "content": user_message})
+    plan_messages.append({"role": "user", "content": plan_prompt})
+
+    try:
+        # CRITICAL: omit `tools` parameter so the LLM physically cannot tool-call.
+        response = await llm_provider.generate_response(messages=plan_messages)
+    except Exception as e:
+        logger.warning(f"⚠️ WORKFLOW GEN: planning phase crashed: {e}")
+        return ""
+    if response.error:
+        logger.warning(f"⚠️ WORKFLOW GEN: planning phase error: {response.error}")
+        return ""
+    return (response.text or "").strip()
+
+
 # ── Main generator function ────────────────────────────────────────────
 
 async def generate_workflow(
@@ -1511,6 +1880,13 @@ async def generate_workflow(
         cw_edges = current_graph.get("edges", [])
         node_id_to_name = {n["id"]: n.get("data", {}).get("name", n["id"][:8]) for n in cw_nodes}
         cw_lines = [f"\n\nCURRENT WORKFLOW ON CANVAS ({len(cw_nodes)} nodes, {len(cw_edges)} connections):"]
+        # Show StartNode prompt (the workflow's purpose) so the LLM knows what
+        # the existing graph is FOR before deciding how to modify it.
+        _start_node = next((n for n in cw_nodes if n.get("type") == "StartNode"), None)
+        if _start_node:
+            _sp = (_start_node.get("data", {}).get("prompt") or "").strip()
+            if _sp:
+                cw_lines.append(f'StartNode prompt: "{_sp[:500]}{"…" if len(_sp) > 500 else ""}"')
         cw_lines.append("Nodes:")
         for n in cw_nodes:
             d = n.get("data", {})
@@ -1529,11 +1905,22 @@ async def generate_workflow(
                 line += " [web_search]"
             if d.get("plan_mode") is False:
                 line += " [plan_mode=off]"
+            cw_lines.append(line)
+            # Pillar 2: show truncated system_message (so the LLM knows what
+            # each agent currently does before rewriting it).
+            sys_msg = (d.get("system_message") or "").strip()
+            if sys_msg and n["type"] not in ("StartNode", "EndNode"):
+                snippet = sys_msg[:500] + ("…" if len(sys_msg) > 500 else "")
+                cw_lines.append(f"      system_message: {snippet}")
+            # Pillar 2: show categories WITH descriptions on their own lines
             if n["type"] == "ClassifierAgent":
                 cats = d.get("categories") or []
                 if cats:
-                    line += f" [categories: {', '.join(c.get('name', '?') for c in cats)}]"
-            cw_lines.append(line)
+                    cw_lines.append("      categories:")
+                    for c in cats:
+                        cname = c.get("name", "?")
+                        cdesc = (c.get("description") or "").strip()
+                        cw_lines.append(f"        • {cname}" + (f" — {cdesc[:200]}" if cdesc else ""))
         cw_lines.append("Connections:")
         # Map classifier node_id → {category_id: category_name} so we can
         # annotate classifier-branch edges with the human-readable category name.
@@ -1560,6 +1947,19 @@ async def generate_workflow(
 
     # Build messages — fill in dynamic sections
     system_content = SYSTEM_PROMPT.replace("{available_models_section}", available_models_section) + doc_listing + current_workflow_section
+    # ── Pillar 1: enforced planning phase when modifying an existing workflow ──
+    # Run a tools-disabled LLM call first so the plan is grounded in the current
+    # canvas state. Skip for fresh builds (nothing to modify against).
+    plan_text = ""
+    if current_graph and current_graph.get("nodes"):
+        plan_text = await _run_planning_phase(
+            llm_provider, system_content, conversation_history, user_message
+        )
+        logger.info(
+            f"📋 WORKFLOW GEN: planning phase produced {len(plan_text)} chars"
+            + (" (empty — falling back to single-pass build)" if not plan_text else "")
+        )
+
     # If the caller passed pre-extracted text from user-attached files, fold it
     # into the user turn so the LLM sees the document content as context.
     effective_user_message = user_message
@@ -1569,6 +1969,15 @@ async def generate_workflow(
             "The user attached the following file(s) to this message — "
             "use this content as context for the workflow you build:\n\n"
             f"{attached_files_text}"
+        )
+
+    # Prepend the plan so the build phase executes against an explicit plan.
+    if plan_text:
+        effective_user_message = (
+            f"Here is your PLAN (from the planning phase — execute it now):\n"
+            f"{plan_text}\n\n"
+            "Stick to the plan unless you discover a real issue while building.\n\n"
+            f"User request: {effective_user_message}"
         )
 
     messages = [{"role": "system", "content": system_content}]
@@ -1703,6 +2112,12 @@ async def generate_workflow(
             node_id_to_name_v = {n["id"]: n.get("data", {}).get("name", "?") for n in v_nodes}
 
             graph_desc_lines = ["Current workflow after auto-repair:"]
+            # StartNode prompt for purpose context
+            _v_start = next((n for n in v_nodes if n.get("type") == "StartNode"), None)
+            if _v_start:
+                _vsp = (_v_start.get("data", {}).get("prompt") or "").strip()
+                if _vsp:
+                    graph_desc_lines.append(f'StartNode prompt: "{_vsp[:500]}{"…" if len(_vsp) > 500 else ""}"')
             graph_desc_lines.append(f"Nodes ({len(v_nodes)}):")
             for n in v_nodes:
                 d = n.get("data", {})
@@ -1723,11 +2138,21 @@ async def generate_workflow(
                     line += " [web_search]"
                 if d.get("plan_mode") is False:
                     line += " [plan_mode=off]"
+                graph_desc_lines.append(line)
+                # Pillar 2: truncated system_message
+                _vsm = (d.get("system_message") or "").strip()
+                if _vsm and n["type"] not in ("StartNode", "EndNode"):
+                    _snip = _vsm[:500] + ("…" if len(_vsm) > 500 else "")
+                    graph_desc_lines.append(f"      system_message: {_snip}")
+                # Pillar 2: classifier categories with descriptions
                 if n["type"] == "ClassifierAgent":
                     cats = d.get("categories") or []
                     if cats:
-                        line += f" [categories: {', '.join(c.get('name', '?') for c in cats)}]"
-                graph_desc_lines.append(line)
+                        graph_desc_lines.append("      categories:")
+                        for c in cats:
+                            _cn = c.get("name", "?")
+                            _cd = (c.get("description") or "").strip()
+                            graph_desc_lines.append(f"        • {_cn}" + (f" — {_cd[:200]}" if _cd else ""))
             graph_desc_lines.append(f"Connections ({len(v_edges)}):")
             v_classifier_cat_names = {
                 n["id"]: {
@@ -1747,9 +2172,11 @@ async def generate_workflow(
                 graph_desc_lines.append(f"  {src} → {tgt} ({e.get('type', 'sequential')}){handle_suffix}")
             graph_desc = "\n".join(graph_desc_lines)
 
+            _plan_block = f"Original plan from the planning phase:\n{plan_text}\n\n" if plan_text else ""
             verify_prompt = (
                 f"You are verifying a workflow that was just built. Here is the current state:\n\n"
                 f"{graph_desc}\n\n"
+                f"{_plan_block}"
                 f"The user's original request was: \"{user_message[:500]}\"\n\n"
                 "VERIFY the following and FIX any issues using the available tools:\n"
                 "1. Does the orchestration make sense for the user's request? Are the right agents created with the right roles?\n"
@@ -1761,8 +2188,9 @@ async def generate_workflow(
                 "6. Are LLM models and temperatures appropriate for each agent's task?\n"
                 "7. For any ClassifierAgent: 2-10 categories with unique non-empty names and "
                 "clear descriptions; every outgoing edge specifies a source_category matching "
-                "an existing category name; each category branch leads somewhere meaningful.\n\n"
-                "If everything looks correct, respond with 'Verification passed — workflow is valid.'\n"
+                "an existing category name; each category branch leads somewhere meaningful.\n"
+                + ("8. Did the build follow the plan above? Note any drift and fix it.\n\n" if plan_text else "\n")
+                + "If everything looks correct, respond with 'Verification passed — workflow is valid.'\n"
                 "If there are issues, use update_node_property, delete_node, connect_nodes, or add_* tools to fix them.\n"
                 "Do NOT rebuild the workflow from scratch — only fix specific issues."
             )
@@ -1810,9 +2238,14 @@ async def generate_workflow(
     if not is_valid:
         explanation += f"\n\nNote: The generated workflow has validation issues: {', '.join(errors)}"
 
+    # Pillar 4: compute the diff for the preview UX (None for fresh builds)
+    diff = _compute_graph_diff(current_graph, graph_json)
+
     return {
         "graph_json": graph_json,
         "explanation": explanation.strip(),
         "tool_calls": builder.tool_calls_log,
         "errors": errors,
+        "plan": plan_text,  # Pillar 1 — empty string for fresh builds or on planning failure
+        "diff": diff,        # Pillar 4 — None for fresh builds
     }

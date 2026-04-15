@@ -3349,7 +3349,7 @@
             </button>
           </div>
 
-          {#each (nodeConfig.categories || []) as cat, catIdx (cat.id)}
+          {#each (nodeConfig.categories || []) as cat, catIdx (cat.id || `__cat_${catIdx}`)}
             <div class="p-2 mb-2 border border-gray-200 rounded-lg bg-white">
               <div class="flex items-center space-x-2 mb-2">
                 <input
