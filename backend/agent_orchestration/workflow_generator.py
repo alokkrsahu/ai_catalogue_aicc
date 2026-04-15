@@ -222,6 +222,63 @@ WORKFLOW_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "add_classifier_agent",
+            "description": (
+                "Add a ClassifierAgent — a routing node that picks exactly ONE category "
+                "from a user-defined list using forced LLM tool-calling, then routes "
+                "execution down that branch only. Non-selected branches are pruned at "
+                "runtime and never execute. Use for intent triage, language routing, "
+                "or any 'which path?' decision. Downstream agents receive the ORIGINAL "
+                "input unchanged — the classifier itself produces no content."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Descriptive name (e.g. 'Intent Router', 'Ticket Triage')"
+                    },
+                    "categories": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 10,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": "Short category label (e.g. 'Billing', 'Bug Report')"
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "When to pick this category — guides the LLM's choice"
+                                }
+                            },
+                            "required": ["name"]
+                        },
+                        "description": "2-10 categories. Each needs a unique name; descriptions are strongly recommended so the classifier LLM picks the right one."
+                    },
+                    "llm_provider": {
+                        "type": "string",
+                        "enum": ["openai", "anthropic", "google"],
+                        "description": "LLM provider for classification (default: anthropic)"
+                    },
+                    "llm_model": {
+                        "type": "string",
+                        "description": "Model name (default: claude-3-5-haiku-20241022 — fast/cheap works well for routing)"
+                    },
+                    "temperature": {
+                        "type": "number",
+                        "description": "LLM temperature 0-2 (default: 0.0 — routers want determinism)"
+                    }
+                },
+                "required": ["name", "categories"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "add_end_node",
             "description": "Add the workflow end node. Every workflow MUST end with exactly one end node. The end node can only receive ONE incoming connection.",
             "parameters": {
@@ -240,7 +297,7 @@ WORKFLOW_TOOLS = [
         "type": "function",
         "function": {
             "name": "connect_nodes",
-            "description": "Create a connection between two nodes. Connections define the execution flow. DelegateAgent ↔ GroupChatManager connections are auto-typed as 'delegate'.",
+            "description": "Create a connection between two nodes. Connections define the execution flow. DelegateAgent ↔ GroupChatManager connections are auto-typed as 'delegate'. When source is a ClassifierAgent, source_category is REQUIRED.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -256,6 +313,10 @@ WORKFLOW_TOOLS = [
                         "type": "string",
                         "enum": ["sequential", "reflection"],
                         "description": "Connection type (default: sequential)"
+                    },
+                    "source_category": {
+                        "type": "string",
+                        "description": "REQUIRED when source is a ClassifierAgent — the category NAME this edge represents (matching one of the classifier's category names). The edge fires only when the classifier picks this category."
                     }
                 },
                 "required": ["source_name", "target_name"]
@@ -324,7 +385,8 @@ STRUCTURAL RULES
 ═══════════════════════════════════════════════════════════
 
 • Exactly ONE StartNode and ONE EndNode per workflow.
-• EndNode accepts exactly ONE incoming connection. If multiple agents produce output, funnel them through a single aggregator/synthesis agent before EndNode.
+• EndNode accepts exactly ONE incoming connection — EXCEPT when incoming edges all originate from different branches of a ClassifierAgent (because only one branch will reach EndNode at runtime; the others are pruned).
+• If multiple non-classifier agents produce output, funnel them through a single aggregator/synthesis agent before EndNode.
 • StartNode has only outgoing connections. Nothing connects into it.
 • Every agent must be reachable from StartNode and must have a path to EndNode.
 • No orphan nodes. No self-connections.
@@ -341,6 +403,16 @@ UserProxyAgent:
 
 GroupChatManager + DelegateAgent:
   For coordinated specialist teams. The manager delegates sub-tasks to specialist delegates. Delegates can ONLY connect to their GroupChatManager. Use when you need internal sub-orchestration within a larger workflow.
+
+ClassifierAgent:
+  A pure routing/triage node. Receives input, picks EXACTLY ONE of 2-10 user-defined
+  categories via forced LLM tool-calling, and routes execution down only that branch.
+  Non-selected branches are PRUNED at runtime (their agents never execute).
+  Downstream agents receive the ORIGINAL input unchanged — the classifier produces
+  no content of its own, it only picks a path. Use for: intent routing ("bug report"
+  vs "feature request" vs "billing question"), language branching, triage/escalation,
+  any conditional workflow selection. Each category must have a clear name and a
+  short description that tells the LLM when to pick it.
 
 ═══════════════════════════════════════════════════════════
 EXECUTION PATTERNS — CHOOSE BASED ON REQUIREMENTS
@@ -360,6 +432,16 @@ FAN-OUT/FAN-IN: Source → [A, B, C] → Aggregator → End
 
 PIPELINE WITH REVIEW: A → B → Human → C → End
   Insert a UserProxyAgent wherever human judgment is needed.
+
+ROUTING (classifier branches): Start → Classifier → [Cat A → Agent A → End,
+                                                     Cat B → Agent B → End,
+                                                     Cat C → Agent C → End]
+  The Classifier picks exactly ONE branch at runtime; non-selected branches are
+  pruned and never execute. When calling connect_nodes to wire a classifier's
+  outgoing edges, you MUST pass source_category (the category name). Each
+  category should have its own outgoing edge. Different branches may independently
+  terminate at EndNode — this is the ONE exception to the "EndNode has exactly
+  1 incoming" rule. Use when the user wants conditional/routed workflows.
 
 Choose the pattern that best fits the user's requirements. Complex workflows may combine multiple patterns.
 
@@ -514,6 +596,7 @@ class WorkflowBuilder:
             "add_user_proxy_agent": self._add_user_proxy_agent,
             "add_group_chat_manager": self._add_group_chat_manager,
             "add_delegate_agent": self._add_delegate_agent,
+            "add_classifier_agent": self._add_classifier_agent,
             "add_end_node": self._add_end_node,
             "connect_nodes": self._connect_nodes,
             "update_node_property": self._update_node_property,
@@ -723,6 +806,51 @@ class WorkflowBuilder:
             })
         return f"Added DelegateAgent '{name}'" + (f" (connected to {manager_name})" if manager_name else "")
 
+    def _add_classifier_agent(self, args: Dict) -> str:
+        node_id = str(uuid.uuid4())
+        name = args["name"]
+        raw_cats = args.get("categories") or []
+        if not isinstance(raw_cats, list) or len(raw_cats) < 2:
+            return f"Error: ClassifierAgent '{name}' needs at least 2 categories (got {len(raw_cats) if isinstance(raw_cats, list) else 0})"
+        if len(raw_cats) > 10:
+            raw_cats = raw_cats[:10]
+        # Normalize, assign UUIDs, dedup category names (case-insensitive).
+        seen_names: set = set()
+        categories: List[Dict[str, Any]] = []
+        for i, c in enumerate(raw_cats):
+            if not isinstance(c, dict):
+                continue
+            cname = (c.get("name") or f"Category {i + 1}").strip()
+            base = cname
+            suffix = 2
+            while cname.lower() in seen_names:
+                cname = f"{base} {suffix}"
+                suffix += 1
+            seen_names.add(cname.lower())
+            categories.append({
+                "id": str(uuid.uuid4()),
+                "name": cname,
+                "description": (c.get("description") or "").strip(),
+            })
+        if len(categories) < 2:
+            return f"Error: ClassifierAgent '{name}' has fewer than 2 valid categories after normalization"
+        self.nodes.append({
+            "id": node_id,
+            "type": "ClassifierAgent",
+            "position": {"x": 0, "y": 0},
+            "data": {
+                "name": name,
+                "description": f"Routes input to one of {len(categories)} categories",
+                "categories": categories,
+                "llm_provider": args.get("llm_provider", "anthropic"),
+                "llm_model": args.get("llm_model", "claude-3-5-haiku-20241022"),
+                "temperature": args.get("temperature", 0.0),
+            }
+        })
+        self.node_name_map[name] = node_id
+        cat_list = ", ".join(c["name"] for c in categories)
+        return f"Added ClassifierAgent '{name}' with {len(categories)} categories: {cat_list}"
+
     def _add_end_node(self, args: Dict) -> str:
         # If EndNode already exists, update it instead of creating a duplicate
         existing = next((n for n in self.nodes if n["type"] == "EndNode"), None)
@@ -753,6 +881,7 @@ class WorkflowBuilder:
         source_name = args["source_name"]
         target_name = args["target_name"]
         edge_type = args.get("edge_type", "sequential")
+        source_category = (args.get("source_category") or "").strip()
 
         source_id = self.node_name_map.get(source_name)
         target_id = self.node_name_map.get(target_name)
@@ -765,26 +894,56 @@ class WorkflowBuilder:
             return f"Error: cannot connect a node to itself ('{source_name}')"
 
         # Auto-detect delegate type
-        source_type = next((n["type"] for n in self.nodes if n["id"] == source_id), "")
-        target_type = next((n["type"] for n in self.nodes if n["id"] == target_id), "")
+        source_node = next((n for n in self.nodes if n["id"] == source_id), None)
+        target_node = next((n for n in self.nodes if n["id"] == target_id), None)
+        source_type = source_node["type"] if source_node else ""
+        target_type = target_node["type"] if target_node else ""
         if (source_type == "GroupChatManager" and target_type == "DelegateAgent") or \
            (source_type == "DelegateAgent" and target_type == "GroupChatManager"):
             edge_type = "delegate"
 
-        # Check duplicate
-        edge_id = f"{source_id}-{target_id}"
-        if any(e["id"] == edge_id for e in self.edges):
-            return f"Connection already exists: {source_name} → {target_name}"
+        # Classifier edges carry a source_handle = the chosen category's UUID.
+        # Each category gets its own outgoing edge; the executor prunes branches
+        # whose source_handle differs from the classifier's runtime decision.
+        source_handle = None
+        if source_type == "ClassifierAgent":
+            if not source_category:
+                cats = (source_node or {}).get("data", {}).get("categories", []) or []
+                cat_names = ", ".join(f"'{c.get('name', '?')}'" for c in cats) or "(no categories)"
+                return (
+                    f"Error: source '{source_name}' is a ClassifierAgent — "
+                    f"you MUST pass source_category. Available categories: {cat_names}"
+                )
+            cats = (source_node or {}).get("data", {}).get("categories", []) or []
+            match = next((c for c in cats if (c.get("name") or "").strip().lower() == source_category.lower()), None)
+            if match is None:
+                cat_names = ", ".join(f"'{c.get('name', '?')}'" for c in cats) or "(no categories)"
+                return (
+                    f"Error: classifier '{source_name}' has no category named '{source_category}'. "
+                    f"Available: {cat_names}"
+                )
+            source_handle = match.get("id")
 
-        self.edges.append({
+        # Check duplicate — classifier edges must be unique per (source, target, category)
+        # so include source_handle in the edge id when present.
+        edge_id = f"{source_id}-{target_id}" + (f"-{source_handle}" if source_handle else "")
+        if any(e["id"] == edge_id for e in self.edges):
+            suffix = f" (category: {source_category})" if source_category else ""
+            return f"Connection already exists: {source_name} → {target_name}{suffix}"
+
+        edge_obj: Dict[str, Any] = {
             "id": edge_id,
             "source": source_id,
             "target": target_id,
             "type": edge_type,
             "label": "", "description": "", "condition": "",
             "priority": 1, "retryCount": 0, "timeout": 30,
-        })
-        return f"Connected '{source_name}' → '{target_name}' ({edge_type})"
+        }
+        if source_handle:
+            edge_obj["source_handle"] = source_handle
+        self.edges.append(edge_obj)
+        suffix = f" [category: {source_category}]" if source_category else ""
+        return f"Connected '{source_name}' → '{target_name}' ({edge_type}){suffix}"
 
     # ── Update / Delete ──
 
@@ -1128,9 +1287,13 @@ def _auto_repair_connections(builder: WorkflowBuilder):
 
     # Fix 2: Agents with no outgoing → connect to the last agent or EndNode
     # Strategy: find agents that are "sinks" (no outgoing) and connect them forward
-    # The last agent in the list is likely the synthesizer/final agent
+    # The last agent in the list is likely the synthesizer/final agent.
+    # Skip ClassifierAgent: its outgoing edges are per-category and cannot be
+    # auto-added here (we'd need a source_handle / category UUID).
     last_agent = agents[-1] if agents else None
     for a in agents:
+        if a["type"] == "ClassifierAgent":
+            continue
         if a["id"] not in sources:
             if a == last_agent:
                 # Last agent connects to EndNode
@@ -1177,13 +1340,36 @@ def _auto_repair_connections(builder: WorkflowBuilder):
         _add_edge(last_agent["id"], end["id"])
 
     # Fix 5: EndNode has multiple incoming (>1) → keep only the last one
+    # EXCEPTION: if every incoming edge traces back to a ClassifierAgent branch,
+    # this is a legitimate routing pattern (only one branch fires at runtime).
     end_incoming = [e for e in builder.edges if e["target"] == end["id"]]
     if len(end_incoming) > 1:
-        keep_source = last_agent["id"] if last_agent else end_incoming[-1]["source"]
-        edges_to_remove = [e for e in end_incoming if e["source"] != keep_source]
-        for e in edges_to_remove:
-            builder.edges.remove(e)
-            logger.info(f"🔧 AUTO-REPAIR: Removed extra EndNode edge {e['id']}")
+        node_type_by_id = {n["id"]: n["type"] for n in builder.nodes}
+
+        def _traces_back_to_classifier(src_id: str, seen: Optional[set] = None) -> bool:
+            """True iff every path leading into src_id originates from a classifier branch."""
+            seen = seen if seen is not None else set()
+            if src_id in seen:
+                return False
+            seen.add(src_id)
+            if node_type_by_id.get(src_id) == "ClassifierAgent":
+                return True
+            upstream = [e for e in builder.edges if e["target"] == src_id]
+            if not upstream:
+                return False
+            return all(_traces_back_to_classifier(e["source"], seen) for e in upstream)
+
+        if all(_traces_back_to_classifier(e["source"]) for e in end_incoming):
+            logger.info(
+                f"🔧 AUTO-REPAIR: Keeping all {len(end_incoming)} EndNode incoming edges "
+                "(all originate from classifier branches)"
+            )
+        else:
+            keep_source = last_agent["id"] if last_agent else end_incoming[-1]["source"]
+            edges_to_remove = [e for e in end_incoming if e["source"] != keep_source]
+            for e in edges_to_remove:
+                builder.edges.remove(e)
+                logger.info(f"🔧 AUTO-REPAIR: Removed extra EndNode edge {e['id']}")
 
 
 # ── Main generator function ────────────────────────────────────────────
@@ -1308,12 +1494,30 @@ async def generate_workflow(
                 line += " [web_search]"
             if d.get("plan_mode") is False:
                 line += " [plan_mode=off]"
+            if n["type"] == "ClassifierAgent":
+                cats = d.get("categories") or []
+                if cats:
+                    line += f" [categories: {', '.join(c.get('name', '?') for c in cats)}]"
             cw_lines.append(line)
         cw_lines.append("Connections:")
+        # Map classifier node_id → {category_id: category_name} so we can
+        # annotate classifier-branch edges with the human-readable category name.
+        cw_classifier_cat_names = {
+            n["id"]: {
+                c.get("id"): c.get("name", "?")
+                for c in (n.get("data", {}).get("categories") or [])
+            }
+            for n in cw_nodes if n.get("type") == "ClassifierAgent"
+        }
         for e in cw_edges:
             src = node_id_to_name.get(e["source"], "?")
             tgt = node_id_to_name.get(e["target"], "?")
-            cw_lines.append(f"  - {src} → {tgt} ({e.get('type', 'sequential')})")
+            handle_suffix = ""
+            if e.get("source_handle") and e["source"] in cw_classifier_cat_names:
+                cat_name = cw_classifier_cat_names[e["source"]].get(e["source_handle"])
+                if cat_name:
+                    handle_suffix = f" [category: {cat_name}]"
+            cw_lines.append(f"  - {src} → {tgt} ({e.get('type', 'sequential')}){handle_suffix}")
         cw_lines.append("")
         cw_lines.append("The user wants to MODIFY this existing workflow. You should rebuild it with the requested changes.")
         cw_lines.append("Recreate all nodes and connections, keeping existing agents that don't need changes and adding/removing/modifying as requested.")
@@ -1473,12 +1677,28 @@ async def generate_workflow(
                     line += " [web_search]"
                 if d.get("plan_mode") is False:
                     line += " [plan_mode=off]"
+                if n["type"] == "ClassifierAgent":
+                    cats = d.get("categories") or []
+                    if cats:
+                        line += f" [categories: {', '.join(c.get('name', '?') for c in cats)}]"
                 graph_desc_lines.append(line)
             graph_desc_lines.append(f"Connections ({len(v_edges)}):")
+            v_classifier_cat_names = {
+                n["id"]: {
+                    c.get("id"): c.get("name", "?")
+                    for c in (n.get("data", {}).get("categories") or [])
+                }
+                for n in v_nodes if n.get("type") == "ClassifierAgent"
+            }
             for e in v_edges:
                 src = node_id_to_name_v.get(e["source"], "?")
                 tgt = node_id_to_name_v.get(e["target"], "?")
-                graph_desc_lines.append(f"  {src} → {tgt} ({e.get('type', 'sequential')})")
+                handle_suffix = ""
+                if e.get("source_handle") and e["source"] in v_classifier_cat_names:
+                    cat_name = v_classifier_cat_names[e["source"]].get(e["source_handle"])
+                    if cat_name:
+                        handle_suffix = f" [category: {cat_name}]"
+                graph_desc_lines.append(f"  {src} → {tgt} ({e.get('type', 'sequential')}){handle_suffix}")
             graph_desc = "\n".join(graph_desc_lines)
 
             verify_prompt = (
@@ -1488,10 +1708,14 @@ async def generate_workflow(
                 "VERIFY the following and FIX any issues using the available tools:\n"
                 "1. Does the orchestration make sense for the user's request? Are the right agents created with the right roles?\n"
                 "2. Are all connections valid? Does information flow logically from source to destination?\n"
-                "3. Is every agent reachable from StartNode? Does exactly one agent connect to EndNode?\n"
+                "3. Is every agent reachable from StartNode? Does exactly one agent connect to EndNode "
+                "(exception: multiple branches from a ClassifierAgent MAY each terminate at EndNode)?\n"
                 "4. Are web_search / doc_tool_calling / documents / doc_aware assigned correctly per each agent's role?\n"
                 "5. Are system_messages detailed enough for each agent to do its job?\n"
-                "6. Are LLM models and temperatures appropriate for each agent's task?\n\n"
+                "6. Are LLM models and temperatures appropriate for each agent's task?\n"
+                "7. For any ClassifierAgent: 2-10 categories with unique non-empty names and "
+                "clear descriptions; every outgoing edge specifies a source_category matching "
+                "an existing category name; each category branch leads somewhere meaningful.\n\n"
                 "If everything looks correct, respond with 'Verification passed — workflow is valid.'\n"
                 "If there are issues, use update_node_property, delete_node, connect_nodes, or add_* tools to fix them.\n"
                 "Do NOT rebuild the workflow from scratch — only fix specific issues."
