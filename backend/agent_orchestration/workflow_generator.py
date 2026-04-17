@@ -1986,6 +1986,59 @@ def _auto_repair_connections(builder: WorkflowBuilder):
             return True
         return False
 
+    # ── Router-aware helpers for Fix 2/3 and the specialist-chain cleanup (Fix 6) ──
+    splitter_nodes = [n for n in builder.nodes if n["type"] == "SplitterAgent"]
+    splitter_ids = {s["id"] for s in splitter_nodes}
+
+    def _name_of(node_id: str) -> str:
+        n = next((nn for nn in builder.nodes if nn["id"] == node_id), None)
+        return (n.get("data", {}).get("name") if n else node_id[:8]) or node_id[:8]
+
+    def _looks_like_synthesizer(node_id: str) -> bool:
+        """Heuristic: name contains a synthesizer keyword, OR has ≥2 incoming edges."""
+        node = next((nn for nn in builder.nodes if nn["id"] == node_id), None)
+        if not node:
+            return False
+        if node.get("type") in ("StartNode", "EndNode", "SplitterAgent", "ClassifierAgent"):
+            return False
+        name = (node.get("data", {}).get("name") or "").lower()
+        if any(k in name for k in ("synth", "aggreg", "combin", "merge", "consolid")):
+            return True
+        incoming_count = sum(1 for e in builder.edges if e["target"] == node_id)
+        return incoming_count >= 2
+
+    def _find_splitter_parent_for_orphan(orphan_id: str):
+        """If the orphan's direct outputs flow into a Synthesizer-style node
+        or EndNode AND a Splitter exists, return the Splitter's ID. The orphan
+        is almost certainly meant to be a Splitter specialist."""
+        if not splitter_nodes:
+            return None
+        for e in builder.edges:
+            if e["source"] != orphan_id:
+                continue
+            tgt_id = e["target"]
+            tgt_type = next((n["type"] for n in builder.nodes if n["id"] == tgt_id), None)
+            if tgt_type == "EndNode" or _looks_like_synthesizer(tgt_id):
+                return splitter_nodes[0]["id"]
+        return None
+
+    def _is_splitter_specialist(agent_id: str) -> bool:
+        """True if the agent has any direct incoming edge from a SplitterAgent."""
+        return any(
+            e["target"] == agent_id and e["source"] in splitter_ids
+            for e in builder.edges
+        )
+
+    def _find_synthesizer_for_splitter_specialist():
+        """Find a node that looks like the Synthesizer the Splitter specialists
+        should feed into. Returns node_id or None."""
+        for n in builder.nodes:
+            if n["type"] in ("StartNode", "EndNode", "SplitterAgent", "ClassifierAgent"):
+                continue
+            if _looks_like_synthesizer(n["id"]):
+                return n["id"]
+        return None
+
     # Fix 1: StartNode has no outgoing → connect to agents with no incoming
     if start["id"] not in sources and agents:
         for a in agents:
@@ -2020,6 +2073,19 @@ def _auto_repair_connections(builder: WorkflowBuilder):
             if _is_classifier_branch(a["id"]):
                 # Classifier branch terminal → goes directly to End
                 _add_edge(a["id"], end["id"])
+            elif _is_splitter_specialist(a["id"]):
+                # Splitter specialist with no outgoing → route to Synthesizer
+                # if one exists (NOT last_agent, which in combined graphs is
+                # often an unrelated agent like a Classifier branch target).
+                synth = _find_synthesizer_for_splitter_specialist()
+                if synth and synth != a["id"]:
+                    _add_edge(a["id"], synth)
+                    logger.info(
+                        f"🔧 AUTO-REPAIR: Routed Splitter specialist "
+                        f"'{_name_of(a['id'])}' → Synthesizer '{_name_of(synth)}'"
+                    )
+                else:
+                    _add_edge(a["id"], end["id"])
             elif a == last_agent:
                 # Last agent connects to EndNode
                 _add_edge(a["id"], end["id"])
@@ -2034,6 +2100,19 @@ def _auto_repair_connections(builder: WorkflowBuilder):
         a_id = a["id"]
         has_incoming = a_id in targets
         if not has_incoming and a_id != start["id"]:
+            # Router-aware path: if a Splitter exists and this orphan's outputs
+            # flow into a Synthesizer-style node or EndNode, it's almost certainly
+            # a Splitter specialist — route from the Splitter directly. This
+            # prevents the sibling-source fallback below from propagating chain
+            # patterns in combined Classifier + Splitter graphs.
+            splitter_parent = _find_splitter_parent_for_orphan(a_id)
+            if splitter_parent:
+                _add_edge(splitter_parent, a_id)
+                logger.info(
+                    f"🔧 AUTO-REPAIR: Connected '{_name_of(a_id)}' from Splitter "
+                    f"'{_name_of(splitter_parent)}' (router-aware)"
+                )
+                continue
             # Find where this agent's output goes (its target)
             a_targets = [e["target"] for e in builder.edges if e["source"] == a_id]
             # Find siblings: other agents that also connect to the same target
@@ -2095,6 +2174,45 @@ def _auto_repair_connections(builder: WorkflowBuilder):
             for e in edges_to_remove:
                 builder.edges.remove(e)
                 logger.info(f"🔧 AUTO-REPAIR: Removed extra EndNode edge {e['id']}")
+
+    # ── Fix 6: Router-aware cleanup (runs last, after all other fixes) ──
+    # 6a: Specialist chain cleanup. If Splitter → A AND Splitter → B AND there's
+    # an edge A → B (or B → A) between them, the inter-specialist edge is almost
+    # always a leftover from the LLM's initial chained output — Splitter
+    # specialists should run in parallel, not in series. Delete the chain edges.
+    for splitter in splitter_nodes:
+        direct_children = {
+            e["target"] for e in builder.edges if e["source"] == splitter["id"]
+        }
+        chain_edges = [
+            e for e in builder.edges
+            if e["source"] in direct_children
+            and e["target"] in direct_children
+            and e["source"] != splitter["id"]
+        ]
+        for e in chain_edges:
+            builder.edges.remove(e)
+            logger.info(
+                f"🔧 AUTO-REPAIR: removed chain edge between Splitter specialists "
+                f"({_name_of(e['source'])} → {_name_of(e['target'])})"
+            )
+
+    # 6b: Backwards edges INTO a Splitter from its own downstream agents (cycle).
+    # The LLM occasionally reverses direction during initial generation.
+    for splitter in splitter_nodes:
+        direct_children = {
+            e["target"] for e in builder.edges if e["source"] == splitter["id"]
+        }
+        backwards_edges = [
+            e for e in builder.edges
+            if e["target"] == splitter["id"] and e["source"] in direct_children
+        ]
+        for e in backwards_edges:
+            builder.edges.remove(e)
+            logger.info(
+                f"🔧 AUTO-REPAIR: removed backwards edge into Splitter "
+                f"({_name_of(e['source'])} → {_name_of(e['target'])})"
+            )
 
 
 # ── Diff helper (Pillar 4) ─────────────────────────────────────────────
