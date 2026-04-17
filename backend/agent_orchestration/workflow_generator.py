@@ -707,6 +707,48 @@ Example B — SplitterAgent task decomposition (research report)
       — the Splitter LLM reads those descriptions to decide who gets which
       subtask.
 
+Example C — Classifier routing into a Splitter (combined routers)
+  User request: "First classify whether the input is a Research task or a
+                 Bug Report. If Research, split the work among a Literature
+                 Reviewer, Data Analyst, and Summary Writer, then combine.
+                 If Bug Report, send to a single Bug Triage agent."
+  Tool calls (in order):
+    1. add_start_node(prompt="Incoming task")
+    2. add_classifier_agent(name="Task Classifier", categories=[
+         {name: "Research",   description: "Literature search, analysis, summarization"},
+         {name: "Bug Report", description: "Defects, regressions, unexpected behavior"},
+       ])
+    3. add_splitter_agent(name="Research Splitter")
+    4. add_assistant_agent(name="Literature Reviewer",   system_message="You locate and summarize relevant prior work...")
+    5. add_assistant_agent(name="Data Analyst",          system_message="You analyze quantitative data and identify patterns...")
+    6. add_assistant_agent(name="Summary Writer",        system_message="You distil findings into a concise summary...")
+    7. add_assistant_agent(name="Research Synthesizer",  system_message="You combine the three outputs into one coherent report...")
+    8. add_assistant_agent(name="Bug Triage Agent",      system_message="You triage bug reports: severity, component, steps to repro...")
+    9. add_end_node()
+   10. connect_nodes(source_name="Start 1",            target_name="Task Classifier")
+   11. connect_nodes(source_name="Task Classifier",    target_name="Research Splitter", source_category="Research")
+   12. connect_nodes(source_name="Task Classifier",    target_name="Bug Triage Agent",  source_category="Bug Report")
+   13. connect_nodes(source_name="Research Splitter",  target_name="Literature Reviewer")
+   14. connect_nodes(source_name="Research Splitter",  target_name="Data Analyst")
+   15. connect_nodes(source_name="Research Splitter",  target_name="Summary Writer")
+   16. connect_nodes(source_name="Literature Reviewer", target_name="Research Synthesizer")
+   17. connect_nodes(source_name="Data Analyst",        target_name="Research Synthesizer")
+   18. connect_nodes(source_name="Summary Writer",      target_name="Research Synthesizer")
+   19. connect_nodes(source_name="Research Synthesizer", target_name="End 1")
+   20. connect_nodes(source_name="Bug Triage Agent",     target_name="End 1")
+  Key points for COMBINED routers:
+    • The Classifier has EXACTLY N outgoing edges where N = number of categories
+      (here 2: one for Research, one for Bug Report). EACH classifier edge carries
+      `source_category`.
+    • The Splitter has EXACTLY M outgoing edges where M = number of specialist
+      branches (here 3: Reviewer, Analyst, Writer). Splitter edges are PLAIN —
+      no source_category.
+    • Classifier branches can terminate at EndNode INDEPENDENTLY (this example
+      has two: one via Bug Triage Agent, one via Research Synthesizer). That's
+      the classifier exception to "EndNode has exactly 1 incoming".
+    • Do NOT put the Splitter on the Bug Report branch unless the user asks
+      for it there — match the user's topology exactly.
+
 ═══════════════════════════════════════════════════════════
 AGENT CAPABILITIES — TOGGLES AND DEPENDENCIES
 ═══════════════════════════════════════════════════════════
@@ -1749,6 +1791,134 @@ class WorkflowBuilder:
         }
 
 
+def _check_router_wiring(builder: WorkflowBuilder) -> List[str]:
+    """Deterministic pre-flight invariant check on Classifier/Splitter wiring.
+
+    Produces human-readable issue strings the verifier LLM can act on.
+    Runs AFTER auto-repair, so it catches problems the auto-repair couldn't
+    fix (missing classifier source_categories, under-wired splitters, etc.).
+
+    Invariants checked:
+      * ClassifierAgent: outgoing_with_handle count >= number_of_categories,
+        and each category name has at least one outgoing edge keyed by its UUID
+      * SplitterAgent: outgoing edges count >= 2 to non-Start/End targets
+    """
+    issues: List[str] = []
+    nodes = builder.nodes
+    edges = builder.edges
+    name_by_id = {n["id"]: (n.get("data", {}) or {}).get("name", n["id"][:8]) for n in nodes}
+    type_by_id = {n["id"]: n.get("type") for n in nodes}
+
+    for node in nodes:
+        t = node.get("type")
+        nid = node["id"]
+        name = (node.get("data", {}) or {}).get("name", nid[:8])
+
+        if t == "ClassifierAgent":
+            cats = (node.get("data", {}) or {}).get("categories", []) or []
+            cat_by_id = {c.get("id"): c.get("name", "?") for c in cats if c.get("id")}
+            outgoing = [e for e in edges if e.get("source") == nid]
+            # Which category UUIDs have at least one outgoing edge wired?
+            wired_cat_ids = {e.get("source_handle") for e in outgoing if e.get("source_handle")}
+            missing_cat_names = [
+                cat.get("name", "?") for cat in cats
+                if cat.get("id") not in wired_cat_ids
+            ]
+            if missing_cat_names:
+                issues.append(
+                    f"ClassifierAgent '{name}' has {len(outgoing)} outgoing edges but "
+                    f"{len(cats)} categories. Categories with NO outgoing edge: "
+                    f"{missing_cat_names}. Add `connect_nodes(source_name='{name}', "
+                    f"target_name=<some agent>, source_category='<category name>')` for each "
+                    f"missing category."
+                )
+
+        elif t == "SplitterAgent":
+            outgoing = [
+                e for e in edges
+                if e.get("source") == nid
+                and type_by_id.get(e.get("target")) not in ("StartNode", "EndNode")
+            ]
+            outgoing_names = [name_by_id.get(e.get("target"), "?") for e in outgoing]
+            if len(outgoing) < 2:
+                issues.append(
+                    f"SplitterAgent '{name}' has only {len(outgoing)} downstream edge(s) — "
+                    f"it needs at least 2 specialist agents to allocate work across. Add "
+                    f"`connect_nodes(source_name='{name}', target_name=<specialist>)` calls "
+                    f"(plain sequential, no source_category) for at least 2 downstream agents."
+                )
+            # Backwards edges INTO the Splitter from non-upstream sources are almost
+            # always a generation bug (LLM reversed the direction, or auto-repair
+            # mis-connected a sibling). Upstream is typically a StartNode, a
+            # ClassifierAgent branch, or a single feeder agent — anything else is
+            # suspicious, especially edges from the splitter's own downstream
+            # specialists (that's a cycle).
+            for e in edges:
+                if e.get("target") != nid:
+                    continue
+                src_id = e.get("source")
+                src_type = type_by_id.get(src_id, "")
+                src_name = name_by_id.get(src_id, "?")
+                # Cycle: an agent that's also a target of this splitter shouldn't
+                # feed back into the splitter.
+                if src_id in {e.get("target") for e in outgoing}:
+                    issues.append(
+                        f"SplitterAgent '{name}' has a BACKWARDS edge from its own "
+                        f"downstream agent '{src_name}' → '{name}'. This creates a "
+                        f"cycle and must be removed with `delete_edge(source_name="
+                        f"'{src_name}', target_name='{name}')`."
+                    )
+            # Specialists that chain through each other instead of all being direct
+            # children of the splitter. Heuristic: if an outgoing target of the
+            # splitter has OTHER agents pointing to it (agents that aren't the
+            # splitter), AND those agents are also outgoing targets of the splitter,
+            # that's a chain pattern (A → B where both should be direct Splitter → A
+            # and Splitter → B). Too complex to auto-detect reliably — flag a softer
+            # suggestion if Splitter has < 3 outgoing but the graph has > 3 non-router
+            # agents, suggesting the LLM may have intended more specialists.
+            non_router_agents = [
+                n for n in nodes
+                if n.get("type") not in ("StartNode", "EndNode", "ClassifierAgent",
+                                         "SplitterAgent", "GroupChatManager")
+            ]
+            # Agents specifically DOWNSTREAM of the splitter (direct or chained)
+            # that look like specialists (not the synthesizer).
+            def _reachable_from(start_id, visited=None):
+                visited = visited if visited is not None else set()
+                visited.add(start_id)
+                for e in edges:
+                    if e.get("source") == start_id and e.get("target") not in visited:
+                        _reachable_from(e.get("target"), visited)
+                return visited
+            reachable_from_splitter = _reachable_from(nid) - {nid}
+            splitter_downstream_agents = [
+                n for n in non_router_agents if n["id"] in reachable_from_splitter
+            ]
+            # If there are more reachable-downstream agents than direct outgoing,
+            # that means some "specialists" are chained rather than direct.
+            if len(outgoing) >= 2 and len(splitter_downstream_agents) > len(outgoing) + 1:
+                # +1 tolerance for an expected Synthesizer
+                direct_targets = {e.get("target") for e in outgoing}
+                chained = [
+                    n["data"].get("name", n["id"][:8])
+                    for n in splitter_downstream_agents
+                    if n["id"] not in direct_targets
+                ]
+                issues.append(
+                    f"SplitterAgent '{name}' has {len(outgoing)} direct outgoing "
+                    f"edges ({outgoing_names}) but {len(splitter_downstream_agents)} "
+                    f"specialist-like agents are downstream — this suggests some "
+                    f"specialists are chained through each other instead of each "
+                    f"being a direct child of the splitter. If agents {chained} are "
+                    f"meant to be parallel specialists working on their own subtasks, "
+                    f"wire them DIRECTLY from '{name}' via "
+                    f"`connect_nodes(source_name='{name}', target_name='<specialist>')` "
+                    f"and remove any intermediate chaining edges."
+                )
+
+    return issues
+
+
 def _auto_repair_connections(builder: WorkflowBuilder):
     """
     Fix common connection issues the LLM misses:
@@ -2419,6 +2589,14 @@ async def generate_workflow(
     # Auto-repair: fix common issues the LLM misses (deterministic)
     _auto_repair_connections(builder)
 
+    # Pre-flight router-wiring invariants — surface any classifier/splitter
+    # wiring gaps as concrete issues the verifier agent must fix.
+    router_issues = _check_router_wiring(builder)
+    if router_issues:
+        logger.warning(
+            f"⚠️ WORKFLOW GEN: router wiring issues detected after auto-repair: {router_issues}"
+        )
+
     # ── Verification Agent: LLM reviews the graph and fixes issues ──
     if builder.nodes and len(builder.nodes) >= 3:
         try:
@@ -2489,10 +2667,21 @@ async def generate_workflow(
             graph_desc = "\n".join(graph_desc_lines)
 
             _plan_block = f"Original plan from the planning phase:\n{plan_text}\n\n" if plan_text else ""
+            _issues_block = ""
+            if router_issues:
+                _issues_block = (
+                    "⚠️ KNOWN ROUTER-WIRING ISSUES that MUST be fixed before you return "
+                    "'Verification passed' — these are concrete problems detected by the "
+                    "pre-flight check:\n"
+                    + "\n".join(f"  • {issue}" for issue in router_issues)
+                    + "\n\nFix each item above using the appropriate tool (connect_nodes "
+                    "for missing edges, etc.) BEFORE reporting verification as passed.\n\n"
+                )
             verify_prompt = (
                 f"You are verifying a workflow that was just built. Here is the current state:\n\n"
                 f"{graph_desc}\n\n"
                 f"{_plan_block}"
+                f"{_issues_block}"
                 f"The user's original request was: \"{user_message[:500]}\"\n\n"
                 "VERIFY the following and FIX any issues using the available tools:\n"
                 "1. Does the orchestration make sense for the user's request? Are the right agents created with the right roles?\n"
@@ -2502,14 +2691,22 @@ async def generate_workflow(
                 "4. Are web_search / doc_tool_calling / documents / doc_aware assigned correctly per each agent's role?\n"
                 "5. Are system_messages detailed enough for each agent to do its job?\n"
                 "6. Are LLM models and temperatures appropriate for each agent's task?\n"
-                "7. For any ClassifierAgent: 2-10 categories with unique non-empty names and "
-                "clear descriptions; every outgoing edge specifies a source_category matching "
-                "an existing category name; each category branch leads somewhere meaningful.\n"
-                "8. Did you remove existing agents? If yes, did the user EXPLICITLY request "
+                "7. For any ClassifierAgent: (a) 2-10 categories with unique non-empty names "
+                "and clear descriptions; (b) EVERY category MUST have at least one outgoing "
+                "edge wired via `connect_nodes` with `source_category=<category name>`. A "
+                "classifier with N categories MUST have at least N outgoing edges. If the "
+                "count is off, FIX IT now — add the missing `connect_nodes(source_name=<classifier>, "
+                "target_name=<some agent>, source_category=<category name>)` calls. Every "
+                "category branch leads somewhere meaningful (not dangling).\n"
+                "8. For any SplitterAgent: MUST have at least 2 outgoing edges to specialist "
+                "agents (plain `connect_nodes` — NO source_category). Each downstream specialist "
+                "should have a descriptive system_message so the splitter can route work by role. "
+                "If the splitter has 0 or 1 outgoing edges, ADD the missing connections now.\n"
+                "9. Did you remove existing agents? If yes, did the user EXPLICITLY request "
                 "removal (words like remove/delete/rebuild/replace/start over)? If you removed "
                 "agents WITHOUT explicit user request, that is a regression — RESTORE them via "
                 "add_assistant_agent (or the appropriate add_*) + connect_nodes.\n"
-                + ("9. Did the build follow the plan above? Note any drift and fix it.\n\n" if plan_text else "\n")
+                + ("10. Did the build follow the plan above? Note any drift and fix it.\n\n" if plan_text else "\n")
                 + "If everything looks correct, respond with 'Verification passed — workflow is valid.'\n"
                 "If there are issues, use update_node_property, delete_node, connect_nodes, or add_* tools to fix them.\n"
                 "Do NOT rebuild the workflow from scratch — only fix specific issues."
@@ -2520,7 +2717,10 @@ async def generate_workflow(
 
             logger.info(f"🔍 WORKFLOW GEN: Running verification agent on {len(v_nodes)} nodes, {len(v_edges)} edges")
 
-            for v_iter in range(3):
+            # Bumped from 3 to 6 — complex combined-router workflows routinely
+            # need multiple rounds of fixes (delete backwards edges, add
+            # classifier source_categories, rewire chained specialists, etc.).
+            for v_iter in range(6):
                 v_response = await llm_provider.generate_response(messages=verify_messages, tools=WORKFLOW_TOOLS)
                 if v_response.error:
                     logger.warning(f"⚠️ WORKFLOW GEN: Verification agent error: {v_response.error}")
@@ -2547,6 +2747,23 @@ async def generate_workflow(
                     result = builder.execute_tool_call(tc["function"]["name"], fn_args)
                     logger.info(f"🔧 WORKFLOW GEN (verify): {tc['function']['name']} → {result}")
                     verify_messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+
+                # After tool calls, re-check the pre-flight router-wiring
+                # invariants and feed any REMAINING issues back to the
+                # verifier so it keeps fixing until the graph is clean.
+                _remaining = _check_router_wiring(builder)
+                if _remaining:
+                    verify_messages.append({
+                        "role": "user",
+                        "content": (
+                            "The pre-flight check STILL reports these router-wiring "
+                            "issues after your last round of fixes. Address each "
+                            "one now — call the appropriate tools (connect_nodes, "
+                            "delete_edge, rewire_edge) and do not respond with "
+                            "'Verification passed' until every item below is resolved:\n"
+                            + "\n".join(f"  • {i}" for i in _remaining)
+                        ),
+                    })
 
         except Exception as verify_err:
             logger.warning(f"⚠️ WORKFLOW GEN: Verification agent failed: {verify_err}")
