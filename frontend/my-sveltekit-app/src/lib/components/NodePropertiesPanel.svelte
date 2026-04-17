@@ -174,6 +174,19 @@
         ];
       }
     }
+    // SplitterAgent minimal defaults — router-style agent, same pattern.
+    if (node.type === 'SplitterAgent') {
+      if (!nodeConfig.llm_provider) {
+        nodeConfig.llm_provider = 'openai';
+        nodeConfig.llm_model = 'gpt-4o-mini';
+      }
+      if (typeof nodeConfig.overlap_allowed !== 'boolean') {
+        nodeConfig.overlap_allowed = false;
+      }
+      if (typeof nodeConfig.temperature !== 'number') {
+        nodeConfig.temperature = 0.0;
+      }
+    }
 
     // Initialize default LLM configuration if not present
     if (['AssistantAgent', 'DelegateAgent', 'GroupChatManager'].includes(node.type)) {
@@ -1950,7 +1963,7 @@
     {/if}
     
     <!-- LLM PROVIDER - For AI agents (excluding UserProxyAgent which has special handling) -->
-    {#if ['AssistantAgent', 'DelegateAgent', 'GroupChatManager', 'ClassifierAgent'].includes(node.type)}
+    {#if ['AssistantAgent', 'DelegateAgent', 'GroupChatManager', 'ClassifierAgent', 'SplitterAgent'].includes(node.type)}
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-2">LLM Provider</label>
         {#if hasValidApiKeys}
@@ -3393,6 +3406,48 @@
             </p>
           {/if}
         </div>
+      </div>
+    {/if}
+
+    <!-- SPLITTER AGENT CONFIGURATION -->
+    {#if node.type === 'SplitterAgent'}
+      <div class="space-y-3 border-t border-gray-200 pt-4 mt-4">
+        <h3 class="text-sm font-semibold text-gray-800">Splitter Configuration</h3>
+
+        <div class="bg-cyan-50 border border-cyan-200 rounded-md p-3 text-xs text-cyan-900">
+          <i class="fas fa-circle-info mr-1"></i>
+          The Splitter reads each downstream agent's <b>system_message</b> and allocates a
+          different subtask to each. Connect <b>2 or more</b> agents as downstream targets.
+          Agents with no relevant subtask for a given input are pruned for that run.
+        </div>
+
+        <!-- Overlap toggle -->
+        <label class="flex items-start gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            bind:checked={nodeConfig.overlap_allowed}
+            on:change={updateNodeData}
+            class="mt-0.5 h-4 w-4 text-cyan-600 focus:ring-cyan-500 border-gray-300 rounded"
+          />
+          <span class="flex-1">
+            <span class="block text-sm font-medium text-gray-700">Allow overlapping subtasks</span>
+            <span class="block text-xs text-gray-500 mt-0.5">
+              {#if nodeConfig.overlap_allowed}
+                <b>ON</b> — the same content may appear in multiple agents' subtasks
+                (useful for multi-perspective review).
+              {:else}
+                <b>OFF</b> (default) — strict partition: each piece of the input goes
+                to exactly one agent.
+              {/if}
+            </span>
+          </span>
+        </label>
+
+        <p class="text-xs text-gray-500">
+          Runtime: downstream agents run in parallel, each processing their allocated
+          subtask. The Splitter itself produces no synthesis — connect an Aggregator
+          or Synthesizer agent downstream if you need the results combined.
+        </p>
       </div>
     {/if}
 

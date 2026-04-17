@@ -29,6 +29,10 @@ from .classifier_executor import (
     ClassifierSelectionError,
     CLASSIFIER_SKIPPED_SENTINEL,
 )
+from .splitter_executor import (
+    execute_splitter,
+    SplitterAllocationError,
+)
 
 logger = logging.getLogger('conversation_orchestrator')
 
@@ -167,6 +171,13 @@ class WorkflowExecutor:
                 raise Exception(
                     "Classifier validation failed:\n  - "
                     + "\n  - ".join(classifier_errors)
+                )
+            # Validate SplitterAgent-specific invariants.
+            splitter_errors = self._validate_splitter_nodes(graph_json)
+            if splitter_errors:
+                raise Exception(
+                    "Splitter validation failed:\n  - "
+                    + "\n  - ".join(splitter_errors)
                 )
             
             # Initialize conversation tracking
@@ -1232,6 +1243,171 @@ class WorkflowExecutor:
                         providers_used.append(agent_config['llm_provider'])
 
                     # Persist executed_nodes (incl. skip sentinels) + messages.
+                    execution_record.executed_nodes = executed_nodes
+                    execution_record.messages_data = messages
+                    await sync_to_async(execution_record.save)(update_fields=['executed_nodes', 'messages_data'])
+
+                elif node_type == 'SplitterAgent':
+                    # ----------------------------------------------------------
+                    # Splitter: decompose the input into per-agent subtasks via
+                    # forced tool-calling, then prune downstream agents that
+                    # weren't allocated work. Downstream agents receive their
+                    # ALLOCATED SUBTASK as input (not the original input) — key
+                    # difference from ClassifierAgent's pass-through semantics.
+                    # ----------------------------------------------------------
+                    # Resolve the input text from upstream.
+                    input_sources = self.workflow_parser.find_multiple_inputs_to_node(node_id, graph_json)
+                    if not input_sources:
+                        raise Exception(
+                            f"SplitterAgent {node_name} has no upstream input. "
+                            f"Connect a StartNode or an agent to its input."
+                        )
+                    aggregated_context = self.workflow_parser.aggregate_multiple_inputs(
+                        input_sources, executed_nodes
+                    )
+                    all_inputs = aggregated_context.get('all_inputs') or []
+                    if not all_inputs:
+                        raise Exception(
+                            f"SplitterAgent {node_name} has no resolvable input "
+                            f"(all upstream branches were pruned)."
+                        )
+                    input_text = "\n\n".join(
+                        (ctx.get('content_plain') or '').strip()
+                        for ctx in all_inputs
+                        if (ctx.get('content_plain') or '').strip()
+                    )
+                    if not input_text:
+                        raise Exception(
+                            f"SplitterAgent {node_name} resolved empty input text."
+                        )
+
+                    # Discover the downstream agents directly connected via
+                    # outgoing edges. Each one's system_message becomes the
+                    # "capability description" the splitter LLM reads.
+                    outgoing = [e for e in graph_json.get('edges', [])
+                                if e.get('source') == node_id]
+                    downstream_agents = []
+                    for e in outgoing:
+                        tgt_id = e.get('target')
+                        tgt_node = next((n for n in graph_json.get('nodes', [])
+                                         if n.get('id') == tgt_id), None)
+                        if not tgt_node:
+                            continue
+                        tgt_type = tgt_node.get('type')
+                        if tgt_type in ('StartNode', 'EndNode'):
+                            # Edge-case: splitter shouldn't connect to Start/End,
+                            # but if it does, skip them from allocation.
+                            continue
+                        d = tgt_node.get('data', {}) or {}
+                        downstream_agents.append({
+                            'id': tgt_id,
+                            'name': d.get('name', tgt_id),
+                            'system_message': d.get('system_message') or '',
+                            'description': d.get('description') or '',
+                        })
+                    if len(downstream_agents) < 2:
+                        raise Exception(
+                            f"SplitterAgent {node_name} must have at least 2 agents "
+                            f"connected as downstream targets (got {len(downstream_agents)})."
+                        )
+
+                    # Build the LLM provider using the splitter's own config.
+                    agent_config = {
+                        'llm_provider': node_data.get('llm_provider', 'openai'),
+                        'llm_model': node_data.get('llm_model', 'gpt-4o-mini'),
+                    }
+                    project = await sync_to_async(lambda: workflow.project)()
+                    llm_provider = await self.llm_provider_manager.get_llm_provider(agent_config, project)
+                    if not llm_provider:
+                        raise Exception(
+                            f"Failed to create LLM provider for SplitterAgent {node_name} "
+                            f"— check project API key configuration."
+                        )
+
+                    logger.info(
+                        f"🪓 ORCHESTRATOR: Executing SplitterAgent {node_name} "
+                        f"(provider={agent_config['llm_provider']}, downstream={len(downstream_agents)}, "
+                        f"overlap_allowed={bool(node_data.get('overlap_allowed'))})"
+                    )
+
+                    try:
+                        decision = await execute_splitter(
+                            splitter_node=node,
+                            input_text=input_text,
+                            downstream_agents=downstream_agents,
+                            llm_provider=llm_provider,
+                            provider_name=agent_config['llm_provider'],
+                            event_callback=event_callback,
+                        )
+                    except SplitterAllocationError as split_err:
+                        logger.error(
+                            f"❌ ORCHESTRATOR: SplitterAgent {node_name} failed: {split_err}"
+                        )
+                        raise
+
+                    per_target = decision['per_target']
+                    pruned_target_ids = set(decision['pruned_target_ids'])
+                    raw_allocations = decision.get('raw_allocations', [])
+
+                    # Store the splitter's output as a structured per-target
+                    # mapping. workflow_parser.aggregate_multiple_inputs knows
+                    # how to unwrap this: when a downstream target aggregates
+                    # its inputs, it looks up the splitter's entry and pulls
+                    # the subtask keyed by its own target_id.
+                    executed_nodes[node_id] = {
+                        '__kind__': 'splitter',
+                        '__per_target__': per_target,
+                        '__input__': input_text,
+                    }
+
+                    # Prune the transitive closure of nodes reachable only via
+                    # non-allocated branches. Same semantics as classifier
+                    # pruning, just a different edge-prune criterion.
+                    skipped = self._prune_splitter_branches(
+                        graph_json, node_id, pruned_target_ids
+                    )
+                    for sk_id in skipped:
+                        if sk_id not in executed_nodes:
+                            executed_nodes[sk_id] = CLASSIFIER_SKIPPED_SENTINEL
+                    if skipped:
+                        logger.info(
+                            f"✂️ ORCHESTRATOR: Splitter {node_name} pruned "
+                            f"{len(skipped)} downstream node(s): {list(skipped)}"
+                        )
+
+                    # Emit a decision message for observability — mirrors the
+                    # classifier_decision message shape.
+                    summary_lines = [f"Split into {len(per_target)} subtask(s):"]
+                    for alloc in raw_allocations:
+                        summary_lines.append(
+                            f"  • {alloc['agent_name']}: {alloc['subtask'][:120]}"
+                            + ("…" if len(alloc['subtask']) > 120 else "")
+                        )
+                    decision_content = "\n".join(summary_lines)
+                    messages.append({
+                        'sequence': message_sequence,
+                        'agent_name': node_name,
+                        'agent_type': 'SplitterAgent',
+                        'content': decision_content,
+                        'message_type': 'splitter_decision',
+                        'timestamp': timezone.now().isoformat(),
+                        'response_time_ms': 0,
+                        'metadata': {
+                            'llm_provider': agent_config['llm_provider'],
+                            'llm_model': agent_config['llm_model'],
+                            'splitter_decision': {
+                                'allocations': raw_allocations,
+                                'pruned_target_ids': list(pruned_target_ids),
+                                'skipped_nodes': list(skipped),
+                                'overlap_allowed': bool(node_data.get('overlap_allowed')),
+                            },
+                        },
+                    })
+                    message_sequence += 1
+                    agents_involved.add(node_name)
+                    if agent_config['llm_provider'] not in providers_used:
+                        providers_used.append(agent_config['llm_provider'])
+
                     execution_record.executed_nodes = executed_nodes
                     execution_record.messages_data = messages
                     await sync_to_async(execution_record.save)(update_fields=['executed_nodes', 'messages_data'])
@@ -3116,12 +3292,15 @@ class WorkflowExecutor:
         # pruning completes before the next round of ready-nodes is computed.
         # If any classifier is ready, return only the first one; the main loop
         # will re-enter and pick up the rest of the batch after pruning.
-        classifier_ready = [
+        # Classifier AND Splitter both prune downstream branches — they must
+        # run sequentially (one at a time) so pruning completes before the
+        # next round of ready-nodes is computed.
+        router_ready = [
             (idx, n) for idx, n in ready_nodes
-            if n.get('type') == 'ClassifierAgent'
+            if n.get('type') in ('ClassifierAgent', 'SplitterAgent')
         ]
-        if classifier_ready:
-            return classifier_ready[:1]
+        if router_ready:
+            return router_ready[:1]
 
         return ready_nodes
 
@@ -3250,6 +3429,69 @@ class WorkflowExecutor:
 
         return errors
 
+    def _validate_splitter_nodes(self, graph_json: Dict[str, Any]) -> List[str]:
+        """Static validation for SplitterAgent nodes.
+
+        Rules:
+        1. Each SplitterAgent must have ``llm_provider`` and ``llm_model``.
+        2. Must have at least one incoming edge.
+        3. Must have at least 2 outgoing edges to non-Start/End agents
+           (otherwise there's nothing to split between).
+        4. Downstream targets should have a ``name`` (for the LLM to
+           reference in its allocation tool call) and ideally a
+           ``system_message`` (otherwise the splitter has no role
+           description to reason about).
+        """
+        errors: List[str] = []
+        nodes = graph_json.get('nodes', []) or []
+        edges = graph_json.get('edges', []) or []
+
+        splitter_nodes = [n for n in nodes if n.get('type') == 'SplitterAgent']
+        if not splitter_nodes:
+            return errors
+
+        node_by_id = {n.get('id'): n for n in nodes}
+
+        for node in splitter_nodes:
+            nid = node.get('id')
+            data = node.get('data', {}) or {}
+            name = data.get('name', nid)
+
+            if not data.get('llm_provider') or not data.get('llm_model'):
+                errors.append(
+                    f"SplitterAgent '{name}' must specify both 'llm_provider' and 'llm_model'."
+                )
+
+            incoming = [e for e in edges if e.get('target') == nid]
+            if not incoming:
+                errors.append(
+                    f"SplitterAgent '{name}' has no upstream input — connect a "
+                    f"StartNode or an agent to its input."
+                )
+
+            outgoing = [e for e in edges if e.get('source') == nid]
+            downstream_targets = []
+            for e in outgoing:
+                tgt = node_by_id.get(e.get('target'))
+                if tgt and tgt.get('type') not in ('StartNode', 'EndNode'):
+                    downstream_targets.append(tgt)
+
+            if len(downstream_targets) < 2:
+                errors.append(
+                    f"SplitterAgent '{name}' must have at least 2 downstream "
+                    f"agents connected (got {len(downstream_targets)}). Connect "
+                    f"two or more agents (not Start/End) to the splitter's output."
+                )
+
+            unnamed = [t for t in downstream_targets if not (t.get('data', {}) or {}).get('name')]
+            if unnamed:
+                errors.append(
+                    f"SplitterAgent '{name}' has {len(unnamed)} downstream agent(s) "
+                    f"with no 'name' — the splitter LLM needs unique names to allocate work."
+                )
+
+        return errors
+
     def _prune_unselected_branches(
         self,
         graph_json: Dict[str, Any],
@@ -3317,6 +3559,73 @@ class WorkflowExecutor:
                     if src in skipped:
                         continue  # Skipped upstream — this edge contributes nothing.
                     # Any other live source — real input.
+                    all_pruned = False
+                    break
+                if all_pruned:
+                    skipped.add(nid)
+                    changed = True
+
+        return skipped
+
+    def _prune_splitter_branches(
+        self,
+        graph_json: Dict[str, Any],
+        splitter_node_id: str,
+        pruned_target_ids: set,
+    ) -> set:
+        """Transitive closure of nodes that should be skipped because the
+        splitter didn't allocate work to that branch.
+
+        Mirrors ``_prune_unselected_branches`` but uses a target-id set
+        rather than a chosen source_handle to decide which outgoing edges
+        from the splitter are "pruned".
+
+        A downstream node N joins the skipped set iff EVERY incoming edge
+        into N is either:
+          * a pruned edge from the splitter (target in pruned_target_ids), or
+          * from an already-skipped node.
+
+        The splitter node itself is never skipped.
+        """
+        edges = graph_json.get('edges', []) or []
+        nodes = graph_json.get('nodes', []) or []
+        node_ids = {n.get('id') for n in nodes}
+
+        def _edge_is_pruned_from_splitter(edge: Dict[str, Any]) -> bool:
+            return (
+                edge.get('source') == splitter_node_id
+                and edge.get('target') in pruned_target_ids
+            )
+
+        # Seed: direct targets of pruned splitter outgoing edges.
+        skipped: set = set()
+        for edge in edges:
+            if _edge_is_pruned_from_splitter(edge):
+                target = edge.get('target')
+                if target and target in node_ids and target != splitter_node_id:
+                    skipped.add(target)
+
+        # Iterate until stable.
+        changed = True
+        while changed:
+            changed = False
+            for node in nodes:
+                nid = node.get('id')
+                if nid in skipped or nid == splitter_node_id:
+                    continue
+                incoming = [e for e in edges if e.get('target') == nid]
+                if not incoming:
+                    continue
+                all_pruned = True
+                for e in incoming:
+                    src = e.get('source')
+                    if src == splitter_node_id:
+                        if e.get('target') in pruned_target_ids:
+                            continue  # pruned splitter branch
+                        all_pruned = False
+                        break
+                    if src in skipped:
+                        continue
                     all_pruned = False
                     break
                 if all_pruned:

@@ -357,9 +357,14 @@ class WorkflowParser:
         """
         logger.info(f"🔄 MULTI-INPUT: Aggregating {len(input_sources)} input sources")
 
-        # Drop inputs whose upstream was pruned by a Classifier node (sentinel
-        # value in executed_nodes). These branches weren't selected and must not
-        # contribute any content or citations to the downstream prompt.
+        # Drop inputs whose upstream was pruned by a Classifier/Splitter node
+        # (sentinel value in executed_nodes). These branches weren't selected
+        # and must not contribute any content or citations to the downstream
+        # prompt. ALSO handle SplitterAgent per-target outputs here: the
+        # splitter's executed_nodes entry is a dict {__kind__: 'splitter',
+        # __per_target__: {target_id: subtask}, __input__: ...} — we unwrap
+        # it into the current target's subtask, or drop the source entirely
+        # if this target wasn't allocated work.
         from .classifier_executor import CLASSIFIER_SKIPPED_SENTINEL
         filtered_sources = []
         for src in input_sources:
@@ -367,8 +372,26 @@ class WorkflowParser:
             if raw == CLASSIFIER_SKIPPED_SENTINEL:
                 logger.info(
                     f"⏭️ MULTI-INPUT: Skipping input from '{src.get('name')}' "
-                    f"(pruned by Classifier)"
+                    f"(pruned by Classifier/Splitter)"
                 )
+                continue
+            if isinstance(raw, dict) and raw.get('__kind__') == 'splitter':
+                # SplitterAgent per-target output — extract the subtask for
+                # the edge's target. The target_id we need is the TARGET of
+                # the edge from splitter, which is the node currently
+                # aggregating. Every input_source carries its edge.
+                target_id = (src.get('edge') or {}).get('target')
+                per_target = raw.get('__per_target__') or {}
+                if target_id in per_target:
+                    # Stash the subtask on a per-call copy of the source dict
+                    # so the main loop picks it up instead of the raw dict.
+                    src = {**src, '_splitter_subtask': per_target[target_id]}
+                    filtered_sources.append(src)
+                else:
+                    logger.info(
+                        f"⏭️ MULTI-INPUT: Splitter '{src.get('name')}' pruned "
+                        f"its branch to target {target_id} — skipping input"
+                    )
                 continue
             filtered_sources.append(src)
         input_sources = filtered_sources
@@ -393,8 +416,14 @@ class WorkflowParser:
             input_name = input_source['name']
             input_type = input_source['type']
             
-            # Get the output/response from this input node (may be str or {text, citations})
-            raw_output = executed_nodes.get(input_id, f"[No output from {input_name}]")
+            # Get the output/response from this input node (may be str or {text, citations}).
+            # SplitterAgent sources carry a per-target subtask stashed on the
+            # input_source dict by the filter loop above; prefer that when present
+            # so downstream agents receive their allocated subtask, not the raw
+            # per-target mapping dict.
+            raw_output = input_source.get('_splitter_subtask')
+            if raw_output is None:
+                raw_output = executed_nodes.get(input_id, f"[No output from {input_name}]")
             content_plain = plain_executed_output(raw_output)
             upstream_cites = citations_from_executed_output(raw_output)
             display_content = content_plain

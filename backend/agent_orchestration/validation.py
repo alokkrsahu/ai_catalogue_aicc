@@ -55,6 +55,14 @@ class WorkflowGraphValidator:
             'input_connections': 1,
             # Output connections are per-category — see _validate_classifier_nodes
             'output_connections': 1
+        },
+        'SplitterAgent': {
+            'required_fields': ['name', 'llm_provider', 'llm_model'],
+            'optional_fields': ['description', 'overlap_allowed'],
+            'max_count': 10,
+            'input_connections': 1,
+            # Splitter needs ≥2 downstream agents — see _validate_splitter_nodes
+            'output_connections': 2
         }
     }
     

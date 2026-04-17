@@ -310,6 +310,15 @@
       category: 'Routing',
       functionality: 'Receives text input from Start or an upstream agent, picks exactly one category via forced tool-call, and routes execution down that branch. The non-selected subgraphs are pruned for the run. Pure router — downstream agents receive the original input unchanged.',
       useCases: ['Intent routing', 'Triage (bug vs. feature vs. billing)', 'Language branching', 'Conditional workflow flow']
+    },
+    'SplitterAgent': {
+      name: 'Splitter',
+      description: 'Allocates distinct subtasks to the downstream agents based on each one\'s system_message',
+      icon: 'fa-code-fork',
+      color: '#0891b2',
+      category: 'Routing',
+      functionality: 'Reads the input and each directly-connected downstream agent\'s system_message as a capability description, then uses forced LLM tool-calling to allocate a DIFFERENT subtask to each appropriate agent. Agents with no relevant subtask are pruned for that input. Downstream agents run in parallel with their own allocated subtask as input (not the original).',
+      useCases: ['Task decomposition across specialists', 'Project-manager-style work distribution', 'Dynamic per-input work allocation', 'Breaking complex inputs into parallel subtasks']
     }
   };
   
@@ -1851,6 +1860,7 @@
       case 'EndNode': return 'fa-stop';
       case 'MCPServer': return 'fa-server';
       case 'ClassifierAgent': return 'fa-list-check';
+      case 'SplitterAgent': return 'fa-code-fork';
       default: return 'fa-cog';
     }
   }
@@ -1870,6 +1880,7 @@
       case 'EndNode': return '#ef4444';
       case 'MCPServer': return '#8b5cf6';
       case 'ClassifierAgent': return '#f59e0b';
+      case 'SplitterAgent': return '#0891b2';
       default: return '#6b7280';
     }
   }
@@ -1884,6 +1895,7 @@
       case 'EndNode': return 'End Node';
       case 'MCPServer': return 'MCP Server';
       case 'ClassifierAgent': return 'Classifier';
+      case 'SplitterAgent': return 'Splitter';
       default: return agentType;
     }
   }
@@ -1898,6 +1910,7 @@
       case 'EndNode': return 'Workflow termination';
       case 'MCPServer': return 'External service integration';
       case 'ClassifierAgent': return 'Route by category';
+      case 'SplitterAgent': return 'Split task into subtasks';
       default: return 'Custom agent type';
     }
   }
@@ -1991,7 +2004,7 @@
       
       <div class="p-4 space-y-3 flex-1 overflow-y-auto">
         <!-- All Agent Types (ensuring DelegateAgent is always included) -->
-        {#each ['StartNode', 'UserProxyAgent', 'AssistantAgent', 'GroupChatManager', 'DelegateAgent', 'ClassifierAgent', 'MCPServer', 'EndNode'].filter(type => agentTypes[type]) as agentType}
+        {#each ['StartNode', 'UserProxyAgent', 'AssistantAgent', 'GroupChatManager', 'DelegateAgent', 'ClassifierAgent', 'SplitterAgent', 'MCPServer', 'EndNode'].filter(type => agentTypes[type]) as agentType}
           <div
             class="agent-component p-3 border border-gray-200 rounded-lg bg-white hover:border-oxford-blue hover:shadow-sm transition-all cursor-move select-none"
             draggable="true"

@@ -279,6 +279,50 @@ WORKFLOW_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "add_splitter_agent",
+            "description": (
+                "Add a SplitterAgent — a task-distribution node that reads an input, "
+                "looks at each downstream agent's system_message as a capability "
+                "description, and allocates a DIFFERENT subtask to each one. "
+                "Downstream agents run in parallel, each processing its allocated "
+                "subtask. Agents with no relevant subtask for this input are pruned "
+                "(their branch skipped). Use when you want intelligent task "
+                "decomposition across specialists — as opposed to parallel fan-out "
+                "where every agent sees the same input, or classifier routing where "
+                "exactly one branch runs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Descriptive name (e.g. 'Task Splitter', 'Work Dispatcher')"
+                    },
+                    "overlap_allowed": {
+                        "type": "boolean",
+                        "description": "Default false (strict partition — each piece goes to exactly one agent). Set true for multi-perspective scenarios where the same content benefits from being reviewed by multiple agents."
+                    },
+                    "llm_provider": {
+                        "type": "string",
+                        "enum": ["openai", "anthropic", "google"],
+                        "description": "LLM provider for splitter allocation (default: openai — fast + structured outputs)"
+                    },
+                    "llm_model": {
+                        "type": "string",
+                        "description": "Model name (default: gpt-4o-mini — cheap/fast works well for routing)"
+                    },
+                    "temperature": {
+                        "type": "number",
+                        "description": "LLM temperature 0-2 (default: 0.0 — routers want determinism)"
+                    }
+                },
+                "required": ["name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "add_end_node",
             "description": "Add the workflow end node. Every workflow MUST end with exactly one end node. The end node can only receive ONE incoming connection.",
             "parameters": {
@@ -501,6 +545,20 @@ ClassifierAgent:
   any conditional workflow selection. Each category must have a clear name and a
   short description that tells the LLM when to pick it.
 
+SplitterAgent:
+  A task-distribution node. Reads the input and each directly-connected downstream
+  agent's system_message (as a capability description), then allocates a DIFFERENT
+  subtask to each appropriate agent via forced LLM tool-calling. Agents with no
+  relevant subtask for a given input are pruned (their branch skipped). Downstream
+  agents run in parallel, each with its ALLOCATED SUBTASK as input (not the original
+  input — this is the key difference from ClassifierAgent and parallel fan-out).
+  Has an `overlap_allowed` toggle: false (default) = strict partition, true = same
+  content may appear in multiple subtasks. Requires ≥2 downstream agents. Use when:
+  you want intelligent task decomposition across specialists (e.g. "write a report"
+  → Researcher gets "find sources", Writer gets "draft prose", Editor gets "polish"),
+  a project-manager-style work distributor is needed, or you want dynamic work
+  allocation that adapts to each input rather than every agent running on the same text.
+
 ═══════════════════════════════════════════════════════════
 EXECUTION PATTERNS — CHOOSE BASED ON REQUIREMENTS
 ═══════════════════════════════════════════════════════════
@@ -529,6 +587,15 @@ ROUTING (classifier branches): Start → Classifier → [Cat A → Agent A → E
   category should have its own outgoing edge. Different branches may independently
   terminate at EndNode — this is the ONE exception to the "EndNode has exactly
   1 incoming" rule. Use when the user wants conditional/routed workflows.
+
+TASK-SPLITTING (splitter fan-out): Start → Splitter → [Researcher, Writer, Editor] → Synthesizer → End
+  The Splitter looks at each downstream agent's system_message and allocates a
+  DIFFERENT subtask to each. Agents without a relevant subtask are pruned for
+  that input. All allocated agents run in parallel with their own subtask as
+  input. Use when the user wants intelligent work distribution across specialists
+  (e.g. "split this research task among the three agents"). Requires ≥2 downstream
+  agents. Typically followed by a Synthesizer/Aggregator agent that combines the
+  outputs before EndNode — the Splitter itself does not aggregate.
 
 Choose the pattern that best fits the user's requirements. Complex workflows may combine multiple patterns.
 
@@ -767,6 +834,7 @@ class WorkflowBuilder:
             "add_group_chat_manager": self._add_group_chat_manager,
             "add_delegate_agent": self._add_delegate_agent,
             "add_classifier_agent": self._add_classifier_agent,
+            "add_splitter_agent": self._add_splitter_agent,
             "add_end_node": self._add_end_node,
             "connect_nodes": self._connect_nodes,
             "update_node_property": self._update_node_property,
@@ -1040,6 +1108,30 @@ class WorkflowBuilder:
         self.node_name_map[name] = node_id
         cat_list = ", ".join(c["name"] for c in categories)
         return f"Added ClassifierAgent '{name}' with {len(categories)} categories: {cat_list}"
+
+    def _add_splitter_agent(self, args: Dict) -> str:
+        node_id = str(uuid.uuid4())
+        name = args["name"]
+        provider, model = self._resolve_provider_and_model(
+            args.get("llm_provider", "openai"),
+            args.get("llm_model", "gpt-4o-mini"),
+        )
+        self.nodes.append({
+            "id": node_id,
+            "type": "SplitterAgent",
+            "position": {"x": 0, "y": 0},
+            "data": {
+                "name": name,
+                "description": "Splits the input into per-agent subtasks based on downstream agents' system_messages.",
+                "llm_provider": provider,
+                "llm_model": model,
+                "temperature": args.get("temperature", 0.0),
+                "overlap_allowed": bool(args.get("overlap_allowed", False)),
+            }
+        })
+        self.node_name_map[name] = node_id
+        overlap_note = " (overlap allowed)" if args.get("overlap_allowed") else " (strict partition)"
+        return f"Added SplitterAgent '{name}'{overlap_note}. Connect 2+ downstream agents — each one's system_message will be used to decide who gets which subtask."
 
     def _add_end_node(self, args: Dict) -> str:
         # If EndNode already exists, update it instead of creating a duplicate
