@@ -2013,6 +2013,12 @@ def _auto_repair_connections(builder: WorkflowBuilder):
         is almost certainly meant to be a Splitter specialist."""
         if not splitter_nodes:
             return None
+        # Synthesizers themselves aren't specialists — they're the target the
+        # specialists feed into. Without this guard, a temporarily-orphan
+        # Synthesizer would get connected directly from the Splitter, bypassing
+        # the specialists that are supposed to feed it.
+        if _looks_like_synthesizer(orphan_id):
+            return None
         for e in builder.edges:
             if e["source"] != orphan_id:
                 continue
@@ -2100,7 +2106,36 @@ def _auto_repair_connections(builder: WorkflowBuilder):
         a_id = a["id"]
         has_incoming = a_id in targets
         if not has_incoming and a_id != start["id"]:
-            # Router-aware path: if a Splitter exists and this orphan's outputs
+            # Router-aware path A: if the orphan is itself a Synthesizer-style
+            # node AND a Splitter exists, fan it in from the Splitter's
+            # specialists instead of from the Splitter itself. Synthesizers
+            # aggregate the specialists' outputs; they should NOT receive
+            # input directly from the upstream router. Without this branch,
+            # the sibling-source fallback below would copy a specialist's
+            # incoming source (= the Splitter) and mis-wire Splitter → Synth.
+            if _looks_like_synthesizer(a_id) and splitter_nodes:
+                splitter_id = splitter_nodes[0]["id"]
+                splitter_specialists = [
+                    e["target"] for e in builder.edges
+                    if e["source"] == splitter_id and e["target"] != a_id
+                ]
+                # Skip specialists that are themselves synthesizers — those are
+                # siblings of ours at the wrong layer, not our feeders.
+                splitter_specialists = [
+                    sp for sp in splitter_specialists
+                    if not _looks_like_synthesizer(sp)
+                ]
+                if splitter_specialists:
+                    for sp_id in splitter_specialists:
+                        _add_edge(sp_id, a_id)
+                    logger.info(
+                        f"🔧 AUTO-REPAIR: Fanned '{_name_of(a_id)}' in from "
+                        f"{len(splitter_specialists)} Splitter specialist(s) "
+                        f"(router-aware synthesizer)"
+                    )
+                    continue  # Synthesizer handled — skip the rest of Fix 3
+
+            # Router-aware path B: if a Splitter exists and this orphan's outputs
             # flow into a Synthesizer-style node or EndNode, it's almost certainly
             # a Splitter specialist — route from the Splitter directly. This
             # prevents the sibling-source fallback below from propagating chain
