@@ -1318,6 +1318,73 @@
     handleSearchMethodChange();
   }
   
+  // ── Agent color customization ──────────────────────────────────────
+  // Curated swatch palette — 10 distinct hues that read well as agent
+  // node fills against the light canvas background.
+  const PRESET_AGENT_COLORS: {name: string; hex: string}[] = [
+    { name: 'Oxford Navy',  hex: '#002147' },
+    { name: 'Blue',         hex: '#2563eb' },
+    { name: 'Teal',         hex: '#0d9488' },
+    { name: 'Cyan',         hex: '#0891b2' },
+    { name: 'Green',        hex: '#16a34a' },
+    { name: 'Amber',        hex: '#f59e0b' },
+    { name: 'Orange',       hex: '#ea580c' },
+    { name: 'Rose',         hex: '#e11d48' },
+    { name: 'Purple',       hex: '#8b5cf6' },
+    { name: 'Slate',        hex: '#64748b' },
+  ];
+
+  // Type-default fallback — mirrors WorkflowDesigner.svelte's getAgentColor.
+  // Kept as a small map so the color picker can show the default value
+  // even before the user picks anything.
+  const _AGENT_TYPE_COLORS: Record<string, string> = {
+    StartNode: '#10b981',
+    UserProxyAgent: '#3b82f6',
+    AssistantAgent: '#002147',
+    GroupChatManager: '#8b5cf6',
+    DelegateAgent: '#f59e0b',
+    EndNode: '#ef4444',
+    MCPServer: '#8b5cf6',
+    ClassifierAgent: '#f59e0b',
+    SplitterAgent: '#0891b2',
+  };
+
+  function getDefaultAgentColor(type: string): string {
+    return _AGENT_TYPE_COLORS[type] || '#6b7280';
+  }
+
+  function isValidHexColor(s: any): boolean {
+    return typeof s === 'string' && /^#[0-9a-fA-F]{6}$/.test(s);
+  }
+
+  function setCustomColor(hex: string) {
+    if (!isValidHexColor(hex)) return;
+    nodeConfig = { ...nodeConfig, custom_color: hex.toLowerCase() };
+    updateNodeData();
+  }
+
+  function applyHexInput(value: string, isBlur: boolean = false) {
+    // Normalize: strip whitespace; prefix # if missing.
+    let v = (value || '').trim();
+    if (!v) {
+      // Treat empty as "reset" only on blur (not on every keystroke).
+      if (isBlur && nodeConfig.custom_color) resetCustomColor();
+      return;
+    }
+    if (!v.startsWith('#')) v = '#' + v;
+    if (isValidHexColor(v)) {
+      setCustomColor(v);
+    }
+    // If invalid, silently ignore — don't overwrite the last valid value.
+  }
+
+  function resetCustomColor() {
+    if (!nodeConfig.custom_color) return;
+    const { custom_color: _drop, ...rest } = nodeConfig;
+    nodeConfig = rest;
+    updateNodeData();
+  }
+
   // Deep clone to prevent shared references
   function updateNodeData() {
     // Preserve spaces in names and descriptions - don't trim during editing
@@ -1780,7 +1847,56 @@
         placeholder="Enter agent name..."
       />
     </div>
-    
+
+    <!-- APPEARANCE — per-agent color override -->
+    {#if node.type !== 'StartNode' && node.type !== 'EndNode'}
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-2">Agent Color</label>
+        <div class="flex items-center gap-2">
+          <!-- Native color swatch / picker -->
+          <input
+            type="color"
+            value={isValidHexColor(nodeConfig.custom_color) ? nodeConfig.custom_color : getDefaultAgentColor(node.type)}
+            on:input={(e) => setCustomColor(e.currentTarget.value)}
+            class="h-9 w-10 border border-gray-300 rounded cursor-pointer bg-white"
+            title="Pick any color"
+          />
+          <!-- Hex text field -->
+          <input
+            type="text"
+            value={nodeConfig.custom_color || ''}
+            on:input={(e) => applyHexInput(e.currentTarget.value)}
+            on:blur={(e) => applyHexInput(e.currentTarget.value, true)}
+            placeholder={getDefaultAgentColor(node.type)}
+            maxlength="7"
+            class="flex-1 px-2 py-1.5 text-sm font-mono border border-gray-300 rounded focus:border-oxford-blue focus:ring-1 focus:ring-oxford-blue focus:ring-opacity-20"
+          />
+          <!-- Reset to type default -->
+          <button
+            type="button"
+            on:click={resetCustomColor}
+            disabled={!nodeConfig.custom_color}
+            class="px-2 py-1.5 text-xs text-gray-600 border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
+            title="Reset to the default color for this agent type"
+          >
+            Reset
+          </button>
+        </div>
+        <!-- Preset palette -->
+        <div class="flex items-center gap-1.5 mt-2">
+          {#each PRESET_AGENT_COLORS as c}
+            <button
+              type="button"
+              on:click={() => setCustomColor(c.hex)}
+              title={c.name}
+              class="w-6 h-6 rounded-full border-2 transition-transform hover:scale-110 {nodeConfig.custom_color?.toLowerCase() === c.hex.toLowerCase() ? 'border-gray-900' : 'border-white ring-1 ring-gray-200'}"
+              style="background-color: {c.hex};"
+            ></button>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
     <!-- DESCRIPTION -->
     {#if ['AssistantAgent', 'DelegateAgent', 'GroupChatManager'].includes(node.type)}
       <div>

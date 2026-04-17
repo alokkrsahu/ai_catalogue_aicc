@@ -1884,6 +1884,16 @@
       default: return '#6b7280';
     }
   }
+
+  // Per-node color override: if the user set a custom_color in the node's
+  // properties, use that; otherwise fall back to the type-based default.
+  // Only #rrggbb is accepted — ignore anything malformed so stale/invalid
+  // values don't break rendering.
+  function getNodeColor(node: any): string {
+    const c = node?.data?.custom_color;
+    if (typeof c === 'string' && /^#[0-9a-fA-F]{6}$/.test(c)) return c;
+    return getAgentColor(node?.type);
+  }
   
   function getDisplayName(agentType: string): string {
     switch (agentType) {
@@ -2287,7 +2297,7 @@
                   <div class="flex items-center space-x-3 mb-2">
                     <div 
                       class="w-10 h-10 rounded-lg flex items-center justify-center text-white shadow-md"
-                      style="background-color: {getAgentColor(node.type)};"
+                      style="background-color: {getNodeColor(node)};"
                     >
                       <i class="fas {getAgentIcon(node.type)} text-sm"></i>
                     </div>
@@ -2332,7 +2342,7 @@
                   <div class="flex items-center space-x-2 mb-2 pb-2 border-b border-gray-100">
                     <div
                       class="w-9 h-9 rounded-lg flex items-center justify-center text-white shadow-md flex-shrink-0"
-                      style="background-color: {getAgentColor(node.type)};"
+                      style="background-color: {getNodeColor(node)};"
                     >
                       <i class="fas {getAgentIcon(node.type)} text-sm"></i>
                     </div>
@@ -2374,7 +2384,7 @@
                   <!-- Agent Icon -->
                   <div
                     class="w-12 h-12 rounded-lg flex items-center justify-center text-white shadow-md"
-                    style="background-color: {getAgentColor(node.type)};"
+                    style="background-color: {getNodeColor(node)};"
                   >
                     <i class="fas {getAgentIcon(node.type)} text-lg"></i>
                   </div>
@@ -2711,7 +2721,7 @@
         aria-modal="true"
         aria-label="Agent Properties Modal"
       >
-        <div class="bg-white rounded-xl shadow-2xl w-[85vw] h-[90vh] overflow-hidden flex flex-col">
+        <div class="bg-white rounded-xl shadow-2xl w-[min(60vw,900px)] h-[90vh] overflow-hidden flex flex-col">
           <NodePropertiesPanel
             node={selectedNode}
             {capabilities}
