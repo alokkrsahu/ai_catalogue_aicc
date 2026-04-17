@@ -341,7 +341,7 @@ WORKFLOW_TOOLS = [
         "type": "function",
         "function": {
             "name": "connect_nodes",
-            "description": "Create a connection between two nodes. Connections define the execution flow. DelegateAgent ↔ GroupChatManager connections are auto-typed as 'delegate'. When source is a ClassifierAgent, source_category is REQUIRED.",
+            "description": "Create a connection between two nodes. Connections define the execution flow. DelegateAgent ↔ GroupChatManager connections are auto-typed as 'delegate'. When source is a ClassifierAgent, source_category IS REQUIRED. When source is a SplitterAgent, DO NOT pass source_category — splitter edges are plain sequential connections (allocation is decided at runtime by the splitter LLM).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -598,6 +598,114 @@ TASK-SPLITTING (splitter fan-out): Start → Splitter → [Researcher, Writer, E
   outputs before EndNode — the Splitter itself does not aggregate.
 
 Choose the pattern that best fits the user's requirements. Complex workflows may combine multiple patterns.
+
+═══════════════════════════════════════════════════════════
+ROUTING DECISION GUIDE — PICK THE RIGHT DISPATCHER
+═══════════════════════════════════════════════════════════
+
+When the user wants multiple downstream agents after a single upstream
+source, three patterns are available. The right choice depends on what
+input each downstream agent should receive and how many should execute:
+
+┌──────────────────────┬────────────────────────┬──────────────────────┬──────────────────┐
+│ Pattern              │ Who executes?          │ What input do they   │ Branch pruning?  │
+│                      │                        │ receive?             │                  │
+├──────────────────────┼────────────────────────┼──────────────────────┼──────────────────┤
+│ Parallel fan-out     │ ALL connected agents   │ SAME input (the      │ No — every       │
+│ (source → [A,B,C])   │ every run              │ upstream output,     │ branch runs      │
+│                      │                        │ unchanged to each)   │                  │
+├──────────────────────┼────────────────────────┼──────────────────────┼──────────────────┤
+│ ClassifierAgent      │ EXACTLY ONE of N       │ SAME input (the      │ Yes — the N-1    │
+│ (Start → Classifier  │ branches per run       │ original text, un-   │ non-chosen       │
+│ → [Cat A, Cat B...]) │ (runtime decides)      │ changed — classifier │ branches skip    │
+│                      │                        │ is a pure router)    │                  │
+├──────────────────────┼────────────────────────┼──────────────────────┼──────────────────┤
+│ SplitterAgent        │ A SUBSET of connected  │ DIFFERENT subtask    │ Yes — agents     │
+│ (Start → Splitter    │ agents per run (LLM    │ per agent (allocated │ without a sub-   │
+│ → [R, W, E] → Syn)   │ picks who's relevant)  │ by splitter at      │ task are pruned  │
+│                      │                        │ runtime)             │                  │
+└──────────────────────┴────────────────────────┴──────────────────────┴──────────────────┘
+
+How to pick when the user's phrasing is ambiguous:
+
+• "Run these N agents in parallel on the input"         → Parallel fan-out
+• "Have them all work on the same text at the same time" → Parallel fan-out
+• "Each agent has a different angle but same input"       → Parallel fan-out
+
+• "Route to the right agent for this input"              → ClassifierAgent
+• "If X, do A; if Y, do B; if Z, do C"                   → ClassifierAgent
+• "Triage / classify / detect category"                   → ClassifierAgent
+• "Pick the best agent for this query"                    → ClassifierAgent
+
+• "Split the work among these agents"                     → SplitterAgent
+• "Divide the task and give each agent a piece"           → SplitterAgent
+• "Break this down and allocate to specialists"           → SplitterAgent
+• "One agent researches, another writes, another edits"    → SplitterAgent
+• "Project-manager-style distribution"                     → SplitterAgent
+
+If unsure between fan-out and Splitter: fan-out is simpler (same input to all).
+Only pick Splitter when the user explicitly wants differentiated per-agent
+work or when agent roles are clearly complementary (research + write + edit).
+
+═══════════════════════════════════════════════════════════
+WORKED EXAMPLES — FOLLOW THESE TOOL-CALL SEQUENCES
+═══════════════════════════════════════════════════════════
+
+Example A — ClassifierAgent routing (customer support triage)
+  User request: "Classify support tickets as Billing, Technical, or Other
+                 and route each to a specialist."
+  Tool calls (in order):
+    1. add_start_node(prompt="Incoming support ticket")
+    2. add_classifier_agent(name="Ticket Classifier", categories=[
+         {name: "Billing",   description: "Payment, invoice, refund questions"},
+         {name: "Technical", description: "Product bugs, how-to questions"},
+         {name: "Other",     description: "General inquiries and feedback"},
+       ])
+    3. add_assistant_agent(name="Billing Specialist",   system_message="...")
+    4. add_assistant_agent(name="Technical Specialist", system_message="...")
+    5. add_assistant_agent(name="General Specialist",   system_message="...")
+    6. add_end_node()
+    7. connect_nodes(source_name="Start 1",           target_name="Ticket Classifier")
+    8. connect_nodes(source_name="Ticket Classifier", target_name="Billing Specialist",   source_category="Billing")
+    9. connect_nodes(source_name="Ticket Classifier", target_name="Technical Specialist", source_category="Technical")
+   10. connect_nodes(source_name="Ticket Classifier", target_name="General Specialist",   source_category="Other")
+   11. connect_nodes(source_name="Billing Specialist",   target_name="End 1")
+   12. connect_nodes(source_name="Technical Specialist", target_name="End 1")
+   13. connect_nodes(source_name="General Specialist",   target_name="End 1")
+  Key points:
+    • Each classifier outgoing edge passes source_category (the category name).
+    • Three specialists terminate at EndNode independently — allowed because
+      only one branch fires at runtime.
+
+Example B — SplitterAgent task decomposition (research report)
+  User request: "Build a workflow that splits a research task across three
+                 specialists (researcher, writer, editor) in parallel,
+                 then combines their outputs."
+  Tool calls (in order):
+    1. add_start_node(prompt="Research topic and requirements")
+    2. add_splitter_agent(name="Task Splitter")   # defaults: openai/gpt-4o-mini, strict partition
+    3. add_assistant_agent(name="Source Researcher", system_message="You find primary sources and raw data...")
+    4. add_assistant_agent(name="Draft Writer",      system_message="You compose prose from research findings...")
+    5. add_assistant_agent(name="Copy Editor",       system_message="You polish prose for clarity and style...")
+    6. add_assistant_agent(name="Synthesizer",       system_message="You combine the three outputs into one coherent report...")
+    7. add_end_node()
+    8. connect_nodes(source_name="Start 1",          target_name="Task Splitter")
+    9. connect_nodes(source_name="Task Splitter",    target_name="Source Researcher")   # plain sequential edge
+   10. connect_nodes(source_name="Task Splitter",    target_name="Draft Writer")
+   11. connect_nodes(source_name="Task Splitter",    target_name="Copy Editor")
+   12. connect_nodes(source_name="Source Researcher", target_name="Synthesizer")
+   13. connect_nodes(source_name="Draft Writer",      target_name="Synthesizer")
+   14. connect_nodes(source_name="Copy Editor",       target_name="Synthesizer")
+   15. connect_nodes(source_name="Synthesizer",       target_name="End 1")
+  Key points:
+    • Splitter edges use PLAIN connect_nodes (no source_category, no
+      source_handle — the allocation is dynamic per-input, decided at runtime
+      by the splitter LLM).
+    • Always include a Synthesizer/Aggregator downstream of the three
+      specialists — the Splitter itself does NOT combine outputs.
+    • Each specialist's system_message should clearly describe what they do
+      — the Splitter LLM reads those descriptions to decide who gets which
+      subtask.
 
 ═══════════════════════════════════════════════════════════
 AGENT CAPABILITIES — TOGGLES AND DEPENDENCIES
