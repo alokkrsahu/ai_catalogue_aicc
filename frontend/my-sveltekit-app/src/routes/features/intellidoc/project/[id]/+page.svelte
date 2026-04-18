@@ -1337,6 +1337,15 @@
                 {#if processingStatus && totalDocumentsCount > 0}
                   <span class="text-xs text-gray-500">{processedCount}/{totalDocumentsCount} processed</span>
                 {/if}
+                {#if deployment && deployment.workflow_id}
+                  <button
+                    class="text-xs font-semibold text-white bg-oxford-blue hover:bg-blue-900 px-3 py-1.5 rounded-md shadow-sm inline-flex items-center transition-colors"
+                    on:click={toggleChatbotFullscreen}
+                    title="Enter fullscreen chatbot"
+                  >
+                    <i class="fas fa-expand-arrows-alt mr-1.5"></i>Fullscreen
+                  </button>
+                {/if}
                 <button
                   class="text-xs text-gray-500 hover:text-oxford-blue px-2 py-1 rounded hover:bg-gray-100 transition-colors"
                   on:click={() => chatbotHeaderExpanded = true}
@@ -2415,7 +2424,7 @@
     {#if hasNavigation && chatbotPageNumber != null && currentPage === chatbotPageNumber}
       <!-- Chatbot (In-App) -->
       {#if loadingDeployment}
-        <div class="chatbot-page h-full flex-1 w-full px-6 py-8">
+        <div class="chatbot-page h-full flex-1 w-full">
           <div class="flex items-center justify-center min-h-96">
             <div class="text-center">
               <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-oxford-blue mx-auto mb-4"></div>
@@ -2424,7 +2433,7 @@
           </div>
         </div>
       {:else if !deployment || !deployment.workflow_id}
-        <div class="chatbot-page h-full flex-1 w-full px-6 py-8">
+        <div class="chatbot-page h-full flex-1 w-full">
           <div class="flex items-center justify-center min-h-96">
             <div class="text-center max-w-md">
               <div class="w-16 h-16 bg-gray-100 text-gray-400 rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
@@ -2449,12 +2458,14 @@
         <div
           class="{chatbotFullscreen
             ? 'fixed inset-0 z-[9999] flex flex-col bg-neutral-100 chatbot-fullscreen-active'
-            : 'chatbot-page h-full flex-1 w-full px-6 py-8'}"
+            : 'chatbot-page h-full flex-1 w-full'}"
           role={chatbotFullscreen ? 'dialog' : undefined}
           aria-modal={chatbotFullscreen ? 'true' : undefined}
           aria-label={chatbotFullscreen ? 'Chatbot Fullscreen Mode' : undefined}
         >
-          <!-- Header: switches between fullscreen bar and inline title -->
+          <!-- Header only in fullscreen mode. In inline mode, the iframe's own
+               branded banner (chatbot_title + chatbot_subtitle) is the only
+               header; the top-bar Fullscreen button handles the toggle. -->
           {#if chatbotFullscreen}
             <div class="flex items-center justify-between px-4 py-2 shadow-lg bg-[#002147] shrink-0">
               <div class="flex items-center space-x-3 min-w-0">
@@ -2479,28 +2490,6 @@
                 >
                   <i class="fas fa-compress-arrows-alt mr-1.5"></i>
                   Exit
-                </button>
-              </div>
-            </div>
-          {:else}
-            <div class="mb-4 flex items-center justify-between flex-wrap gap-4">
-              <div>
-                <h2 class="text-2xl font-bold text-gray-900 flex items-center">
-                  <i class="fas fa-comments mr-3 text-oxford-blue"></i>
-                  {deployment?.chatbot_title || 'AI Assistant'}
-                </h2>
-                <p class="text-gray-600 mt-2">
-                  {deployment?.chatbot_subtitle || 'Chat with this workflow using the same assistant your end-users see.'}
-                </p>
-              </div>
-              <div class="flex items-center gap-3 flex-wrap">
-                <button
-                  class="inline-flex items-center px-3 py-1.5 text-sm border border-gray-300 rounded-lg bg-white hover:bg-gray-100 text-gray-700 shadow-sm"
-                  on:click={toggleChatbotFullscreen}
-                  title="Enter Fullscreen"
-                >
-                  <i class="fas fa-expand-arrows-alt mr-2"></i>
-                  Fullscreen
                 </button>
               </div>
             </div>
@@ -2584,7 +2573,7 @@
               {#key activeChatbotSessionId}
                 <iframe
                   title="In-App Chatbot"
-                  src={`/api/workflow-deploy/${projectId}/embed/?hide_header=1${activeChatbotSessionId ? `&session_id=${activeChatbotSessionId}` : ''}`}
+                  src={`/api/workflow-deploy/${projectId}/embed/${activeChatbotSessionId ? `?session_id=${activeChatbotSessionId}` : ''}`}
                   class="w-full h-full flex-1 min-h-0 border-0"
                   loading="lazy"
                   referrerpolicy="no-referrer-when-downgrade"

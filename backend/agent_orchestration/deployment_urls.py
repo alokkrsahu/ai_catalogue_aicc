@@ -3,7 +3,17 @@ URL routing for workflow deployment endpoints
 """
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .deployment_views import DeploymentViewSet, public_chat_endpoint, public_chat_endpoint_stream, embed_chatbot_html, submit_deployment_human_input, upload_chat_file
+from .deployment_views import (
+    DeploymentViewSet,
+    public_chat_endpoint,
+    public_chat_endpoint_stream,
+    embed_chatbot_html,
+    submit_deployment_human_input,
+    upload_chat_file,
+    public_config_endpoint,
+    public_auth_endpoint,
+    public_logout_endpoint,
+)
 
 # Create router for deployment management endpoints
 router = DefaultRouter()
@@ -28,6 +38,11 @@ urlpatterns = [
     
     # Embed endpoint (serves chatbot HTML for iframe)
     path('api/workflow-deploy/<uuid:project_id>/embed/', embed_chatbot_html, name='workflow-deploy-embed'),
+
+    # Public Chat URL — config / auth / logout (used by the Svelte /chat/{id} page)
+    path('api/workflow-deploy/<uuid:project_id>/public-config/', public_config_endpoint, name='workflow-deploy-public-config'),
+    path('api/workflow-deploy/<uuid:project_id>/public-auth/', public_auth_endpoint, name='workflow-deploy-public-auth'),
+    path('api/workflow-deploy/<uuid:project_id>/public-logout/', public_logout_endpoint, name='workflow-deploy-public-logout'),
     
     # Explicit routes for ViewSet actions (ViewSet doesn't auto-map standard CRUD)
     path(

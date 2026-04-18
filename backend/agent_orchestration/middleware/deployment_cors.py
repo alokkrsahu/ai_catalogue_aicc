@@ -37,6 +37,13 @@ class WorkflowDeploymentCORSMiddleware(MiddlewareMixin):
         # navigations (in iframes or directly), not as XHR/fetch API calls.
         if '/embed/' in request.path:
             return None
+
+        # Skip origin-check for the Public Chat URL control endpoints. These
+        # are consumed by the Svelte /chat/<id> page on our own origin, and
+        # access control on them is enforced by the signed auth cookie — not
+        # by the allowed-origin list (which governs external iframe embeds).
+        if any(seg in request.path for seg in ('/public-config/', '/public-auth/', '/public-logout/')):
+            return None
         
         # Extract project_id from URL
         # Pattern: /api/workflow-deploy/{project_id}/
@@ -80,6 +87,11 @@ class WorkflowDeploymentCORSMiddleware(MiddlewareMixin):
 
         # Skip CORS processing for embed HTML pages
         if '/embed/' in request.path:
+            return response
+
+        # Same exemption as process_request — public control endpoints don't
+        # participate in the allowed-origin CORS flow.
+        if any(seg in request.path for seg in ('/public-config/', '/public-auth/', '/public-logout/')):
             return response
         
         # Extract project_id from URL

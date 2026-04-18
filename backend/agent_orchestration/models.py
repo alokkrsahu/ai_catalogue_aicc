@@ -87,6 +87,37 @@ class WorkflowDeployment(models.Model):
         help_text='Whether end-users can upload files in the chatbot'
     )
 
+    # Public Chat URL — an independent fourth surface hosted at /chat/<project_id>.
+    # Credentials stored here are STRICTLY scoped to this deployment's public
+    # chat endpoint; they never grant access to the admin area, other projects,
+    # or any other part of the system. See plan in deployment_views.py gate.
+    public_url_enabled = models.BooleanField(
+        default=False,
+        help_text='Expose a hosted chat page at /chat/<project_id>'
+    )
+    public_url_auth_enabled = models.BooleanField(
+        default=False,
+        help_text='When true, end-users must log in with the credentials below before chatting'
+    )
+    public_url_username = models.CharField(
+        max_length=150,
+        blank=True,
+        default='',
+        help_text='Shared username for the public chat page (when auth is enabled)'
+    )
+    public_url_password_hash = models.CharField(
+        max_length=256,
+        blank=True,
+        default='',
+        editable=False,
+        help_text='PBKDF2 hash of the public chat password; never exposed via API'
+    )
+    public_url_password_version = models.PositiveIntegerField(
+        default=0,
+        editable=False,
+        help_text='Bumps on every password save — invalidates every live login token immediately'
+    )
+
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -382,3 +413,26 @@ class DeploymentExecution(models.Model):
     def __str__(self):
         return f"Execution {self.execution_id[:8]} for session {self.deployment_session.session_id[:8]}"
 
+
+class DeploymentPublicLoginAttempt(models.Model):
+    """Audit log for every login attempt on a deployment's public chat page.
+    Populated by public_auth_endpoint; read by admins for brute-force review."""
+    deployment = models.ForeignKey(
+        WorkflowDeployment,
+        on_delete=models.CASCADE,
+        related_name='public_login_attempts'
+    )
+    ip_address = models.GenericIPAddressField()
+    username_attempted = models.CharField(max_length=150)
+    success = models.BooleanField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['deployment', 'created_at']),
+            models.Index(fields=['ip_address', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f"{'OK' if self.success else 'FAIL'} @ {self.ip_address} → {self.deployment_id}"

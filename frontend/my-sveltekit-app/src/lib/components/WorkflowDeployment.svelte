@@ -37,6 +37,62 @@
   let fontColor = '#000000';
   let fileUploadsEnabled = false;
 
+  // Public Chat URL — hosted /chat/{project_id} page. Credentials here are
+  // strictly scoped: they authorize only this deployment's public chat and
+  // cannot grant access to any other part of the system.
+  let publicUrlEnabled = false;
+  let publicUrlAuthEnabled = false;
+  let publicUrlUsername = '';
+  let publicUrlPassword = '';      // plaintext entered by admin; only sent on save when non-empty
+  let publicUrlPasswordSet = false;  // mirrors server-side "hash exists" flag
+  let publicUrlEnabledSaving = false;  // separate state so other buttons stay interactive
+  $: publicChatUrl = (typeof window !== 'undefined' ? window.location.origin : '') + `/chat/${projectId}`;
+
+  function copyPublicUrl() {
+    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      navigator.clipboard.writeText(publicChatUrl);
+      toasts.success('Public chat URL copied');
+    }
+  }
+
+  // Public Chat URL toggle auto-saves immediately — it's a kill-switch, so
+  // requiring a separate Save click is surprising and dangerous. The rest of
+  // the Public Chat URL form (auth toggle, username, password) still waits
+  // for Save Configuration because those changes deserve deliberate review.
+  async function handlePublicUrlToggle(event: Event) {
+    const target = event.target as HTMLInputElement;
+    const newValue = target.checked;
+    if (!selectedWorkflowId) {
+      // Can't save without a workflow — revert the UI and tell the admin.
+      target.checked = !newValue;
+      publicUrlEnabled = !newValue;
+      toasts.error('Please select and save a workflow first');
+      return;
+    }
+    publicUrlEnabled = newValue;
+    publicUrlEnabledSaving = true;
+    try {
+      await cleanUniversalApi.updateDeployment(projectId, {
+        workflow_id: selectedWorkflowId,
+        public_url_enabled: newValue,
+      });
+      toasts.success(
+        newValue
+          ? 'Public Chat URL enabled'
+          : 'Public Chat URL disabled — all sessions terminated'
+      );
+      await loadDeployment();
+    } catch (error: any) {
+      // Revert the toggle and surface the error — don't leave the UI in a
+      // misleading state where the switch looks flipped but the backend isn't.
+      publicUrlEnabled = !newValue;
+      target.checked = !newValue;
+      toasts.error(error?.message || 'Failed to update Public Chat URL');
+    } finally {
+      publicUrlEnabledSaving = false;
+    }
+  }
+
 
   // Generate iframe-based embed code — points to server-rendered HTML
   // This ensures full feature parity (file uploads, copy button, citations, streaming)
@@ -127,6 +183,14 @@
         fontColor = deployment.font_color || '#000000';
         fileUploadsEnabled = deployment.file_uploads_enabled || false;
 
+        // Public Chat URL fields (password never returned by API — reset local buffer
+        // and use the `public_url_password_set` boolean to show "is set" state).
+        publicUrlEnabled = deployment.public_url_enabled || false;
+        publicUrlAuthEnabled = deployment.public_url_auth_enabled || false;
+        publicUrlUsername = deployment.public_url_username || '';
+        publicUrlPasswordSet = !!deployment.public_url_password_set;
+        publicUrlPassword = '';
+
         // Construct endpoint URL:
         // For embed code (external use): use VITE_BACKEND_URL (direct backend, works cross-origin)
         // Fallback: window.location.origin (works in production where frontend=backend behind nginx)
@@ -187,7 +251,13 @@
       saving = true;
       console.log(`💾 DEPLOYMENT: Saving deployment configuration`);
       
-      await cleanUniversalApi.updateDeployment(projectId, {
+      // Build the payload; only include the password when the admin typed a
+      // new one, so re-saving other fields never wipes the existing password.
+      // NOTE: `public_url_enabled` intentionally omitted — that toggle is a
+      // kill-switch and auto-saves via handlePublicUrlToggle() the moment
+      // the admin flips it. Including it here would re-bump the session
+      // generation version on every Save Configuration click.
+      const payload: Record<string, any> = {
         workflow_id: selectedWorkflowId,
         rate_limit_per_minute: rateLimitPerMinute,
         initial_greeting: initialGreeting,
@@ -198,8 +268,15 @@
         secondary_color: secondaryColor,
         logo_url: logoUrl || null,
         font_color: fontColor,
-        file_uploads_enabled: fileUploadsEnabled
-      });
+        file_uploads_enabled: fileUploadsEnabled,
+        // Public Chat URL auth fields (enable toggle handled separately)
+        public_url_auth_enabled: publicUrlAuthEnabled,
+        public_url_username: publicUrlUsername || ''
+      };
+      if (publicUrlPassword) {
+        payload.public_url_password = publicUrlPassword;
+      }
+      await cleanUniversalApi.updateDeployment(projectId, payload);
       
       toasts.success('Deployment configuration saved successfully');
       await loadDeployment();
@@ -386,7 +463,117 @@
             This is the default rate limit for origins without specific limits
           </p>
         </div>
-        
+
+        <!-- Public Chat URL -->
+        <div class="mb-6 border-t border-gray-200 pt-6">
+          <label class="flex items-start justify-between gap-4 cursor-pointer">
+            <div class="min-w-0">
+              <div class="font-medium text-gray-900">
+                <i class="fas fa-globe mr-2 text-oxford-blue"></i>Public Chat URL
+              </div>
+              <p class="text-xs text-gray-500 mt-1">
+                When enabled, external users can chat with this workflow at a
+                dedicated page. Credentials (if set) grant access only to this
+                public chat page — never to the admin area.
+              </p>
+            </div>
+            <span class="relative inline-flex flex-shrink-0 w-11 h-6">
+              <input
+                type="checkbox"
+                checked={publicUrlEnabled}
+                on:change={handlePublicUrlToggle}
+                disabled={saving || publicUrlEnabledSaving}
+                class="sr-only peer"
+              />
+              <span class="absolute inset-0 rounded-full bg-gray-300 peer-checked:bg-oxford-blue transition-colors"></span>
+              <span class="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow-sm transition-transform peer-checked:translate-x-5"></span>
+            </span>
+          </label>
+          {#if publicUrlEnabledSaving}
+            <p class="text-xs text-gray-500 mt-2">
+              <i class="fas fa-spinner fa-spin mr-1"></i>Applying…
+            </p>
+          {/if}
+
+          {#if publicUrlEnabled}
+            <div class="mt-4">
+              <label class="block text-xs text-gray-600 mb-1">Public Chat URL</label>
+              <div class="flex">
+                <input
+                  readonly
+                  value={publicChatUrl}
+                  class="flex-1 rounded-l-lg border border-gray-300 px-3 py-2 text-sm bg-gray-50 font-mono text-gray-700"
+                />
+                <button
+                  type="button"
+                  on:click={copyPublicUrl}
+                  class="px-3 bg-oxford-blue text-white rounded-r-lg hover:bg-oxford-blue-dark transition-colors"
+                  title="Copy URL"
+                >
+                  <i class="fas fa-copy"></i>
+                </button>
+              </div>
+            </div>
+
+            <label class="flex items-start justify-between gap-4 mt-4 cursor-pointer">
+              <div class="min-w-0">
+                <div class="font-medium text-gray-900">Require authentication</div>
+                <p class="text-xs text-gray-500 mt-1">
+                  End-users must enter a username and password before chatting.
+                </p>
+              </div>
+              <span class="relative inline-flex flex-shrink-0 w-11 h-6">
+                <input
+                  type="checkbox"
+                  bind:checked={publicUrlAuthEnabled}
+                  disabled={saving}
+                  class="sr-only peer"
+                />
+                <span class="absolute inset-0 rounded-full bg-gray-300 peer-checked:bg-oxford-blue transition-colors"></span>
+                <span class="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow-sm transition-transform peer-checked:translate-x-5"></span>
+              </span>
+            </label>
+
+            {#if publicUrlAuthEnabled}
+              <div class="mt-4 space-y-3">
+                <div>
+                  <label class="block text-xs text-gray-600 mb-1">Username</label>
+                  <input
+                    type="text"
+                    bind:value={publicUrlUsername}
+                    autocomplete="off"
+                    placeholder="Choose a username"
+                    class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-oxford-blue focus:border-oxford-blue"
+                    disabled={saving}
+                  />
+                </div>
+                <div>
+                  <label class="block text-xs text-gray-600 mb-1">
+                    Password
+                    {#if publicUrlPasswordSet && !publicUrlPassword}
+                      <span class="ml-1 text-green-600">
+                        <i class="fas fa-check-circle"></i> set
+                      </span>
+                    {/if}
+                  </label>
+                  <input
+                    type="password"
+                    bind:value={publicUrlPassword}
+                    autocomplete="new-password"
+                    placeholder={publicUrlPasswordSet ? 'Leave blank to keep existing password' : 'Choose a password'}
+                    class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-oxford-blue focus:border-oxford-blue"
+                    disabled={saving}
+                  />
+                </div>
+                <p class="text-xs text-gray-500">
+                  Password is hashed on save. Saving a new password immediately logs
+                  out any currently-signed-in end-users.
+                </p>
+              </div>
+            {/if}
+          {/if}
+        </div>
+
         <!-- Save Button -->
         <button
           on:click={saveDeployment}

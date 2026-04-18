@@ -18,6 +18,9 @@ import threading
 from datetime import datetime
 from typing import Dict, Any, Optional
 
+from django.conf import settings
+from django.contrib.auth.hashers import make_password, check_password
+from django.core.signing import TimestampSigner, BadSignature, SignatureExpired
 from django.http import JsonResponse, StreamingHttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.clickjacking import xframe_options_exempt
@@ -42,12 +45,198 @@ from .models import (
     WorkflowDeploymentRequestStatus,
     DeploymentSession,
     DeploymentSessionFile,
-    DeploymentExecution
+    DeploymentExecution,
+    DeploymentPublicLoginAttempt,
 )
 from .deployment_executor import WorkflowDeploymentExecutor
 from .deployment_rate_limiter import WorkflowDeploymentRateLimiter
 
 logger = logging.getLogger('workflow_deployment')
+
+
+# ── Public Chat URL — cookie + gate helpers ────────────────────────────
+# These credentials are STRICTLY scoped to the public chat endpoint of
+# one specific deployment. The cookie is path-scoped (browser will only
+# send it to /api/workflow-deploy/{project_id}/), name-namespaced per
+# deployment, signed with SECRET_KEY, and version-bound to the current
+# password so rotation invalidates every live login. No Django User row
+# is ever created.
+PUBLIC_CHAT_COOKIE_MAX_AGE = 4 * 3600  # 4 h rolling
+PUBLIC_CHAT_LOGIN_RL_WINDOW = 15 * 60  # 15 min brute-force window
+PUBLIC_CHAT_LOGIN_RL_ATTEMPTS = 10     # attempts allowed in the window
+
+
+def _public_chat_cookie_name(deployment) -> str:
+    return f'pchat_{deployment.id}'
+
+
+def _public_chat_cookie_path(deployment) -> str:
+    return f'/api/workflow-deploy/{deployment.project.project_id}/'
+
+
+def _set_public_chat_cookie(response, deployment) -> None:
+    """Attach the signed auth cookie so subsequent same-origin XHRs from the
+    iframe carry it automatically. Rewritten on every authenticated call so
+    activity refreshes the 4 h TTL."""
+    signer = TimestampSigner()
+    payload = f'{deployment.id}:{deployment.public_url_password_version}'
+    value = signer.sign(payload)
+    response.set_cookie(
+        _public_chat_cookie_name(deployment),
+        value,
+        max_age=PUBLIC_CHAT_COOKIE_MAX_AGE,
+        path=_public_chat_cookie_path(deployment),
+        httponly=True,
+        samesite='Lax',
+        secure=not settings.DEBUG,
+    )
+
+
+def _clear_public_chat_cookie(response, deployment) -> None:
+    response.delete_cookie(
+        _public_chat_cookie_name(deployment),
+        path=_public_chat_cookie_path(deployment),
+    )
+
+
+def _verify_public_chat_cookie(request, deployment) -> bool:
+    raw = request.COOKIES.get(_public_chat_cookie_name(deployment))
+    if not raw:
+        return False
+    # If admin has disabled the public URL, ALL existing sessions die
+    # immediately, regardless of cookie validity.
+    if not getattr(deployment, 'public_url_enabled', False):
+        return False
+    try:
+        payload = TimestampSigner().unsign(raw, max_age=PUBLIC_CHAT_COOKIE_MAX_AGE)
+    except (BadSignature, SignatureExpired):
+        return False
+    try:
+        cookie_dep_id, cookie_version = payload.split(':')
+    except ValueError:
+        return False
+    if cookie_dep_id != str(deployment.id):
+        return False
+    try:
+        # `public_url_password_version` is really the "session generation"
+        # counter: bumps on password rotation AND on any config change
+        # (enable toggle, auth toggle, username) so flipping any of those
+        # settings invalidates all live cookies.
+        if int(cookie_version) != deployment.public_url_password_version:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _is_public_chat_access_allowed(request, deployment) -> bool:
+    """True if this request carries a valid public-chat auth token, OR the
+    deployment is publicly available without auth. False otherwise.
+    Composed with other allowlist checks by public endpoints — never
+    widens access on its own."""
+    if not getattr(deployment, 'public_url_enabled', False):
+        return False
+    if not getattr(deployment, 'public_url_auth_enabled', False):
+        return True  # public URL open without auth
+    return _verify_public_chat_cookie(request, deployment)
+
+
+def _apply_public_url_password_if_provided(deployment, plaintext) -> None:
+    """Hash and assign a new password, bumping the version so existing
+    cookies become invalid immediately. Blank plaintext is a no-op so
+    admins can edit other fields without wiping the password."""
+    if not plaintext:
+        return
+    plaintext = str(plaintext)
+    deployment.public_url_password_hash = make_password(plaintext)
+    deployment.public_url_password_version = (deployment.public_url_password_version or 0) + 1
+
+
+def _build_public_chat_url(request, project) -> str:
+    """Build the front-end URL admins should share.  Format: <origin>/chat/<project_id>."""
+    origin = request.build_absolute_uri('/').rstrip('/')
+    return f'{origin}/chat/{project.project_id}'
+
+
+def _client_ip(request) -> str:
+    """Best-effort extraction of the originating IP from proxy headers."""
+    forwarded = request.META.get('HTTP_X_FORWARDED_FOR', '')
+    if forwarded:
+        return forwarded.split(',')[0].strip()
+    return request.META.get('REMOTE_ADDR', '0.0.0.0')
+
+
+def _request_origin_is_allowed(request, deployment) -> bool:
+    """True when the request's Origin header matches an active
+    WorkflowAllowedOrigin row for this deployment."""
+    origin = (request.META.get('HTTP_ORIGIN') or '').strip()
+    if not origin:
+        return False
+    normalized = origin.rstrip('/').lower()
+    return WorkflowAllowedOrigin.objects.filter(
+        deployment=deployment,
+        origin__iexact=normalized,
+        is_active=True,
+    ).exists()
+
+
+def _enforce_public_chat_auth(request, deployment):
+    """Composed guard for public-facing endpoints.
+
+    Rules:
+      1. If the request carries a pchat cookie AND public_url_enabled=False
+         → reject (the /chat/<id> pathway has been closed by the admin;
+         live sessions must die immediately regardless of auth setting).
+      2. If public_url_auth_enabled=False → allow (legacy surfaces
+         — admin in-app chatbot, allowed-origin iframes — work unchanged).
+      3. Otherwise require one of:
+           (a) valid public-chat cookie for this deployment, or
+           (b) request Origin is in the allowed-origin list.
+
+    Returns None when allowed, or a JsonResponse with 401 when blocked.
+    """
+    has_pchat_cookie = bool(request.COOKIES.get(_public_chat_cookie_name(deployment)))
+
+    # Rule 1 — public URL flipped off with a still-circulating cookie.
+    if has_pchat_cookie and not getattr(deployment, 'public_url_enabled', False):
+        response = JsonResponse(
+            {'error': 'This chat is no longer available', 'authRequired': True},
+            status=401,
+        )
+        # Drop the dead cookie from the browser so the user isn't stuck in
+        # a half-state when the admin re-enables the URL later.
+        _clear_public_chat_cookie(response, deployment)
+        return response
+
+    # Rule 2 — auth not required, nothing else to check.
+    if not getattr(deployment, 'public_url_auth_enabled', False):
+        return None
+
+    # Rule 3 — auth required.
+    if _verify_public_chat_cookie(request, deployment):
+        return None
+    if _request_origin_is_allowed(request, deployment):
+        return None
+    return JsonResponse(
+        {'error': 'Authentication required', 'authRequired': True},
+        status=401,
+    )
+
+
+def _maybe_refresh_public_chat_cookie(request, response, deployment) -> None:
+    """Rolling 4 h TTL — rewrite the cookie on every authenticated public-chat
+    request so activity extends the session. No-op when the request didn't
+    come through the public-chat pathway."""
+    try:
+        if not getattr(deployment, 'public_url_enabled', False):
+            return
+        if not getattr(deployment, 'public_url_auth_enabled', False):
+            return
+        if _verify_public_chat_cookie(request, deployment):
+            _set_public_chat_cookie(response, deployment)
+    except Exception:
+        # Cookie refresh is best-effort — never block the response on it.
+        pass
 
 
 def _embed_hex_to_rgb_csv(hex_color: str, fallback_rgb: str) -> str:
@@ -256,6 +445,12 @@ class DeploymentViewSet(viewsets.ViewSet):
                     'font_color': getattr(deployment, 'font_color', '#000000'),
                     'logo_url': getattr(deployment, 'logo_url', None),
                     'file_uploads_enabled': getattr(deployment, 'file_uploads_enabled', False),
+                    # Public Chat URL — safe-to-return fields only (hash/version excluded).
+                    'public_url_enabled': getattr(deployment, 'public_url_enabled', False),
+                    'public_url_auth_enabled': getattr(deployment, 'public_url_auth_enabled', False),
+                    'public_url_username': getattr(deployment, 'public_url_username', ''),
+                    'public_url_password_set': bool(getattr(deployment, 'public_url_password_hash', '')),
+                    'public_chat_url': _build_public_chat_url(request, project),
                     'created_at': deployment.created_at.isoformat(),
                     'updated_at': deployment.updated_at.isoformat()
                 },
@@ -310,15 +505,24 @@ class DeploymentViewSet(viewsets.ViewSet):
                     'font_color': request.data.get('font_color', '#000000'),
                     'logo_url': request.data.get('logo_url', None),
                     'file_uploads_enabled': request.data.get('file_uploads_enabled', False),
+                    # Public Chat URL — password handled below after .save()
+                    'public_url_enabled': request.data.get('public_url_enabled', False),
+                    'public_url_auth_enabled': request.data.get('public_url_auth_enabled', False),
+                    'public_url_username': request.data.get('public_url_username', ''),
                 }
             )
-            
+
+            # If password is supplied on FIRST create, hash it and bump version.
+            if created:
+                _apply_public_url_password_if_provided(deployment, request.data.get('public_url_password', ''))
+                deployment.save(update_fields=['public_url_password_hash', 'public_url_password_version'])
+
             # Update deployment if it already exists
             if not created:
                 # If there's an active deployment for another workflow, deactivate it
                 if deployment.is_active and deployment.workflow and deployment.workflow != workflow:
                     deployment.is_active = False
-                
+
                 deployment.workflow = workflow
                 if 'rate_limit_per_minute' in request.data:
                     deployment.rate_limit_per_minute = request.data['rate_limit_per_minute']
@@ -339,6 +543,36 @@ class DeploymentViewSet(viewsets.ViewSet):
                     deployment.logo_url = request.data['logo_url']
                 if 'file_uploads_enabled' in request.data:
                     deployment.file_uploads_enabled = request.data['file_uploads_enabled']
+                # Public Chat URL — snapshot prior state so we can invalidate
+                # live sessions on any session-affecting change.
+                _prev_public_url_enabled = deployment.public_url_enabled
+                _prev_public_url_auth_enabled = deployment.public_url_auth_enabled
+                _prev_public_url_username = deployment.public_url_username
+                if 'public_url_enabled' in request.data:
+                    deployment.public_url_enabled = bool(request.data['public_url_enabled'])
+                if 'public_url_auth_enabled' in request.data:
+                    deployment.public_url_auth_enabled = bool(request.data['public_url_auth_enabled'])
+                if 'public_url_username' in request.data:
+                    deployment.public_url_username = (request.data['public_url_username'] or '').strip()
+                # Bump session generation if anything that would affect session
+                # validity changed — kills existing cookies on the next request.
+                # The password-apply helper bumps too; keep the two paths distinct
+                # so we don't double-bump when admin changes both password and a flag.
+                new_password_set = bool(request.data.get('public_url_password', ''))
+                config_changed = (
+                    _prev_public_url_enabled != deployment.public_url_enabled
+                    or _prev_public_url_auth_enabled != deployment.public_url_auth_enabled
+                    or _prev_public_url_username != deployment.public_url_username
+                )
+                if new_password_set:
+                    # This helper bumps the version itself; don't double-bump.
+                    _apply_public_url_password_if_provided(
+                        deployment, request.data['public_url_password']
+                    )
+                elif config_changed:
+                    deployment.public_url_password_version = (
+                        deployment.public_url_password_version or 0
+                    ) + 1
                 deployment.save()
             
             logger.info(f"✅ DEPLOYMENT: {'Created' if created else 'Updated'} deployment for project {project.name}")
@@ -360,6 +594,12 @@ class DeploymentViewSet(viewsets.ViewSet):
                 'font_color': getattr(deployment, 'font_color', '#000000'),
                 'logo_url': getattr(deployment, 'logo_url', None),
                 'file_uploads_enabled': getattr(deployment, 'file_uploads_enabled', False),
+                # Public Chat URL (password hash/version intentionally omitted).
+                'public_url_enabled': getattr(deployment, 'public_url_enabled', False),
+                'public_url_auth_enabled': getattr(deployment, 'public_url_auth_enabled', False),
+                'public_url_username': getattr(deployment, 'public_url_username', ''),
+                'public_url_password_set': bool(getattr(deployment, 'public_url_password_hash', '')),
+                'public_chat_url': _build_public_chat_url(request, project),
                 'message': 'Deployment created successfully' if created else 'Deployment updated successfully'
             }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
             
@@ -966,6 +1206,134 @@ class DeploymentViewSet(viewsets.ViewSet):
             )
 
 
+# ────────────────────────────────────────────────────────────────────────
+# Public Chat URL — config / auth / logout endpoints (no DRF permission
+# class; credentials are scoped to this deployment only and cannot grant
+# access to admin areas — see helpers at the top of the module).
+# ────────────────────────────────────────────────────────────────────────
+
+@csrf_exempt
+@require_http_methods(["GET", "OPTIONS"])
+@never_cache
+def public_config_endpoint(request, project_id):
+    """Small blob the Svelte /chat/{id} page uses to decide what to render.
+    Returns 404 when the deployment or its public URL is not available so
+    the endpoint doesn't leak the existence of deployments that aren't
+    meant to be publicly discoverable."""
+    try:
+        project = IntelliDocProject.objects.filter(project_id=project_id).first()
+        if not project:
+            return JsonResponse({'error': 'Not available'}, status=404)
+        deployment = WorkflowDeployment.objects.filter(project=project).first()
+        if not deployment or not deployment.is_active or not deployment.public_url_enabled:
+            return JsonResponse({'error': 'Not available'}, status=404)
+        return JsonResponse({
+            'is_active': deployment.is_active,
+            'public_url_enabled': deployment.public_url_enabled,
+            'auth_required': deployment.public_url_auth_enabled,
+            'is_logged_in': _verify_public_chat_cookie(request, deployment),
+            'chatbot_title': deployment.chatbot_title or 'AI Assistant',
+            'chatbot_subtitle': deployment.chatbot_subtitle or '',
+            'primary_color': deployment.primary_color or '#002147',
+            'secondary_color': deployment.secondary_color or '#ffffff',
+            'font_color': deployment.font_color or '#000000',
+            'logo_url': deployment.logo_url or '',
+        })
+    except Exception as e:
+        logger.error(f"❌ PUBLIC-CONFIG: {e}", exc_info=True)
+        return JsonResponse({'error': 'Not available'}, status=404)
+
+
+@csrf_exempt
+@require_http_methods(["POST", "OPTIONS"])
+@never_cache
+def public_auth_endpoint(request, project_id):
+    """Validate shared public-chat credentials and set the signed auth cookie.
+    Rate-limited per IP. Every attempt is rowed in DeploymentPublicLoginAttempt
+    for audit. On success returns {ok: true} with the cookie attached."""
+    if request.method == 'OPTIONS':
+        return _add_cors_headers(JsonResponse({'ok': True}), request)
+    try:
+        project = IntelliDocProject.objects.filter(project_id=project_id).first()
+        if not project:
+            return JsonResponse({'error': 'Not available'}, status=404)
+        deployment = WorkflowDeployment.objects.filter(project=project).first()
+        if not deployment or not deployment.is_active or not deployment.public_url_enabled:
+            return JsonResponse({'error': 'Not available'}, status=404)
+        # If auth isn't even enabled, there's nothing to log in to.
+        if not deployment.public_url_auth_enabled:
+            return JsonResponse({'error': 'Authentication not required'}, status=400)
+
+        # Brute-force rate limit — per IP, per 15 min window.
+        from django.core.cache import cache
+        ip = _client_ip(request)
+        rl_key = f'public_auth_rl:{deployment.id}:{ip}'
+        attempts = cache.get(rl_key, 0)
+        if attempts >= PUBLIC_CHAT_LOGIN_RL_ATTEMPTS:
+            return JsonResponse(
+                {'error': 'Too many attempts. Please wait a few minutes and try again.'},
+                status=429,
+            )
+
+        # Parse credentials
+        try:
+            body = json.loads(request.body or b'{}')
+        except json.JSONDecodeError:
+            body = {}
+        username = (body.get('username') or '').strip()
+        password = body.get('password') or ''
+
+        # Verify (username + password_hash). Constant-time via check_password.
+        ok = (
+            username == (deployment.public_url_username or '')
+            and bool(deployment.public_url_password_hash)
+            and check_password(password, deployment.public_url_password_hash)
+        )
+
+        # Audit row (every attempt, regardless of outcome)
+        try:
+            DeploymentPublicLoginAttempt.objects.create(
+                deployment=deployment,
+                ip_address=ip if ip else '0.0.0.0',
+                username_attempted=username[:150],
+                success=ok,
+            )
+        except Exception as audit_err:
+            logger.warning(f"⚠️ PUBLIC-AUTH: failed to audit login attempt: {audit_err}")
+
+        if not ok:
+            # Count only failures against the rate limit window.
+            cache.set(rl_key, attempts + 1, timeout=PUBLIC_CHAT_LOGIN_RL_WINDOW)
+            return JsonResponse({'error': 'Invalid credentials'}, status=401)
+
+        # Success — attach the signed cookie.
+        response = JsonResponse({'ok': True})
+        _set_public_chat_cookie(response, deployment)
+        return response
+    except Exception as e:
+        logger.error(f"❌ PUBLIC-AUTH: {e}", exc_info=True)
+        return JsonResponse({'error': 'Authentication error'}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST", "OPTIONS"])
+@never_cache
+def public_logout_endpoint(request, project_id):
+    """Clear the public-chat cookie so the user has to log in again."""
+    if request.method == 'OPTIONS':
+        return _add_cors_headers(JsonResponse({'ok': True}), request)
+    response = JsonResponse({'ok': True})
+    try:
+        project = IntelliDocProject.objects.filter(project_id=project_id).first()
+        if project:
+            deployment = WorkflowDeployment.objects.filter(project=project).first()
+            if deployment:
+                _clear_public_chat_cookie(response, deployment)
+    except Exception as e:
+        logger.warning(f"⚠️ PUBLIC-LOGOUT: {e}")
+    return response
+
+
 # Public endpoint (unauthenticated)
 @csrf_exempt
 @require_http_methods(["POST", "OPTIONS"])
@@ -1019,7 +1387,12 @@ def public_chat_endpoint(request, project_id):
                 'error': 'Deployment has no workflow configured',
                 'request_id': request_id
             }, status=400)
-        
+
+        # Public Chat URL auth gate (legacy non-stream endpoint)
+        auth_block = _enforce_public_chat_auth(request, deployment)
+        if auth_block is not None:
+            return auth_block
+
         # Parse request body
         try:
             data = json.loads(request.body) if request.body else {}
@@ -1365,7 +1738,13 @@ def public_chat_endpoint_stream(request, project_id):
             if not deployment.workflow:
                 yield f"data: {json.dumps({'type': 'error', 'error': 'Deployment has no workflow configured', 'request_id': request_id})}\n\n"
                 return
-            
+
+            # Public Chat URL auth gate
+            auth_block = _enforce_public_chat_auth(request, deployment)
+            if auth_block is not None:
+                yield f"data: {json.dumps({'type': 'error', 'error': 'Authentication required', 'authRequired': True, 'request_id': request_id})}\n\n"
+                return
+
             # Parse request body
             try:
                 data = json.loads(request.body) if request.body else {}
@@ -1697,6 +2076,19 @@ def public_chat_endpoint_stream(request, project_id):
     response['Cache-Control'] = 'no-cache'
     response['X-Accel-Buffering'] = 'no'  # Disable buffering in nginx
     _add_cors_headers(response, request)
+
+    # Rolling TTL: if this is a public-chat-authenticated request, refresh the
+    # cookie so ongoing activity extends the 4h window. Pre-resolve deployment
+    # here so we can set the cookie before streaming starts (set_cookie after
+    # iteration begins has no effect because headers are already flushed).
+    try:
+        project = IntelliDocProject.objects.filter(project_id=project_id).first()
+        deployment = WorkflowDeployment.objects.filter(project=project, is_active=True).first() if project else None
+        if deployment:
+            _maybe_refresh_public_chat_cookie(request, response, deployment)
+    except Exception:
+        pass
+
     return response
 
 
@@ -1718,7 +2110,7 @@ def submit_deployment_human_input(request, project_id):
     origin = request.META.get('HTTP_ORIGIN', '')
     request_id = f"submit_input_{timezone.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
     start_time = timezone.now()
-    
+
     try:
         # Get project and deployment
         try:
@@ -1729,19 +2121,25 @@ def submit_deployment_human_input(request, project_id):
                 'error': 'Project not found',
                 'request_id': request_id
             }, status=404)
-        
+
         deployment = WorkflowDeployment.objects.filter(
             project=project,
             is_active=True
         ).first()
-        
+
         if not deployment:
             return JsonResponse({
                 'status': 'error',
                 'error': 'No active deployment found for this project',
                 'request_id': request_id
             }, status=404)
-        
+
+        # Public Chat URL auth gate (submit-human-input)
+        auth_block = _enforce_public_chat_auth(request, deployment)
+        if auth_block is not None:
+            return auth_block
+
+
         # Parse request body
         try:
             data = json.loads(request.body) if request.body else {}
@@ -2074,6 +2472,11 @@ def upload_chat_file(request, project_id):
         if not deployment.file_uploads_enabled:
             return JsonResponse({'error': 'File uploads are not enabled for this chatbot'}, status=403)
 
+        # Public Chat URL auth gate
+        auth_block = _enforce_public_chat_auth(request, deployment)
+        if auth_block is not None:
+            return auth_block
+
         # Parse session_id
         session_id = request.POST.get('session_id', '').strip()
         if not session_id:
@@ -2267,7 +2670,19 @@ def embed_chatbot_html(request, project_id):
                 status=404,
                 content_type='text/html'
             )
-        
+
+        # Public Chat URL auth gate — when auth is enabled, the iframe must
+        # only render for requests that carry a valid public-chat cookie or
+        # come from an allowed external origin. Prevents direct /embed/ URL
+        # bypass of the /chat/<id> login form.
+        auth_block = _enforce_public_chat_auth(request, deployment)
+        if auth_block is not None:
+            return HttpResponse(
+                '<html><body style="font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#f5f5f7;"><p style="color:#6b7280;">Please sign in to use this chat.</p></body></html>',
+                status=401,
+                content_type='text/html'
+            )
+
         # Absolute URL fallback (e.g. external embeds). In-app iframe must use the browser's
         # origin — build_absolute_uri often yields 127.0.0.1:8000 or internal Docker host behind
         # Vite/nginx proxy, which the user's browser cannot reach → fetch fails ("connection problem").
@@ -2355,11 +2770,10 @@ def embed_chatbot_html(request, project_id):
     }}
     
     .chat-header {{
-      {'display: none;' if hide_header else ''}
       padding: 20px 24px;
       background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
       color: var(--font-color, #000);
-      display: flex;
+      display: {'none' if hide_header else 'flex'};
       align-items: center;
       gap: 14px;
       position: relative;
@@ -2497,7 +2911,7 @@ def embed_chatbot_html(request, project_id):
       max-width: 85%;
       padding: 12px 16px;
       border-radius: 18px;
-      line-height: 1.5;
+      line-height: 1.6;
       position: relative;
       box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
     }}
@@ -2547,7 +2961,7 @@ def embed_chatbot_html(request, project_id):
       color: #1e293b;
       font-family: inherit;
       min-height: 24px;
-      max-height: 120px;
+      max-height: 310px;
       overflow-y: auto;
     }}
     
@@ -2779,7 +3193,7 @@ def embed_chatbot_html(request, project_id):
     }}
     
     .bubble markdown p {{
-      margin: 8px 0;
+      margin: 6px 0;
     }}
     
     .bubble markdown p:first-child {{
@@ -2826,12 +3240,39 @@ def embed_chatbot_html(request, project_id):
     }}
     
     .bubble markdown ul, .bubble markdown ol {{
-      margin: 8px 0;
-      padding-left: 24px;
+      margin: 4px 0 8px;
+      padding-left: 22px;
     }}
-    
+
     .bubble markdown li {{
-      margin: 4px 0;
+      margin: 1px 0;
+      line-height: 1.45;
+    }}
+
+    /* Kill the stacked margin when a list follows a paragraph — the
+       paragraph's own margin-bottom is enough breathing room. */
+    .bubble markdown p + ul,
+    .bubble markdown p + ol {{
+      margin-top: 0;
+    }}
+
+    /* Tighten heading → body paragraph spacing. */
+    .bubble markdown h1 + p,
+    .bubble markdown h2 + p,
+    .bubble markdown h3 + p {{
+      margin-top: 2px;
+    }}
+
+    /* Section labels auto-generated by renderMarkdown (a <p> whose only
+       child is a <strong>, e.g. "(1) Feature summary") get extra top air
+       so consecutive sections feel distinct. */
+    .bubble markdown p:has(> strong:only-child) {{
+      margin-top: 12px;
+      margin-bottom: 4px;
+    }}
+
+    .bubble markdown p:first-child:has(> strong:only-child) {{
+      margin-top: 0;
     }}
     
     .bubble markdown blockquote {{
@@ -3236,7 +3677,24 @@ def embed_chatbot_html(request, project_id):
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
-    
+
+    // Auto-separate numbered sections that the LLM emits with single newlines.
+    // Matches both "(N) Title" and "N) Title" forms, turning each into its
+    // own bolded paragraph so the rendered response has real vertical rhythm
+    // instead of one dense <p> with stacked <br>s.
+    html = html.replace(/([^\\n])\\n(?=(?:\\(\\d+\\)|\\d+\\))\\s+\\S)/g, '$1\\n\\n');
+    html = html.replace(/^((?:\\(\\d+\\)|\\d+\\))\\s+[^\\n]{{1,120}})$/gm, '**$1**');
+
+    // Normalize Unicode bullets to "- " so the list detector recognises them.
+    // LLMs emit many variants — •, ·, ●, ▪, ○, ◦, ▫, ■, en/em-dashes — and
+    // sometimes prefix them with leading whitespace. If we don't normalise,
+    // each bullet line is treated as a plain paragraph and <p> margins stack
+    // between items (~16px per gap) instead of tight <li> spacing.
+    html = html.replace(
+      /^\\s*[\\u2022\\u00B7\\u25CF\\u25AA\\u25CB\\u25E6\\u2043\\u2219\\u25AB\\u25A0\\u2013\\u2014]\\s+/gm,
+      '- '
+    );
+
     // Headers
     html = html.replace(/^######\\s+(.+)$/gm, '<h6>$1</h6>');
     html = html.replace(/^#####\\s+(.+)$/gm, '<h5>$1</h5>');
@@ -3266,7 +3724,7 @@ def embed_chatbot_html(request, project_id):
       const line = lines[i];
       const orderedMatch = line.match(/^(\\d+)\\.\\s+(.+)$/);
       const unorderedMatch = line.match(/^[-*]\\s+(.+)$/);
-      
+
       if (orderedMatch) {{
         if (!inOrderedList) {{
           if (inUnorderedList) {{ processedLines.push('</ul>'); inUnorderedList = false; }}
@@ -3281,6 +3739,24 @@ def embed_chatbot_html(request, project_id):
           inUnorderedList = true;
         }}
         processedLines.push('<li>' + unorderedMatch[1] + '</li>');
+      }} else if ((inOrderedList || inUnorderedList) && /^\\s*$/.test(line)) {{
+        // Blank line inside a list — peek ahead. If the next non-blank line is
+        // the same kind of bullet, keep the <ul>/<ol> open and absorb this
+        // blank line. Otherwise close the list as before. Without this,
+        // LLM responses with blank lines between bullets render as N separate
+        // <ul> elements, each contributing extra vertical margin.
+        let j = i + 1;
+        while (j < lines.length && /^\\s*$/.test(lines[j])) j++;
+        if (j < lines.length) {{
+          const nextOrdered = lines[j].match(/^(\\d+)\\.\\s+(.+)$/);
+          const nextUnordered = lines[j].match(/^[-*]\\s+(.+)$/);
+          if ((inOrderedList && nextOrdered) || (inUnorderedList && nextUnordered)) {{
+            continue;  // keep list open, drop the blank line
+          }}
+        }}
+        if (inOrderedList) {{ processedLines.push('</ol>'); inOrderedList = false; }}
+        if (inUnorderedList) {{ processedLines.push('</ul>'); inUnorderedList = false; }}
+        processedLines.push(line);
       }} else {{
         if (inOrderedList) {{ processedLines.push('</ol>'); inOrderedList = false; }}
         if (inUnorderedList) {{ processedLines.push('</ul>'); inUnorderedList = false; }}
@@ -3602,7 +4078,7 @@ def embed_chatbot_html(request, project_id):
   // Auto-resize textarea
   function autoResize() {{
     inputEl.style.height = 'auto';
-    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 310) + 'px';
   }}
   inputEl.addEventListener('input', autoResize);
 
@@ -4054,6 +4530,9 @@ def embed_chatbot_html(request, project_id):
         # Remove restrictive headers that block fetch from cross-origin iframes
         response['Cross-Origin-Opener-Policy'] = 'unsafe-none'
         response['Cross-Origin-Embedder-Policy'] = 'unsafe-none'
+        # Rolling 4h TTL — refresh the cookie on every /embed/ load so keeping
+        # the chat window open during activity extends the session.
+        _maybe_refresh_public_chat_cookie(request, response, deployment)
         return response
 
     except Exception as e:
