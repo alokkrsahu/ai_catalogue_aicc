@@ -2,46 +2,51 @@
 Splitter Executor
 =================
 
-Executes a ``SplitterAgent`` node: given an input text and the list of
-downstream agents directly connected to the splitter, force the LLM (via
-tool-calling with ``tool_choice=required``) to produce a structured
-allocation — a subtask string for each downstream agent that has real
-work to do. Agents not allocated a subtask are treated as pruned
-branches, same mechanism ClassifierAgent uses.
+Executes a ``SplitterAgent`` node: given an input text and the set of
+directly-connected downstream agents, force the LLM (via tool-calling with
+``tool_choice=required``) to produce a structured allocation — a subtask
+string for each agent that should receive work. Agents not allocated a
+subtask are treated as pruned branches (same mechanism ClassifierAgent
+uses with its categories).
+
+Design intent
+-------------
+Each outgoing edge from the Splitter defines one allocation target.
+The target agent's own ``name`` and ``system_message`` describe what
+that slot does — there is no separate slot configuration on the
+SplitterAgent node. "Slots inherit the config of the agents they're
+connected to" — so the splitter just needs to look downstream.
+
+Architecturally symmetric with ClassifierAgent:
+  * ClassifierAgent has `categories` — LLM picks exactly ONE
+  * SplitterAgent has `downstream_agents` (derived from outgoing edges)
+    — LLM picks a SUBSET, each with a subtask
 
 Design notes
 ------------
 * **One forced tool call** returning the FULL allocation in a single
-  structured output. No multi-tool dance — simpler to parse, easier for
-  the LLM to produce coherently.
-* **Strict partition by default, overlap_allowed toggle** — the system
-  prompt wording changes based on the ``overlap_allowed`` flag on the
-  SplitterAgent node. Strict mode tells the LLM "each piece of the
-  input should go to exactly one agent"; overlap mode allows the same
-  content to appear in multiple subtasks.
-* **Pruning** — downstream agents that aren't given a subtask are
-  reported in the ``pruned_target_ids`` set and the caller marks their
-  ``executed_nodes`` entries with the branch-skipped sentinel. Same
-  downstream aggregation logic that already handles classifier pruning
-  filters them out.
-* **Per-target output** — the splitter's own entry in ``executed_nodes``
-  is a structured dict ``{"__per_target__": {target_id: subtask},
-  "__input__": original}`` so the aggregator can pull the right
-  subtask when a downstream agent asks for the splitter's output.
-* **Pure router** — the splitter produces no text output of its own.
-  Its "output" is the allocation. Downstream agents execute with their
-  allocated subtask as input.
+  structured output.
+* **Strict partition by default, overlap_allowed toggle** — system-prompt
+  wording differs based on the ``overlap_allowed`` flag.
+* **Pruning** — agents not in the allocation contribute
+  ``pruned_target_ids``; the caller marks their branches with the
+  branch-skipped sentinel.
+* **Per-target output** — the splitter's entry in ``executed_nodes`` is
+  ``{"__kind__": "splitter", "__per_target__": {target_id: subtask},
+  "__input__": ...}``. Downstream aggregators look up their own
+  subtask via their node id.
+* **Pure router** — splitter produces no content of its own.
 """
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 logger = logging.getLogger("conversation_orchestrator")
 
 
-# Same sentinel the ClassifierAgent uses — downstream aggregator already
-# knows how to filter it out (workflow_parser.aggregate_multiple_inputs).
+# Reuse the ClassifierAgent skipped sentinel — downstream aggregator already
+# knows how to filter it out. Exported as BRANCH_SKIPPED_SENTINEL for clarity.
 from .classifier_executor import CLASSIFIER_SKIPPED_SENTINEL as BRANCH_SKIPPED_SENTINEL
 
 
@@ -51,17 +56,17 @@ class SplitterAllocationError(Exception):
 
 def _build_allocation_tool(downstream_agents: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Build the single ``allocate_subtasks`` tool that the splitter LLM is
-    forced to call. The schema encodes the list of downstream agents so
-    the LLM knows exactly which names are allowed."""
+    forced to call. The schema encodes the list of agent NAMES so the LLM
+    knows exactly which names are allowed."""
     allowed_names = [a.get("name", "") for a in downstream_agents]
     return {
         "type": "function",
         "function": {
             "name": "allocate_subtasks",
             "description": (
-                "Emit the task allocation for all downstream agents that should "
-                "receive work. Agents omitted from this list are pruned for this "
-                "input (their branch will not execute)."
+                "Emit the task allocation for the agents that should receive "
+                "work. Agents omitted from this list are pruned for this input "
+                "(their branch will not execute)."
             ),
             "parameters": {
                 "type": "object",
@@ -69,10 +74,10 @@ def _build_allocation_tool(downstream_agents: List[Dict[str, Any]]) -> Dict[str,
                     "allocations": {
                         "type": "array",
                         "description": (
-                            "One entry per downstream agent that should do work. "
-                            "Omit agents with no relevant subtask — they'll be "
-                            "pruned. Names MUST match the agent names from the "
-                            "system prompt EXACTLY."
+                            "One entry per agent that should do work. Omit "
+                            "agents with no relevant subtask — they'll be "
+                            "pruned. Agent names MUST match the names listed "
+                            "in the system prompt EXACTLY."
                         ),
                         "items": {
                             "type": "object",
@@ -85,17 +90,16 @@ def _build_allocation_tool(downstream_agents: List[Dict[str, Any]]) -> Dict[str,
                                     "type": "string",
                                     "description": (
                                         "The specific piece of work this agent "
-                                        "should do. Write it as if you were "
-                                        "briefing the agent — they see this as "
+                                        "should do. Written as a brief for "
+                                        "the downstream agent — it becomes "
                                         "their input message."
                                     ),
                                 },
                                 "reasoning": {
                                     "type": "string",
                                     "description": (
-                                        "One short sentence explaining why this "
-                                        "subtask fits this agent's role. Shown "
-                                        "in logs only."
+                                        "One short sentence explaining why "
+                                        "this subtask fits this agent. Logged."
                                     ),
                                 },
                             },
@@ -109,16 +113,12 @@ def _build_allocation_tool(downstream_agents: List[Dict[str, Any]]) -> Dict[str,
     }
 
 
-def _build_system_prompt(
-    downstream_agents: List[Dict[str, Any]],
-    overlap_allowed: bool,
-) -> str:
-    """Auto-generated system prompt for the splitter LLM. Lists each
-    downstream agent's name + role (from their system_message) so the
-    LLM can reason about which agent should handle what piece of work."""
+def _build_system_prompt(downstream_agents: List[Dict[str, Any]], overlap_allowed: bool) -> str:
+    """Auto-generated system prompt for the splitter LLM. Lists each downstream
+    agent's name + role so the LLM knows what kind of work each agent handles."""
     lines = [
         "You are a task splitter. Your job is to read the input and allocate "
-        "one specific subtask to each downstream agent based on their role.",
+        "one specific subtask to each relevant agent based on the agent's role.",
         "",
         "Rules:",
         "- You MUST call exactly ONE tool: `allocate_subtasks`. Do not answer in prose.",
@@ -135,22 +135,22 @@ def _build_system_prompt(
             "agent. Do not duplicate content across subtasks."
         )
     lines.append(
-        "- If a downstream agent has NO relevant subtask for this input, OMIT them "
-        "from the allocation list — their branch will be pruned for this turn."
+        "- If an agent has NO relevant subtask for this input, OMIT it from the "
+        "allocation list — that agent's branch will be pruned for this turn."
     )
     lines.append(
-        "- Each subtask should be written as a clear brief the receiving agent "
-        "can act on directly (it becomes their input message)."
+        "- Each subtask should be written as a clear brief — it becomes the "
+        "input message for that downstream agent."
     )
     lines.append("")
     lines.append("Downstream agents available for allocation:")
     for idx, agent in enumerate(downstream_agents, start=1):
         name = agent.get("name", f"Agent {idx}")
         role = (agent.get("system_message") or agent.get("description") or "").strip()
-        role_snippet = role[:400] + ("…" if len(role) > 400 else "")
         lines.append(f"  {idx}. {name}")
-        if role_snippet:
-            lines.append(f"     Role: {role_snippet}")
+        if role:
+            snippet = role[:400] + ("…" if len(role) > 400 else "")
+            lines.append(f"     Role: {snippet}")
     return "\n".join(lines)
 
 
@@ -182,9 +182,10 @@ async def execute_splitter(
     input_text : str
         The aggregated upstream input the splitter must decompose.
     downstream_agents : list of dict
-        Each entry must have ``id``, ``name``, and ``system_message`` (or
-        ``description``). These are the agents directly connected to the
-        splitter as targets.
+        Each entry must have ``id``, ``name``, and optionally ``system_message``
+        and ``description``. Derived at runtime from the splitter's outgoing
+        edges by the workflow executor — the splitter has no independent
+        "slot" configuration; each connected agent IS a slot.
     llm_provider, provider_name, event_callback
         Same semantics as classifier_executor.
 
@@ -192,9 +193,9 @@ async def execute_splitter(
     -------
     dict
         {
-          "per_target": {target_id: subtask_str, ...},  # only for allocated targets
-          "pruned_target_ids": [target_id, ...],        # targets NOT in allocation
-          "raw_allocations": [...],                     # the LLM's allocation array (for logging)
+          "per_target": {target_id: subtask_str, ...},   # only allocated targets
+          "pruned_target_ids": [target_id, ...],         # targets NOT in allocation
+          "raw_allocations": [...],                      # the LLM's allocation array (for logging)
         }
 
     Raises
@@ -208,25 +209,23 @@ async def execute_splitter(
 
     if len(downstream_agents) < 2:
         raise SplitterAllocationError(
-            f"SplitterAgent '{splitter_name}' must have at least 2 downstream "
-            f"agents connected (got {len(downstream_agents)})."
+            f"SplitterAgent '{splitter_name}' must have at least 2 downstream agents "
+            f"(got {len(downstream_agents)})."
         )
 
-    # Build a name → target_id map so we can translate the LLM's allocation
-    # back to node ids. Names can repeat in theory (user mistake), so we keep
-    # only the first occurrence and log a warning if duplicates are found.
-    name_to_id: Dict[str, str] = {}
+    # Build a name → target_id map so the LLM's allocation can be translated back.
+    name_to_target_id: Dict[str, str] = {}
     for a in downstream_agents:
         name = (a.get("name") or "").strip()
         if not name:
             continue
-        if name in name_to_id:
+        if name in name_to_target_id:
             logger.warning(
-                f"🪓 SPLITTER: downstream agents have duplicate name '{name}' — "
-                "only the first occurrence will receive work via splitter allocation."
+                f"🪓 SPLITTER: duplicate agent name '{name}' downstream of '{splitter_name}' — "
+                "only the first occurrence will receive work via allocation."
             )
             continue
-        name_to_id[name] = a.get("id")
+        name_to_target_id[name] = a.get("id")
 
     tools = [_build_allocation_tool(downstream_agents)]
     system_prompt = _build_system_prompt(downstream_agents, overlap_allowed)
@@ -237,9 +236,9 @@ async def execute_splitter(
         {
             "role": "user",
             "content": (
-                "Split the following input into subtasks for the downstream "
-                "agents listed above. Remember: call exactly ONE tool "
-                "(`allocate_subtasks`) with your complete allocation.\n\n"
+                "Split the following input into subtasks for the agents listed "
+                "above. Call exactly ONE tool (`allocate_subtasks`) with your "
+                "complete allocation.\n\n"
                 "Input:\n"
                 f"{input_text}"
             ),
@@ -306,28 +305,26 @@ async def execute_splitter(
             logger.warning(f"🪓 SPLITTER: {last_error}")
             continue
 
-        # Validate the allocation — every referenced name must exist in
-        # the downstream list. Unknown names are dropped with a warning
-        # (the branch will simply be pruned).
+        # Validate each allocation — agent names must exist in the downstream list.
         per_target: Dict[str, str] = {}
         raw_allocations: List[Dict[str, Any]] = []
         for entry in allocations:
             if not isinstance(entry, dict):
                 continue
-            agent_name = (entry.get("agent_name") or "").strip()
+            agent_name = (entry.get("agent_name") or entry.get("slot_name") or "").strip()
             subtask = (entry.get("subtask") or "").strip()
             reasoning = (entry.get("reasoning") or "").strip()
             if not agent_name or not subtask:
                 continue
-            target_id = name_to_id.get(agent_name)
+            target_id = name_to_target_id.get(agent_name)
             if not target_id:
                 logger.warning(
                     f"🪓 SPLITTER: LLM allocated to unknown agent '{agent_name}' — "
-                    "dropped. Known names: " + ", ".join(repr(n) for n in name_to_id.keys())
+                    "dropped. Known agents: " + ", ".join(repr(n) for n in name_to_target_id.keys())
                 )
                 continue
             if target_id in per_target:
-                # Same agent named twice; concatenate subtasks so nothing is lost.
+                # Same target named twice; concatenate so nothing is lost.
                 per_target[target_id] = per_target[target_id] + "\n\n" + subtask
             else:
                 per_target[target_id] = subtask
@@ -338,14 +335,12 @@ async def execute_splitter(
             logger.warning(f"🪓 SPLITTER: {last_error}")
             continue
 
-        # Pruned = every downstream agent NOT in the allocation
-        allocated_ids = set(per_target.keys())
-        pruned_target_ids = [
-            a.get("id") for a in downstream_agents if a.get("id") not in allocated_ids
-        ]
+        # Pruned = every downstream target NOT in the allocation
+        allocated_target_ids = set(per_target.keys())
+        pruned_target_ids = [a.get("id") for a in downstream_agents if a.get("id") not in allocated_target_ids]
 
         logger.info(
-            f"✅ SPLITTER '{splitter_name}': allocated {len(per_target)} subtask(s), "
+            f"✅ SPLITTER '{splitter_name}': allocated {len(per_target)} agent(s), "
             f"pruned {len(pruned_target_ids)} branch(es)"
         )
         if event_callback:
@@ -369,8 +364,6 @@ async def execute_splitter(
         f"Splitter '{splitter_name}' failed to produce a valid allocation after retry: {last_error}"
     )
 
-
-# ── Sentinel / helpers for executor integration ───────────────────────
 
 __all__ = [
     "BRANCH_SKIPPED_SENTINEL",
