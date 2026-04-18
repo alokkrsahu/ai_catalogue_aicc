@@ -54,6 +54,10 @@ class PageCapture:
     word_count: int = 0
     truncated: bool = False  # text-level truncation flag
     extraction_error: Optional[str] = None
+    # Informational warning (non-fatal) — set when the page appears to be a
+    # JavaScript SPA. Surfaced even when some content was still extracted so
+    # downstream consumers can flag the page as potentially incomplete.
+    spa_warning: Optional[str] = None
     anchor_fragment: Optional[str] = None  # the #fragment from the original URL, if any
 
     def to_dict(self) -> Dict[str, Any]:
@@ -108,6 +112,8 @@ class WebsiteFetcherService:
         r'banner[-_]', r'promo[-_]',
         r'toc\b', r'table[-_]of[-_]contents',
     ]
+    # Pre-compiled once at import; avoids re-compiling 25 regexes per page parse.
+    _REMOVE_PATTERNS_COMPILED = [re.compile(p, re.I) for p in REMOVE_PATTERNS]
 
     # Minimum heading text length — reduced to 3 to preserve short but valid headings
     # like "API", "FAQ", "Usage", "Setup", "Overview", "Reference", etc.
@@ -170,16 +176,21 @@ class WebsiteFetcherService:
         re.I,
     )
 
+    # Default concurrency cap for parallel fetching — prevents DNS floods and
+    # target-host throttling when a URL list is large.
+    DEFAULT_FETCH_CONCURRENCY = 10
+
     def __init__(self):
         """Initialize fetcher with settings from Django config."""
         websearch_config = getattr(settings, 'WEBSEARCH_CONFIG', {})
         self.timeout = websearch_config.get('REQUEST_TIMEOUT', self.DEFAULT_TIMEOUT)
         self.max_content_length = websearch_config.get('MAX_CONTENT_LENGTH', self.DEFAULT_MAX_CONTENT_LENGTH)
         self.max_html_bytes = websearch_config.get('MAX_HTML_BYTES', self.DEFAULT_MAX_HTML_BYTES)
+        self.fetch_concurrency = websearch_config.get('FETCH_CONCURRENCY', self.DEFAULT_FETCH_CONCURRENCY)
         logger.info(
             f"🌐 WEBSITE FETCHER: Initialized "
             f"(timeout: {self.timeout}s, max_content: {self.max_content_length} chars, "
-            f"max_html_bytes: {self.max_html_bytes})"
+            f"max_html_bytes: {self.max_html_bytes}, fetch_concurrency: {self.fetch_concurrency})"
         )
 
     # =========================================================================
@@ -219,10 +230,16 @@ class WebsiteFetcherService:
             'Connection': 'keep-alive',
         }
 
-        async with aiohttp.ClientSession(timeout=client_timeout, headers=headers) as session:
-            # Create tasks for all URLs
-            tasks = [self._fetch_single(session, url) for url in urls]
+        # Bound concurrency so large URL lists don't trigger DNS floods or
+        # target-host throttling. Small lists pay no overhead.
+        sem = asyncio.Semaphore(max(1, self.fetch_concurrency))
 
+        async with aiohttp.ClientSession(timeout=client_timeout, headers=headers) as session:
+            async def _bounded_fetch(u: str):
+                async with sem:
+                    return await self._fetch_single(session, u)
+
+            tasks = [_bounded_fetch(url) for url in urls]
             # Execute all tasks in parallel, capturing exceptions
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -325,8 +342,14 @@ class WebsiteFetcherService:
                     html = raw_bytes.decode('utf-8', errors='replace')
                 capture.raw_html = html
 
-                # Parse HTML and populate sections + derived text metadata
-                self._populate_from_html(capture, html, fragment=fragment)
+                # Parse HTML and populate sections + derived text metadata.
+                # BeautifulSoup + DOM walk is pure CPU work — run in a worker
+                # thread so concurrent page parses don't serialise on the
+                # asyncio event loop.
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None, self._populate_from_html, capture, html, fragment
+                )
 
                 return capture.to_dict()
 
@@ -778,8 +801,7 @@ class WebsiteFetcherService:
                 if _anc.name:
                     _protected_ids.add(id(_anc))
 
-            for pattern in self.REMOVE_PATTERNS:
-                pat = re.compile(pattern, re.I)
+            for pat in self._REMOVE_PATTERNS_COMPILED:
                 for element in list(soup.find_all(class_=pat)):
                     if _full_body_fallback:
                         element.decompose()
@@ -824,9 +846,22 @@ class WebsiteFetcherService:
 
             capture.sections = sections
 
-            # If no content was extracted AND we detected a SPA, surface the warning
-            if not sections and spa_warning:
-                capture.extraction_error = spa_warning
+            # Surface SPA detection as an informational warning regardless of
+            # whether we managed to extract partial content. If extraction
+            # returned nothing at all, also promote it to extraction_error so
+            # downstream indexing skips the page.
+            if spa_warning:
+                capture.spa_warning = spa_warning
+                if not sections:
+                    capture.extraction_error = spa_warning
+                else:
+                    # Partial extraction: keep content but flag the page so
+                    # callers (UI, indexer) know it may be incomplete.
+                    logger.info(
+                        f"⚠️ CONTENT EXTRACT: SPA detected but partial content "
+                        f"extracted for {capture.url[:80]} — "
+                        f"{len(sections)} sections kept"
+                    )
 
             # --- Build flattened text for metrics and LLM context ---
             parts: List[str] = []

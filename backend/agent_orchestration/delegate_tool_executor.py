@@ -426,7 +426,7 @@ async def run_delegate_doc_tool_loop(
                 _target_url = url_tool_map.get(tc["name"], "")
                 if not _target_url:
                     return tc, f"[Unknown URL tool: {tc['name']}]"
-                _ttl = delegate_node.get('data', {}).get('web_search_cache_ttl', 3600)
+                _ttl = delegate_node.get('data', {}).get('web_search_cache_ttl', 2592000)
                 try:
                     result = await websearch_handler._get_url_context([_target_url], _ttl, project_id)
                 except Exception as exc:

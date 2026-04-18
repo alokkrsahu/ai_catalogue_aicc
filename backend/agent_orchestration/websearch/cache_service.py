@@ -40,6 +40,7 @@ class WebSearchCacheService:
     URL_PREFIX = "websearch_url_"
     SEARCH_PREFIX = "websearch_query_"
     INDEX_FLAG_PREFIX = "websearch_milvus_idx_"
+    EMBED_PREFIX = "websearch_emb_"
     
     def __init__(self):
         """Initialize cache service with settings from Django config."""
@@ -166,6 +167,69 @@ class WebSearchCacheService:
             logger.error(f"❌ WEBSEARCH CACHE: Batch cache failed: {e}")
             return 0
     
+    # =========================================================================
+    # Per-URL Chunk Embedding Caching
+    # =========================================================================
+
+    def _make_embed_cache_key(self, url: str, project_id: str) -> str:
+        pid = _normalize_project_id(project_id)
+        url_hash = hashlib.md5(url.encode('utf-8')).hexdigest()
+        return f"{self.EMBED_PREFIX}{pid}_{url_hash}"
+
+    def get_cached_embeddings(
+        self, url: str, project_id: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        Get cached chunk-with-embedding list for a URL.
+        Each entry is a dict with content/section_heading/section_type/
+        chunk_index/word_count/url/url_hash/title/embedding.
+        """
+        return cache.get(self._make_embed_cache_key(url, project_id))
+
+    def cache_embeddings(
+        self,
+        url: str,
+        project_id: str,
+        chunks_with_embeddings: List[Dict[str, Any]],
+        ttl: Optional[int] = None,
+    ) -> bool:
+        """Cache the chunk+embedding list for a URL (per-project)."""
+        timeout = ttl if ttl is not None else self.default_ttl
+        try:
+            cache.set(
+                self._make_embed_cache_key(url, project_id),
+                chunks_with_embeddings,
+                timeout=timeout,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"❌ WEBSEARCH CACHE: Failed to cache embeddings for {url[:50]}: {e}")
+            return False
+
+    def get_cached_embeddings_batch(
+        self, urls: List[str], project_id: str
+    ) -> Dict[str, Optional[List[Dict[str, Any]]]]:
+        """Batch get cached embeddings for multiple URLs."""
+        key_to_url = {self._make_embed_cache_key(url, project_id): url for url in urls}
+        try:
+            cached = cache.get_many(list(key_to_url.keys()))
+        except Exception as e:
+            logger.error(f"❌ WEBSEARCH CACHE: Batch embed get failed: {e}")
+            return {url: None for url in urls}
+        out: Dict[str, Optional[List[Dict[str, Any]]]] = {url: None for url in urls}
+        for key, value in cached.items():
+            url = key_to_url.get(key)
+            if url is not None:
+                out[url] = value
+        return out
+
+    def invalidate_embeddings(self, url: str, project_id: str) -> bool:
+        try:
+            cache.delete(self._make_embed_cache_key(url, project_id))
+            return True
+        except Exception:
+            return False
+
     # =========================================================================
     # Search Results Caching
     # =========================================================================
@@ -312,6 +376,7 @@ class WebSearchCacheService:
                 cache.delete_pattern(f"{self.URL_PREFIX}{pid}_*")
                 cache.delete_pattern(f"{self.SEARCH_PREFIX}{pid}_*")
                 cache.delete_pattern(f"{self.INDEX_FLAG_PREFIX}{pid}_*")
+                cache.delete_pattern(f"{self.EMBED_PREFIX}{pid}_*")
                 logger.info(f"🗑️ WEBSEARCH CACHE: Cleared all websearch cache for project {project_id[:8]}")
                 return True
 
@@ -323,7 +388,7 @@ class WebSearchCacheService:
                 key_prefix = getattr(cache, 'key_prefix', '')
                 version = getattr(cache, 'version', 1)
                 deleted = 0
-                for prefix in (self.URL_PREFIX, self.SEARCH_PREFIX, self.INDEX_FLAG_PREFIX):
+                for prefix in (self.URL_PREFIX, self.SEARCH_PREFIX, self.INDEX_FLAG_PREFIX, self.EMBED_PREFIX):
                     full_pattern = f"{key_prefix}:{version}:{prefix}{pid}_*"
                     cursor = 0
                     while True:

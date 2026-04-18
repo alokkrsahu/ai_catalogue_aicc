@@ -2529,7 +2529,7 @@
               
               <!-- Human Input Required Badge - Visual Feedback Enhancement -->
               {#if isRequiringInput}
-                <div 
+                <div
                   class="absolute -top-2 -right-2 w-6 h-6 bg-orange-500 text-white rounded-full flex items-center justify-center text-xs font-bold shadow-lg animate-pulse z-50"
                   title="Human input required"
                   style="border: 2px solid white;"
@@ -2537,10 +2537,29 @@
                   <i class="fas fa-user text-xs"></i>
                 </div>
                 <!-- Pulsing ring animation -->
-                <div 
+                <div
                   class="absolute -top-2 -right-2 w-6 h-6 border-2 border-orange-400 rounded-full animate-ping z-40"
                   style="opacity: 0.5;"
                 ></div>
+              {/if}
+
+              <!-- Websearch badge - signals the agent hits the web at runtime -->
+              {#if node.data?.web_search_enabled}
+                {@const _wsMode = node.data?.web_search_mode || 'general'}
+                {@const _wsUrlCount = (node.data?.web_search_urls || []).length}
+                {@const _wsDomainCount = (node.data?.web_search_domains || []).length}
+                {@const _wsDetail = _wsMode === 'urls'
+                  ? `${_wsUrlCount} URL${_wsUrlCount === 1 ? '' : 's'}`
+                  : _wsMode === 'domains'
+                    ? `${_wsDomainCount} domain${_wsDomainCount === 1 ? '' : 's'}`
+                    : `max ${node.data?.web_search_max_results ?? 5}`}
+                <div
+                  class="absolute -top-2 -left-2 w-6 h-6 bg-green-600 text-white rounded-full flex items-center justify-center shadow-md z-40"
+                  title="WebSearch enabled · mode: {_wsMode} · {_wsDetail}"
+                  style="border: 2px solid white;"
+                >
+                  <i class="fas fa-globe text-[10px]"></i>
+                </div>
               {/if}
               
               <!-- Connection Handles - Enhanced for GroupChatManager -->

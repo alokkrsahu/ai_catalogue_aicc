@@ -19,7 +19,9 @@
     type PromptGenerationResponse 
   } from '$lib/services/promptGenerationService';
   import api from '$lib/services/api';
-  
+  import type { AgentNodeData } from '$lib/types';
+  import WebsearchSection from './WebsearchSection.svelte';
+
   export let node: any;
   /** Passed by parent (e.g. AgentOrchestrationInterface); kept for API compatibility. */
   export let capabilities: any;
@@ -46,7 +48,7 @@
   // Editable node data - Initialize from current node
   let nodeName = node.data.name || node.data.label || node.type;
   let nodeDescription = node.data.description || '';
-  let nodeConfig = { ...node.data };
+  let nodeConfig: AgentNodeData = { ...node.data };
   
   // API Key based models state
   let availableModels: ModelInfo[] = [];
@@ -100,63 +102,8 @@
   let descriptionDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   let promptGenerationMetadata: any = null;
 
-  // Clear web cache state
-  let clearingWebCache = false;
-  let webCacheCleared = false;
-
-  async function doClearWebCache() {
-    if (!projectId || clearingWebCache) return;
-    clearingWebCache = true;
-    webCacheCleared = false;
-    try {
-      await api.post(`/agent-orchestration/projects/${projectId}/clear-websearch-cache/`, {});
-      webCacheCleared = true;
-      setTimeout(() => { webCacheCleared = false; }, 3000);
-    } catch (err: any) {
-      console.warn('Clear web cache failed:', err);
-    } finally {
-      clearingWebCache = false;
-    }
-  }
-
-  // Web search URL indexing state
-  let syncingWebIndex = false;
-  let webIndexStatus: string | null = null;
-  let webIndexDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-
-  function debouncedSyncWebIndex(urls: string[]) {
-    if (webIndexDebounceTimer) clearTimeout(webIndexDebounceTimer);
-    webIndexDebounceTimer = setTimeout(() => {
-      doSyncWebIndex(urls);
-    }, 2000); // 2s debounce — user stops typing
-  }
-
-  async function doSyncWebIndex(urls: string[]) {
-    if (!projectId || syncingWebIndex) return;
-    const validUrls = urls.filter(u => u.startsWith('http://') || u.startsWith('https://'));
-    if (validUrls.length === 0) return;
-    syncingWebIndex = true;
-    webIndexStatus = null;
-    try {
-      const cacheTtl = nodeConfig.web_search_cache_ttl ?? 2592000;
-      const res = await api.post(`/agent-orchestration/projects/${projectId}/sync-websearch-index/`, {
-        urls: validUrls,
-        cache_ttl: cacheTtl,
-      });
-      const d = res.data;
-      if (d.indexed > 0 || d.removed > 0) {
-        webIndexStatus = `Indexed ${d.indexed} new, removed ${d.removed} stale` + (d.failed > 0 ? `, ${d.failed} failed` : '');
-      } else {
-        webIndexStatus = `All ${d.already_indexed} URLs up to date`;
-      }
-      setTimeout(() => { webIndexStatus = null; }, 5000);
-    } catch (err: any) {
-      console.warn('Sync web index failed:', err);
-      webIndexStatus = null;
-    } finally {
-      syncingWebIndex = false;
-    }
-  }
+  // Websearch state + helpers (cache clear, URL sync, URL summaries, dedupe
+  // cap, etc.) now live in WebsearchSection.svelte.
 
   // Initialize defaults for new nodes
   function initializeNodeDefaults() {
@@ -2633,223 +2580,14 @@
         </div>
       {/if}
       
-      <!-- WEBSEARCH TOGGLE - For UserProxyAgent -->
-      <div>
-        <div class="flex items-center justify-between">
-          <label class="text-sm font-medium text-gray-700">WebSearch</label>
-          <label class="relative inline-flex items-center cursor-pointer">
-            <input
-              type="checkbox"
-              checked={nodeConfig.web_search_enabled}
-              on:change={(e) => {
-                nodeConfig.web_search_enabled = e.target.checked;
-                
-                if (e.target.checked) {
-                  // Set default values when enabling WebSearch
-                  if (!nodeConfig.web_search_mode) {
-                    nodeConfig.web_search_mode = 'general';
-                  }
-                  if (!nodeConfig.web_search_cache_ttl) {
-                    nodeConfig.web_search_cache_ttl = 2592000; // 30 days default
-                  }
-                  if (!nodeConfig.web_search_max_results) {
-                    nodeConfig.web_search_max_results = 5;
-                  }
-                  if (!nodeConfig.web_search_urls) {
-                    nodeConfig.web_search_urls = [];
-                  }
-                  if (!nodeConfig.web_search_domains) {
-                    nodeConfig.web_search_domains = [];
-                  }
-                } else {
-                  // Clear configuration when disabling WebSearch
-                  nodeConfig.web_search_mode = '';
-                  nodeConfig.web_search_urls = [];
-                  nodeConfig.web_search_domains = [];
-                }
-                
-                nodeConfig = { ...nodeConfig };
-                updateNodeData();
-              }}
-              class="sr-only peer"
-            />
-            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-green-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-600"></div>
-          </label>
-        </div>
-        <p class="text-xs text-gray-500 mt-1">Enable web search capabilities to retrieve real-time information from the internet</p>
-      </div>
-      
-      <!-- WEBSEARCH CONFIGURATION - Show when WebSearch is enabled (UserProxyAgent) -->
-      {#if nodeConfig.web_search_enabled}
-        <div class="border border-green-200 rounded-lg p-4 bg-green-50">
-          <div class="flex items-center mb-3">
-            <i class="fas fa-globe text-green-600 mr-2"></i>
-            <h4 class="font-medium text-green-900">Web Search Configuration</h4>
-          </div>
-          
-          <!-- Search Mode Selection -->
-          <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-700 mb-2">Search Mode</label>
-            <select
-              bind:value={nodeConfig.web_search_mode}
-              on:change={updateNodeData}
-              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20 bg-white"
-            >
-              <option value="general">General Web Search</option>
-              <option value="domains">Search Specific Domains</option>
-              <option value="urls">Fetch Specific URLs</option>
-            </select>
-            <p class="text-xs text-gray-500 mt-1">
-              {#if nodeConfig.web_search_mode === 'general'}
-                Search the entire web using DuckDuckGo
-              {:else if nodeConfig.web_search_mode === 'domains'}
-                Restrict search to specific domains/websites
-              {:else if nodeConfig.web_search_mode === 'urls'}
-                Fetch content from specific URLs directly
-              {:else}
-                Select a search mode to configure web search
-              {/if}
-            </p>
-          </div>
-          
-          <!-- Domain List (for 'domains' mode) -->
-          {#if nodeConfig.web_search_mode === 'domains'}
-            <div class="mb-4">
-              <label class="block text-sm font-medium text-gray-700 mb-2">
-                Search Domains
-                <span class="text-xs text-gray-500 ml-1">(one per line)</span>
-              </label>
-              <textarea
-                value={(nodeConfig.web_search_domains || []).join('\n')}
-                on:input={(e) => {
-                  const domains = e.target.value.split('\n').filter(d => d.trim());
-                  nodeConfig.web_search_domains = domains;
-                  updateNodeData();
-                }}
-                rows="3"
-                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
-                placeholder="wikipedia.org&#10;docs.python.org&#10;developer.mozilla.org"
-              ></textarea>
-              <p class="text-xs text-gray-500 mt-1">Enter domain names (without https://) to restrict search results</p>
-            </div>
-          {/if}
-          
-          <!-- URL List (for 'urls' mode) -->
-          {#if nodeConfig.web_search_mode === 'urls'}
-            <div class="mb-4">
-              <label class="block text-sm font-medium text-gray-700 mb-2">
-                URLs to Fetch
-                <span class="text-xs text-gray-500 ml-1">(one per line)</span>
-              </label>
-              <textarea
-                value={(nodeConfig.web_search_urls || []).join('\n')}
-                on:input={(e) => {
-                  const urls = e.target.value.split('\n').filter(u => u.trim());
-                  nodeConfig.web_search_urls = urls;
-                  updateNodeData();
-                  debouncedSyncWebIndex(urls);
-                }}
-                rows="4"
-                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
-                placeholder="https://example.com/page1&#10;https://docs.example.com/api&#10;https://wiki.example.org/article"
-              ></textarea>
-              <div class="flex items-center gap-2 mt-1">
-                <p class="text-xs text-gray-500">Enter full URLs (with https://) to fetch content from specific pages</p>
-                {#if syncingWebIndex}
-                  <span class="text-xs text-blue-600"><i class="fas fa-spinner fa-spin mr-1"></i>Indexing...</span>
-                {/if}
-                {#if webIndexStatus}
-                  <span class="text-xs text-green-600"><i class="fas fa-check mr-1"></i>{webIndexStatus}</span>
-                {/if}
-              </div>
-              <!-- Relevant Excerpts (RAG top-K) -->
-              <div class="mt-3">
-                <label class="block text-sm font-medium text-gray-700 mb-2">Relevant Excerpts</label>
-                <input
-                  type="number"
-                  value={nodeConfig.web_search_top_k ?? 5}
-                  on:change={(e) => {
-                    nodeConfig.web_search_top_k = Math.max(1, Math.min(20, parseInt(e.target.value) || 5));
-                    e.target.value = nodeConfig.web_search_top_k;
-                    updateNodeData();
-                  }}
-                  min="1"
-                  max="20"
-                  class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
-                />
-                <p class="text-xs text-gray-500 mt-1">Number of most relevant text excerpts to send to the LLM (1-20). Lower = faster and cheaper.</p>
-              </div>
-            </div>
-          {/if}
-          
-          <!-- Max Results (for 'general' and 'domains' modes) -->
-          {#if nodeConfig.web_search_mode === 'general' || nodeConfig.web_search_mode === 'domains'}
-            <div class="mb-4">
-              <label class="block text-sm font-medium text-gray-700 mb-2">Max Results</label>
-              <input
-                type="number"
-                bind:value={nodeConfig.web_search_max_results}
-                on:input={updateNodeData}
-                min="1"
-                max="20"
-                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
-              />
-              <p class="text-xs text-gray-500 mt-1">Maximum number of search results to retrieve (1-20)</p>
-            </div>
-          {/if}
-          
-          <!-- Cache TTL (input in days, stored as seconds) -->
-          <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-700 mb-2">Cache Duration (days)</label>
-            <input
-              type="number"
-              value={Math.round((nodeConfig.web_search_cache_ttl ?? 2592000) / 86400)}
-              on:change={(e) => {
-                const days = Math.max(0, Math.min(365, parseInt(e.target.value) || 0));
-                nodeConfig.web_search_cache_ttl = days * 86400;
-                e.target.value = days;
-                updateNodeData();
-              }}
-              min="0"
-              max="365"
-              step="1"
-              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
-            />
-            <p class="text-xs text-gray-500 mt-1">
-              How long to cache fetched page content. 0 = no caching, 30 = 30 days (recommended)
-            </p>
-          </div>
-          
-          <!-- Current Configuration Summary -->
-          <div class="mt-3 p-2 bg-green-100 border border-green-200 rounded text-xs text-green-700">
-            <i class="fas fa-info-circle mr-1"></i>
-            <strong>Mode:</strong> {nodeConfig.web_search_mode || 'Not set'} |
-            {#if nodeConfig.web_search_mode === 'urls'}
-              <strong>URLs:</strong> {(nodeConfig.web_search_urls || []).length} configured
-            {:else if nodeConfig.web_search_mode === 'domains'}
-              <strong>Domains:</strong> {(nodeConfig.web_search_domains || []).length} configured
-            {:else}
-              <strong>Max Results:</strong> {nodeConfig.web_search_max_results || 5}
-            {/if}
-            | <strong>Cache:</strong> {Math.round((nodeConfig.web_search_cache_ttl || 2592000) / 86400)} day(s)
-          </div>
+      <!-- WEBSEARCH (UserProxyAgent — no doc-tool-calling gate) -->
+      <WebsearchSection
+        bind:nodeConfig
+        projectId={projectId}
+        gatedByDocToolCalling={false}
+        onChange={updateNodeData}
+      />
 
-          <!-- Clear Web Cache -->
-          <div class="mt-2 flex items-center gap-2">
-            <button
-              on:click={doClearWebCache}
-              disabled={clearingWebCache}
-              class="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded border border-red-300 text-red-600 bg-white hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              <i class="fas {clearingWebCache ? 'fa-spinner fa-spin' : 'fa-trash-alt'}"></i>
-              {clearingWebCache ? 'Clearing…' : 'Clear Web Cache'}
-            </button>
-            {#if webCacheCleared}
-              <span class="text-xs text-green-600"><i class="fas fa-check mr-1"></i>Cache cleared — pages will be re-fetched on next run</span>
-            {/if}
-          </div>
-        </div>
-      {/if}
 
     {/if}
 
@@ -3044,7 +2782,6 @@
                   nodeConfig.doc_aware = false;
                   nodeConfig.search_method = '';
                   nodeConfig.web_search_enabled = false;
-                  nodeConfig.web_search_mode = '';
                   nodeConfig.web_search_urls = [];
                   nodeConfig.web_search_domains = [];
                 }
@@ -3181,229 +2918,14 @@
         {/if}
       </div>
       
-      <!-- WEBSEARCH TOGGLE - For AssistantAgent, DelegateAgent -->
-      <div class:opacity-50={!nodeConfig.doc_tool_calling}>
-        <div class="flex items-center justify-between">
-          <label class="text-sm font-medium text-gray-700">WebSearch</label>
-          <label
-            class="relative inline-flex items-center {nodeConfig.doc_tool_calling ? 'cursor-pointer' : 'cursor-not-allowed'}"
-          >
-            <input
-              type="checkbox"
-              checked={nodeConfig.web_search_enabled}
-              disabled={!nodeConfig.doc_tool_calling}
-              on:change={(e) => {
-                nodeConfig.web_search_enabled = e.target.checked;
-                
-                if (e.target.checked) {
-                  // Set default values when enabling WebSearch
-                  if (!nodeConfig.web_search_mode) {
-                    nodeConfig.web_search_mode = 'general';
-                  }
-                  if (!nodeConfig.web_search_cache_ttl) {
-                    nodeConfig.web_search_cache_ttl = 2592000; // 30 days default
-                  }
-                  if (!nodeConfig.web_search_max_results) {
-                    nodeConfig.web_search_max_results = 5;
-                  }
-                  if (!nodeConfig.web_search_urls) {
-                    nodeConfig.web_search_urls = [];
-                  }
-                  if (!nodeConfig.web_search_domains) {
-                    nodeConfig.web_search_domains = [];
-                  }
-                } else {
-                  // Clear configuration when disabling WebSearch
-                  nodeConfig.web_search_mode = '';
-                  nodeConfig.web_search_urls = [];
-                  nodeConfig.web_search_domains = [];
-                }
-                
-                nodeConfig = { ...nodeConfig };
-                updateNodeData();
-              }}
-              class="sr-only peer"
-            />
-            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-green-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-600 peer-disabled:opacity-60"></div>
-          </label>
-        </div>
-        <p class="text-xs text-gray-500 mt-1">Enable web search capabilities to retrieve real-time information from the internet</p>
-        {#if !nodeConfig.doc_tool_calling}
-          <p class="text-xs text-gray-400 mt-1">Enable Document Tool Calling to use this.</p>
-        {/if}
-      </div>
-      
-      <!-- WEBSEARCH CONFIGURATION - Show when WebSearch is enabled -->
-      {#if nodeConfig.doc_tool_calling && nodeConfig.web_search_enabled}
-        <div class="border border-green-200 rounded-lg p-4 bg-green-50">
-          <div class="flex items-center mb-3">
-            <i class="fas fa-globe text-green-600 mr-2"></i>
-            <h4 class="font-medium text-green-900">Web Search Configuration</h4>
-          </div>
-          
-          <!-- Search Mode Selection -->
-          <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-700 mb-2">Search Mode</label>
-            <select
-              bind:value={nodeConfig.web_search_mode}
-              on:change={updateNodeData}
-              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20 bg-white"
-            >
-              <option value="general">General Web Search</option>
-              <option value="domains">Search Specific Domains</option>
-              <option value="urls">Fetch Specific URLs</option>
-            </select>
-            <p class="text-xs text-gray-500 mt-1">
-              {#if nodeConfig.web_search_mode === 'general'}
-                Search the entire web using DuckDuckGo
-              {:else if nodeConfig.web_search_mode === 'domains'}
-                Restrict search to specific domains/websites
-              {:else if nodeConfig.web_search_mode === 'urls'}
-                Fetch content from specific URLs directly
-              {:else}
-                Select a search mode to configure web search
-              {/if}
-            </p>
-          </div>
-          
-          <!-- Domain List (for 'domains' mode) -->
-          {#if nodeConfig.web_search_mode === 'domains'}
-            <div class="mb-4">
-              <label class="block text-sm font-medium text-gray-700 mb-2">
-                Search Domains
-                <span class="text-xs text-gray-500 ml-1">(one per line)</span>
-              </label>
-              <textarea
-                value={(nodeConfig.web_search_domains || []).join('\n')}
-                on:input={(e) => {
-                  const domains = e.target.value.split('\n').filter(d => d.trim());
-                  nodeConfig.web_search_domains = domains;
-                  updateNodeData();
-                }}
-                rows="3"
-                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
-                placeholder="wikipedia.org&#10;docs.python.org&#10;developer.mozilla.org"
-              ></textarea>
-              <p class="text-xs text-gray-500 mt-1">Enter domain names (without https://) to restrict search results</p>
-            </div>
-          {/if}
-          
-          <!-- URL List (for 'urls' mode) -->
-          {#if nodeConfig.web_search_mode === 'urls'}
-            <div class="mb-4">
-              <label class="block text-sm font-medium text-gray-700 mb-2">
-                URLs to Fetch
-                <span class="text-xs text-gray-500 ml-1">(one per line)</span>
-              </label>
-              <textarea
-                value={(nodeConfig.web_search_urls || []).join('\n')}
-                on:input={(e) => {
-                  const urls = e.target.value.split('\n').filter(u => u.trim());
-                  nodeConfig.web_search_urls = urls;
-                  updateNodeData();
-                  debouncedSyncWebIndex(urls);
-                }}
-                rows="4"
-                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
-                placeholder="https://example.com/page1&#10;https://docs.example.com/api&#10;https://wiki.example.org/article"
-              ></textarea>
-              <div class="flex items-center gap-2 mt-1">
-                <p class="text-xs text-gray-500">Enter full URLs (with https://) to fetch content from specific pages</p>
-                {#if syncingWebIndex}
-                  <span class="text-xs text-blue-600"><i class="fas fa-spinner fa-spin mr-1"></i>Indexing...</span>
-                {/if}
-                {#if webIndexStatus}
-                  <span class="text-xs text-green-600"><i class="fas fa-check mr-1"></i>{webIndexStatus}</span>
-                {/if}
-              </div>
-              <!-- Relevant Excerpts (RAG top-K) -->
-              <div class="mt-3">
-                <label class="block text-sm font-medium text-gray-700 mb-2">Relevant Excerpts</label>
-                <input
-                  type="number"
-                  value={nodeConfig.web_search_top_k ?? 5}
-                  on:change={(e) => {
-                    nodeConfig.web_search_top_k = Math.max(1, Math.min(20, parseInt(e.target.value) || 5));
-                    e.target.value = nodeConfig.web_search_top_k;
-                    updateNodeData();
-                  }}
-                  min="1"
-                  max="20"
-                  class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
-                />
-                <p class="text-xs text-gray-500 mt-1">Number of most relevant text excerpts to send to the LLM (1-20). Lower = faster and cheaper.</p>
-              </div>
-            </div>
-          {/if}
-          
-          <!-- Max Results (for 'general' and 'domains' modes) -->
-          {#if nodeConfig.web_search_mode === 'general' || nodeConfig.web_search_mode === 'domains'}
-            <div class="mb-4">
-              <label class="block text-sm font-medium text-gray-700 mb-2">Max Results</label>
-              <input
-                type="number"
-                bind:value={nodeConfig.web_search_max_results}
-                on:input={updateNodeData}
-                min="1"
-                max="20"
-                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
-              />
-              <p class="text-xs text-gray-500 mt-1">Maximum number of search results to retrieve (1-20)</p>
-            </div>
-          {/if}
-          
-          <!-- Cache TTL (input in days, stored as seconds) -->
-          <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-700 mb-2">Cache Duration (days)</label>
-            <input
-              type="number"
-              value={Math.round((nodeConfig.web_search_cache_ttl ?? 2592000) / 86400)}
-              on:change={(e) => {
-                const days = Math.max(0, Math.min(365, parseInt(e.target.value) || 0));
-                nodeConfig.web_search_cache_ttl = days * 86400;
-                e.target.value = days;
-                updateNodeData();
-              }}
-              min="0"
-              max="365"
-              step="1"
-              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-green-600 focus:ring-2 focus:ring-green-600 focus:ring-opacity-20"
-            />
-            <p class="text-xs text-gray-500 mt-1">
-              How long to cache fetched page content. 0 = no caching, 30 = 30 days (recommended)
-            </p>
-          </div>
-          
-          <!-- Current Configuration Summary -->
-          <div class="mt-3 p-2 bg-green-100 border border-green-200 rounded text-xs text-green-700">
-            <i class="fas fa-info-circle mr-1"></i>
-            <strong>Mode:</strong> {nodeConfig.web_search_mode || 'Not set'} |
-            {#if nodeConfig.web_search_mode === 'urls'}
-              <strong>URLs:</strong> {(nodeConfig.web_search_urls || []).length} configured
-            {:else if nodeConfig.web_search_mode === 'domains'}
-              <strong>Domains:</strong> {(nodeConfig.web_search_domains || []).length} configured
-            {:else}
-              <strong>Max Results:</strong> {nodeConfig.web_search_max_results || 5}
-            {/if}
-            | <strong>Cache:</strong> {Math.round((nodeConfig.web_search_cache_ttl || 2592000) / 86400)} day(s)
-          </div>
+      <!-- WEBSEARCH (AssistantAgent/DelegateAgent — gated on doc_tool_calling) -->
+      <WebsearchSection
+        bind:nodeConfig
+        projectId={projectId}
+        gatedByDocToolCalling={true}
+        onChange={updateNodeData}
+      />
 
-          <!-- Clear Web Cache -->
-          <div class="mt-2 flex items-center gap-2">
-            <button
-              on:click={doClearWebCache}
-              disabled={clearingWebCache}
-              class="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded border border-red-300 text-red-600 bg-white hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              <i class="fas {clearingWebCache ? 'fa-spinner fa-spin' : 'fa-trash-alt'}"></i>
-              {clearingWebCache ? 'Clearing…' : 'Clear Web Cache'}
-            </button>
-            {#if webCacheCleared}
-              <span class="text-xs text-green-600"><i class="fas fa-check mr-1"></i>Cache cleared — pages will be re-fetched on next run</span>
-            {/if}
-          </div>
-        </div>
-      {/if}
     {/if}
 
     <!-- DELEGATE-SPECIFIC FIELDS -->

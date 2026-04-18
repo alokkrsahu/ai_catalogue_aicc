@@ -2779,7 +2779,7 @@ class WorkflowExecutor:
                     _target_url = url_tool_map.get(tc["name"], "")
                     if not _target_url:
                         return tc, f"[Unknown URL tool: {tc['name']}]", []
-                    _ttl = node.get('data', {}).get('web_search_cache_ttl', 3600)
+                    _ttl = node.get('data', {}).get('web_search_cache_ttl', 2592000)
                     _result = await _ws._get_url_context([_target_url], _ttl, project_id)
                     return tc, _result, []
 

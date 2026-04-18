@@ -294,6 +294,9 @@ WEBSEARCH_CONFIG = {
     'MAX_CONTENT_LENGTH': 100000,
     # Maximum raw HTML bytes to keep in PageCapture.raw_html before truncating
     'MAX_HTML_BYTES': 2_000_000,  # ~2 MB
+    # Maximum number of URLs a single agent can configure for URL mode.
+    # Protects against runaway parallel fetches and embed batches.
+    'MAX_URLS_PER_AGENT': 50,
 }
 
 # Vector Search Settings

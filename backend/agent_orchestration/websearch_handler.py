@@ -70,7 +70,8 @@ class WebSearchHandler:
             Mode string: 'general', 'domains', or 'urls'
         """
         agent_data = agent_node.get('data', {})
-        return agent_data.get('web_search_mode', 'general')
+        # Coalesce: empty-string (left over from toggle-off path) → 'general'.
+        return agent_data.get('web_search_mode') or 'general'
     
     async def get_websearch_context(
         self, 
@@ -97,9 +98,9 @@ class WebSearchHandler:
         
         agent_data = agent_node.get('data', {})
         mode = self.get_websearch_mode(agent_node)
-        cache_ttl = agent_data.get('web_search_cache_ttl', 3600)
+        cache_ttl = agent_data.get('web_search_cache_ttl', 2592000)
         max_results = agent_data.get('web_search_max_results', 5)
-        
+
         logger.info(f"🌐 WEBSEARCH: Starting web search (mode: {mode}, cache_ttl: {cache_ttl}s, max_results: {max_results})")
         
         start_time = time.time()
@@ -193,10 +194,15 @@ class WebSearchHandler:
                 if url:
                     cached_results[url] = result
 
-        # 2. Index all fetched URLs in Milvus
-        for url, page in cached_results.items():
-            if page and not page.get('extraction_error'):
-                await self.web_rag_service.ensure_indexed(url, page, project_id, cache_ttl)
+        # 2. Index all URLs in Milvus — single batched call
+        batch_items = [
+            (url, page) for url, page in cached_results.items()
+            if page and not page.get('extraction_error')
+        ]
+        if batch_items:
+            await self.web_rag_service.index_urls_batch(
+                batch_items, project_id, cache_ttl=cache_ttl
+            )
 
         # 3. Search Milvus for relevant chunks
         if not query:
@@ -524,7 +530,7 @@ class WebSearchHandler:
             configuration = {
                 "agent_name": agent_name,
                 "mode": mode,
-                "cache_ttl": agent_data.get('web_search_cache_ttl', 3600),
+                "cache_ttl": agent_data.get('web_search_cache_ttl', 2592000),
                 "max_results": agent_data.get('web_search_max_results', 5),
             }
             
@@ -645,7 +651,7 @@ class WebSearchHandler:
         
         agent_data = agent_node.get('data', {})
         mode = self.get_websearch_mode(agent_node)
-        cache_ttl = agent_data.get('web_search_cache_ttl', 3600)
+        cache_ttl = agent_data.get('web_search_cache_ttl', 2592000)
         max_results = agent_data.get('web_search_max_results', 5)
         
         logger.info(f"🌐 WEBSEARCH FROM QUERY: mode={mode}, query='{search_query[:50]}...'")
@@ -781,7 +787,7 @@ class WebSearchHandler:
         """
         agent_data = agent_node.get('data', {})
         mode = self.get_websearch_mode(agent_node)
-        cache_ttl = agent_data.get('web_search_cache_ttl', 3600)
+        cache_ttl = agent_data.get('web_search_cache_ttl', 2592000)
         max_results = agent_data.get('web_search_max_results', 5)
 
         logger.info(

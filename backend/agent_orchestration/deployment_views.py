@@ -893,7 +893,8 @@ class DeploymentViewSet(viewsets.ViewSet):
                     {'error': 'urls must be a non-empty list'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            urls = [u.strip() for u in urls if isinstance(u, str) and u.strip()]
+            from .websearch import clean_url_list
+            urls, dropped_invalid, dropped_over_cap = clean_url_list(urls)
             if not urls:
                 return Response(
                     {'error': 'No valid URLs provided'},
@@ -912,7 +913,14 @@ class DeploymentViewSet(viewsets.ViewSet):
                 urls = [u for u in urls if u not in existing]
                 if not urls:
                     return Response(
-                        {'summarized': 0, 'skipped': original_count, 'failed': 0, 'results': []},
+                        {
+                            'summarized': 0,
+                            'skipped': original_count,
+                            'failed': 0,
+                            'results': [],
+                            'dropped_invalid': dropped_invalid,
+                            'dropped_over_cap': dropped_over_cap,
+                        },
                         status=status.HTTP_200_OK,
                     )
 
@@ -946,6 +954,9 @@ class DeploymentViewSet(viewsets.ViewSet):
                 result = asyncio.run(_run())
             except ValueError as e:
                 return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            if isinstance(result, dict):
+                result.setdefault('dropped_invalid', dropped_invalid)
+                result.setdefault('dropped_over_cap', dropped_over_cap)
             return Response(result, status=status.HTTP_200_OK)
 
         except Exception as e:
@@ -954,6 +965,60 @@ class DeploymentViewSet(viewsets.ViewSet):
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+    @action(detail=False, methods=['get'], url_path='projects/(?P<project_id>[^/.]+)/url-summaries')
+    def list_url_summaries(self, request, project_id=None):
+        """
+        List stored LLM summaries for the project's web-search URLs.
+
+        GET /api/agent-orchestration/projects/{project_id}/url-summaries/
+        Optional query: ?urls=url1,url2  → only return entries for these URLs.
+
+        Returns: {
+          "summaries": [
+            {
+              "url": "...",
+              "short_summary": "...",
+              "long_summary": "...",
+              "llm_provider": "openai",
+              "llm_model": "gpt-4o-mini",
+              "updated_at": "ISO-8601",
+            }, ...
+          ]
+        }
+        """
+        try:
+            project = get_object_or_404(IntelliDocProject, project_id=project_id)
+            if not project.has_user_access(request.user):
+                return Response(
+                    {'error': 'You do not have permission to access this project'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            from users.models import WebSearchUrlSummary
+            qs = WebSearchUrlSummary.objects.filter(project=project)
+
+            raw_urls = request.query_params.get('urls', '').strip()
+            if raw_urls:
+                wanted = [u.strip() for u in raw_urls.split(',') if u.strip()]
+                if wanted:
+                    qs = qs.filter(url__in=wanted)
+
+            summaries = [
+                {
+                    'url': s.url,
+                    'short_summary': s.short_summary,
+                    'long_summary': s.long_summary,
+                    'llm_provider': s.llm_provider,
+                    'llm_model': s.llm_model,
+                    'updated_at': s.updated_at.isoformat() if s.updated_at else None,
+                }
+                for s in qs.order_by('url')
+            ]
+            return Response({'summaries': summaries}, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"❌ LIST URL SUMMARIES: {e}", exc_info=True)
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=False, methods=['post'], url_path='projects/(?P<project_id>[^/.]+)/clear-websearch-cache')
     def clear_websearch_cache(self, request, project_id=None):
@@ -1029,8 +1094,14 @@ class DeploymentViewSet(viewsets.ViewSet):
             if not isinstance(urls, list):
                 return Response({'error': '"urls" must be a list'}, status=status.HTTP_400_BAD_REQUEST)
 
-            # Filter to valid URLs
-            urls = [u.strip() for u in urls if u.strip().startswith(('http://', 'https://'))]
+            # Normalise, dedupe, and cap at MAX_URLS_PER_AGENT.
+            from .websearch import clean_url_list
+            urls, dropped_invalid, dropped_over_cap = clean_url_list(urls)
+            if dropped_invalid or dropped_over_cap:
+                logger.info(
+                    f"🌐 SYNC INDEX: dropped {dropped_invalid} invalid, "
+                    f"{dropped_over_cap} over-cap URLs (project {str(project_id)[:8]})"
+                )
 
             pid = str(project_id)
             rag_service = WebRAGService()
@@ -1083,25 +1154,33 @@ class DeploymentViewSet(viewsets.ViewSet):
                     if to_cache:
                         cache_service.cache_urls_batch(to_cache, pid, ttl=cache_ttl)
 
-                # 5. Index in Milvus
-                indexed = 0
-                failed = 0
-                for url in to_index:
-                    page = cached_results.get(url)
-                    if page and not page.get('extraction_error'):
-                        success = await rag_service.ensure_indexed(url, page, pid, cache_ttl)
-                        if success:
-                            indexed += 1
-                        else:
-                            already_indexed += 1  # ensure_indexed returned False = already done
-                    else:
-                        failed += 1
+                # 5. Index in Milvus — ONE batched pipeline (one embed, one
+                # delete, one insert, one flush) regardless of URL count.
+                batch_items = [
+                    (url, cached_results.get(url))
+                    for url in to_index
+                    if cached_results.get(url) and not cached_results[url].get('extraction_error')
+                ]
+                pre_fail = len(to_index) - len(batch_items)
+
+                if batch_items:
+                    batch_result = await rag_service.index_urls_batch(
+                        batch_items, pid, cache_ttl=cache_ttl
+                    )
+                    indexed = batch_result['indexed']
+                    already_indexed += batch_result['skipped']
+                    failed = batch_result['failed'] + pre_fail
+                else:
+                    indexed = 0
+                    failed = pre_fail
 
                 return {
                     'indexed': indexed,
                     'removed': len(to_remove),
                     'already_indexed': already_indexed,
                     'failed': failed,
+                    'dropped_invalid': dropped_invalid,
+                    'dropped_over_cap': dropped_over_cap,
                 }
 
             result = asyncio.run(_sync())

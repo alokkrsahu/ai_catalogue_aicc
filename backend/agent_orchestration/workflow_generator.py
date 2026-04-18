@@ -83,6 +83,10 @@ WORKFLOW_TOOLS = [
                         "type": "integer",
                         "description": "Maximum number of web search results per query (default: 5, range: 1-20)"
                     },
+                    "web_search_top_k": {
+                        "type": "integer",
+                        "description": "URL mode only: number of RAG chunks to retrieve per query (default: 5, range: 1-20)"
+                    },
                     "temperature": {
                         "type": "number",
                         "description": "LLM temperature 0-2 (default: 0.7)"
@@ -205,6 +209,10 @@ WORKFLOW_TOOLS = [
                     "web_search_max_results": {
                         "type": "integer",
                         "description": "Maximum number of web search results per query (default: 5, range: 1-20)"
+                    },
+                    "web_search_top_k": {
+                        "type": "integer",
+                        "description": "URL mode only: number of RAG chunks to retrieve per query (default: 5, range: 1-20)"
                     },
                     "temperature": {
                         "type": "number",
@@ -381,7 +389,7 @@ WORKFLOW_TOOLS = [
                     },
                     "properties": {
                         "type": "object",
-                        "description": "Properties to update — keys are property names (system_message, llm_provider, llm_model, temperature, documents, web_search_enabled, web_search_max_results, doc_tool_calling, doc_aware, plan_mode, etc.), values are new values. Only specified keys are changed; everything else stays the same.",
+                        "description": "Properties to update — keys are property names (system_message, llm_provider, llm_model, temperature, documents, web_search_enabled, web_search_max_results, web_search_top_k, doc_tool_calling, doc_aware, plan_mode, etc.), values are new values. Only specified keys are changed; everything else stays the same.",
                         "additionalProperties": True
                     }
                 },
@@ -792,6 +800,8 @@ DOCUMENT ACCESS — TWO MODES (can be used together):
 
 web_search_max_results: 1-20 (default 5). Set higher for broad research tasks.
 
+web_search_top_k: 1-20 (default 5). URL mode only — how many RAG chunks to retrieve from the configured URLs per query.
+
 temperature: Controls LLM creativity/randomness (0-2, default 0.7).
   Use lower (0.1-0.3) for factual/analytical tasks, higher (0.8-1.2) for creative tasks.
 
@@ -1038,6 +1048,7 @@ class WorkflowBuilder:
             "web_search_mode": "general" if web_search else "",
             "web_search_cache_ttl": 2592000 if web_search else 0,
             "web_search_max_results": min(max(args.get("web_search_max_results", 5), 1), 20) if web_search else 0,
+            "web_search_top_k": min(max(args.get("web_search_top_k", 5), 1), 20) if web_search else 0,
             "web_search_urls": [],
             "web_search_domains": [],
         }
@@ -1408,7 +1419,7 @@ class WorkflowBuilder:
                 properties["doc_tool_calling"] = True
 
         # Apply toggle dependencies if any toggle-related props are updated
-        toggle_keys = {"doc_tool_calling", "web_search_enabled", "doc_aware", "web_search_max_results"}
+        toggle_keys = {"doc_tool_calling", "web_search_enabled", "doc_aware", "web_search_max_results", "web_search_top_k"}
         if toggle_keys & set(properties.keys()):
             merged = {**node["data"], **properties}
             resolved = self._resolve_toggle_dependencies(merged)

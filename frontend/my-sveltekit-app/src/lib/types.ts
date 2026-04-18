@@ -213,6 +213,27 @@ export interface TemplateDuplicateRequest {
   new_author?: string;          // Optional author
 }
 
+// Websearch node config (mirrors agent_orchestration/websearch_handler.py fields)
+export type WebsearchMode = 'general' | 'domains' | 'urls';
+
+export interface WebsearchNodeConfig {
+  web_search_enabled: boolean;
+  web_search_mode: WebsearchMode | '';
+  web_search_domains: string[];
+  web_search_urls: string[];
+  web_search_top_k: number;
+  web_search_max_results: number;
+  web_search_cache_ttl: number;
+}
+
+// Agent node data — the websearch fields get real types for FE/BE parity;
+// everything else falls through the index signature as `any` to avoid
+// tightening the rest of the node config more than the existing code can
+// cope with in one pass.
+export interface AgentNodeData extends Partial<WebsearchNodeConfig> {
+  [key: string]: any;
+}
+
 // LLM Eval Types
 export interface LLMProvider {
   id: number;

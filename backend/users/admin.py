@@ -6,7 +6,8 @@ from django.utils.translation import gettext_lazy as _
 
 from .models import (
     User, DashboardIcon, UserIconPermission, GroupIconPermission,
-    LLMProvider, APIKeyConfig, LLMComparison, LLMResponse, ProjectAPIKey
+    LLMProvider, APIKeyConfig, LLMComparison, LLMResponse, ProjectAPIKey,
+    WebSearchUrlSummary,
 )
 
 # Import the admin configuration for ProjectAPIKey
@@ -171,3 +172,24 @@ class APIKeyConfigAdmin(admin.ModelAdmin):
 
 # Note: LLMComparison and LLMResponse are viewable through the frontend
 # No need to clutter Django admin with them
+
+
+@admin.register(WebSearchUrlSummary)
+class WebSearchUrlSummaryAdmin(admin.ModelAdmin):
+    list_display = ('project', 'short_url', 'llm_provider', 'llm_model', 'updated_at')
+    list_filter = ('llm_provider', 'llm_model', 'updated_at')
+    search_fields = ('url', 'short_summary', 'long_summary')
+    readonly_fields = ('generated_at', 'updated_at')
+    ordering = ('-updated_at',)
+
+    fieldsets = (
+        (None, {'fields': ('project', 'url')}),
+        ('Summaries', {'fields': ('short_summary', 'long_summary')}),
+        ('LLM', {'fields': ('llm_provider', 'llm_model')}),
+        ('Timestamps', {'fields': ('generated_at', 'updated_at')}),
+    )
+
+    def short_url(self, obj):
+        return obj.url if len(obj.url) <= 80 else obj.url[:77] + '...'
+    short_url.short_description = 'URL'
+    short_url.admin_order_field = 'url'
