@@ -41,6 +41,7 @@ class WebSearchCacheService:
     SEARCH_PREFIX = "websearch_query_"
     INDEX_FLAG_PREFIX = "websearch_milvus_idx_"
     EMBED_PREFIX = "websearch_emb_"
+    CONTENT_HASH_PREFIX = "websearch_chash_"
     
     def __init__(self):
         """Initialize cache service with settings from Django config."""
@@ -231,6 +232,54 @@ class WebSearchCacheService:
             return False
 
     # =========================================================================
+    # Per-URL Content-Hash Caching (skip re-embed when content unchanged)
+    # =========================================================================
+
+    def _make_content_hash_key(self, url: str, project_id: str) -> str:
+        pid = _normalize_project_id(project_id)
+        url_hash = hashlib.md5(url.encode('utf-8')).hexdigest()
+        return f"{self.CONTENT_HASH_PREFIX}{pid}_{url_hash}"
+
+    def get_cached_content_hash(self, url: str, project_id: str) -> Optional[str]:
+        return cache.get(self._make_content_hash_key(url, project_id))
+
+    def cache_content_hash(
+        self, url: str, project_id: str, content_hash: str, ttl: Optional[int] = None
+    ) -> bool:
+        timeout = ttl if ttl is not None else self.default_ttl
+        try:
+            cache.set(
+                self._make_content_hash_key(url, project_id),
+                content_hash,
+                timeout=timeout,
+            )
+            return True
+        except Exception:
+            return False
+
+    def get_cached_content_hashes_batch(
+        self, urls: List[str], project_id: str
+    ) -> Dict[str, Optional[str]]:
+        key_to_url = {self._make_content_hash_key(url, project_id): url for url in urls}
+        try:
+            cached = cache.get_many(list(key_to_url.keys()))
+        except Exception:
+            return {url: None for url in urls}
+        out: Dict[str, Optional[str]] = {url: None for url in urls}
+        for key, value in cached.items():
+            url = key_to_url.get(key)
+            if url is not None:
+                out[url] = value
+        return out
+
+    def invalidate_content_hash(self, url: str, project_id: str) -> bool:
+        try:
+            cache.delete(self._make_content_hash_key(url, project_id))
+            return True
+        except Exception:
+            return False
+
+    # =========================================================================
     # Search Results Caching
     # =========================================================================
     
@@ -377,6 +426,7 @@ class WebSearchCacheService:
                 cache.delete_pattern(f"{self.SEARCH_PREFIX}{pid}_*")
                 cache.delete_pattern(f"{self.INDEX_FLAG_PREFIX}{pid}_*")
                 cache.delete_pattern(f"{self.EMBED_PREFIX}{pid}_*")
+                cache.delete_pattern(f"{self.CONTENT_HASH_PREFIX}{pid}_*")
                 logger.info(f"🗑️ WEBSEARCH CACHE: Cleared all websearch cache for project {project_id[:8]}")
                 return True
 
@@ -388,7 +438,13 @@ class WebSearchCacheService:
                 key_prefix = getattr(cache, 'key_prefix', '')
                 version = getattr(cache, 'version', 1)
                 deleted = 0
-                for prefix in (self.URL_PREFIX, self.SEARCH_PREFIX, self.INDEX_FLAG_PREFIX, self.EMBED_PREFIX):
+                for prefix in (
+                    self.URL_PREFIX,
+                    self.SEARCH_PREFIX,
+                    self.INDEX_FLAG_PREFIX,
+                    self.EMBED_PREFIX,
+                    self.CONTENT_HASH_PREFIX,
+                ):
                     full_pattern = f"{key_prefix}:{version}:{prefix}{pid}_*"
                     cursor = 0
                     while True:

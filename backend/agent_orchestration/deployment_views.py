@@ -1164,8 +1164,11 @@ class DeploymentViewSet(viewsets.ViewSet):
                 pre_fail = len(to_index) - len(batch_items)
 
                 if batch_items:
+                    # async_flush=True: the sync endpoint doesn't need to wait
+                    # for Milvus fsync before returning — the next agent-turn
+                    # path uses async_flush=False to preserve read-your-writes.
                     batch_result = await rag_service.index_urls_batch(
-                        batch_items, pid, cache_ttl=cache_ttl
+                        batch_items, pid, cache_ttl=cache_ttl, async_flush=True
                     )
                     indexed = batch_result['indexed']
                     already_indexed += batch_result['skipped']

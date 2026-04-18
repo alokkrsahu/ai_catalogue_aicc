@@ -106,3 +106,53 @@ class CacheServiceIsolationTests(TestCase):
 
         self.assertIsNotNone(self.svc.get_cached_embeddings('https://keep.example/', 'p'))
         self.assertIsNone(self.svc.get_cached_embeddings('https://drop.example/', 'p'))
+
+    # ------------------------------------------------------------------
+    # Content-hash cache (for the short-circuit on re-sync of unchanged pages)
+    # ------------------------------------------------------------------
+
+    def test_content_hash_round_trip(self):
+        self.assertTrue(
+            self.svc.cache_content_hash('https://x.example/', 'p', 'deadbeef', ttl=60)
+        )
+        self.assertEqual(
+            self.svc.get_cached_content_hash('https://x.example/', 'p'),
+            'deadbeef',
+        )
+
+    def test_content_hash_scoped_by_project(self):
+        self.svc.cache_content_hash('https://x.example/', 'project-a', 'h1', ttl=60)
+        self.assertEqual(
+            self.svc.get_cached_content_hash('https://x.example/', 'project-a'),
+            'h1',
+        )
+        self.assertIsNone(
+            self.svc.get_cached_content_hash('https://x.example/', 'project-b')
+        )
+
+    def test_content_hash_batch_get(self):
+        self.svc.cache_content_hash('https://a.example/', 'p', 'ha', ttl=60)
+        self.svc.cache_content_hash('https://b.example/', 'p', 'hb', ttl=60)
+        got = self.svc.get_cached_content_hashes_batch(
+            ['https://a.example/', 'https://b.example/', 'https://missing.example/'],
+            'p',
+        )
+        self.assertEqual(got['https://a.example/'], 'ha')
+        self.assertEqual(got['https://b.example/'], 'hb')
+        self.assertIsNone(got['https://missing.example/'])
+
+    def test_invalidate_content_hash_drops_only_target(self):
+        self.svc.cache_content_hash('https://keep.example/', 'p', 'hk', ttl=60)
+        self.svc.cache_content_hash('https://drop.example/', 'p', 'hd', ttl=60)
+
+        self.svc.invalidate_content_hash('https://drop.example/', 'p')
+
+        self.assertEqual(
+            self.svc.get_cached_content_hash('https://keep.example/', 'p'),
+            'hk',
+        )
+        self.assertIsNone(self.svc.get_cached_content_hash('https://drop.example/', 'p'))
+
+    def test_content_hash_key_normalises_project_id(self):
+        key = self.svc._make_content_hash_key('https://x.example/', 'abc-123-def')
+        self.assertTrue(key.startswith('websearch_chash_abc_123_def_'))

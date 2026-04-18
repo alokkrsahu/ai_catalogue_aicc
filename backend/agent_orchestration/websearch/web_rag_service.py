@@ -8,8 +8,10 @@ Milvus collection → searches with user query → returns top-K chunks.
 """
 
 import hashlib
+import json
 import logging
 import re
+import threading
 import time
 from typing import Dict, List, Any, Optional, Tuple
 
@@ -106,6 +108,33 @@ def _url_hash(url: str) -> str:
 def _index_flag_key(project_id: str, url: str) -> str:
     safe_pid = str(project_id).replace('-', '_')
     return f"{INDEX_FLAG_PREFIX}{safe_pid}_{_url_hash(url)}"
+
+
+def _page_content_hash(page: Dict[str, Any]) -> str:
+    """
+    Deterministic hash of the content-bearing fields of a PageCapture dict.
+
+    Covers title + ordered (type, level, text) tuples of every section so a
+    re-fetch with byte-identical content produces the same hash regardless of
+    transient metadata (status_code, raw_html_size, fetch timestamp, etc.).
+    """
+    title = (page.get('title') or '')[:500]
+    sections = page.get('sections') or []
+    items = [
+        (s.get('type'), s.get('level'), (s.get('text') or '')[:10000])
+        for s in sections
+    ]
+    payload = json.dumps([title, items], ensure_ascii=False, separators=(',', ':'))
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+def _flush_in_background(col, project_short: str) -> None:
+    """Runs col.flush() on a daemon thread so the HTTP caller doesn't block."""
+    try:
+        col.flush()
+        logger.info(f"🌐 WEB RAG: async flush complete (project {project_short})")
+    except Exception as e:
+        logger.error(f"❌ WEB RAG: async flush failed (project {project_short}): {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +297,7 @@ class WebRAGService:
         items: List[Tuple[str, Dict[str, Any]]],
         project_id: str,
         cache_ttl: int = 3600,
+        async_flush: bool = False,
     ) -> Dict[str, Any]:
         """
         Chunk, embed, and upsert multiple URLs into Milvus in a single batched
@@ -276,15 +306,26 @@ class WebRAGService:
         Redis and re-used when the Milvus index flag has expired but the URL
         content is still fresh.
 
+        Additional short-circuit: each page's content is hashed; if the hash
+        matches the one cached from the previous index, we assume Milvus still
+        has the chunks and simply refresh the index flag — no chunk, no embed,
+        no Milvus write.
+
         Args:
             items: List of (url, page_capture_dict). Pages with extraction_error
                    are skipped.
             project_id: Per-project scope.
-            cache_ttl: TTL for Redis caches (index flag + embedding cache).
+            cache_ttl: TTL for Redis caches (index flag + embedding cache +
+                       content hash).
+            async_flush: If True, col.flush() runs on a background thread so
+                         the caller returns ~500ms sooner. Safe for the
+                         sync-index endpoint (user won't search immediately);
+                         must stay False on the agent-turn hot path where the
+                         next thing we do is search.
 
         Returns:
             {'indexed': int, 'skipped': int, 'failed': int,
-             'timings_ms': {fetch, chunk, embed, milvus, flush, total}}
+             'timings_ms': {chunk, embed, milvus, flush, hash, total}}
         """
         from asgiref.sync import sync_to_async
         from .cache_service import WebSearchCacheService
@@ -312,6 +353,62 @@ class WebRAGService:
             timings['total'] = round((time.time() - t0) * 1000, 1)
             return {'indexed': 0, 'skipped': skipped, 'failed': 0, 'timings_ms': timings}
 
+        # 1b. Content-hash short-circuit — if the page's content hash matches
+        # the one cached from the previous index, skip everything and just
+        # refresh the Redis flag. Saves chunking, embedding, and Milvus I/O
+        # whenever the flag expired but the page content is still byte-identical.
+        t_hash_start = time.time()
+        work_urls = [u for u, _ in work_items]
+        cached_hashes = cache_service.get_cached_content_hashes_batch(work_urls, project_id)
+        pending_items: List[Tuple[str, Dict[str, Any], str]] = []  # (url, page, new_hash)
+        hash_short_circuit_urls: List[str] = []
+        for url, page in work_items:
+            if not page or page.get('extraction_error'):
+                failed += 1
+                continue
+            try:
+                new_hash = _page_content_hash(page)
+            except Exception:
+                new_hash = ''
+            if new_hash and cached_hashes.get(url) == new_hash:
+                hash_short_circuit_urls.append(url)
+            else:
+                pending_items.append((url, page, new_hash))
+        timings['hash'] = round((time.time() - t_hash_start) * 1000, 1)
+
+        if hash_short_circuit_urls:
+            try:
+                cache.set_many(
+                    {flag_keys[url]: 1 for url in hash_short_circuit_urls},
+                    timeout=cache_ttl,
+                )
+                # Refresh the content-hash TTL too so we stay on the fast path.
+                for url in hash_short_circuit_urls:
+                    h = cached_hashes.get(url)
+                    if h:
+                        cache_service.cache_content_hash(url, project_id, h, ttl=cache_ttl)
+            except Exception as e:
+                logger.warning(f"⚠️ WEB RAG: fast-path flag refresh failed: {e}")
+            logger.info(
+                f"🌐 WEB RAG: content-hash fast path — "
+                f"{len(hash_short_circuit_urls)} URL(s) unchanged "
+                f"(project {str(project_id)[:8]})"
+            )
+            skipped += len(hash_short_circuit_urls)
+
+        if not pending_items:
+            timings['total'] = round((time.time() - t0) * 1000, 1)
+            return {
+                'indexed': 0,
+                'skipped': skipped,
+                'failed': failed,
+                'timings_ms': timings,
+            }
+
+        # From here on, only `pending_items` need the full pipeline.
+        work_items = [(url, page) for url, page, _ in pending_items]
+        new_hash_by_url = {url: h for url, _, h in pending_items}
+
         # 2. Chunk all pages (fast, pure Python).
         t_chunk_start = time.time()
         per_url_chunks: Dict[str, List[Dict[str, Any]]] = {}
@@ -329,6 +426,11 @@ class WebRAGService:
                 # Empty page: still mark as indexed so we don't retry forever.
                 try:
                     cache.set(flag_keys[url], 1, timeout=cache_ttl)
+                    # Also cache the content hash so a re-sync with the same
+                    # empty page stays on the fast path.
+                    h = new_hash_by_url.get(url)
+                    if h:
+                        cache_service.cache_content_hash(url, project_id, h, ttl=cache_ttl)
                 except Exception:
                     pass
                 skipped += 1
@@ -438,7 +540,19 @@ class WebRAGService:
             timings['milvus'] = round((time.time() - t_milvus_start) * 1000, 1)
 
             t_flush_start = time.time()
-            await sync_to_async(col.flush)()
+            if async_flush:
+                # Fire-and-forget on a daemon thread — returns in <1ms; the
+                # actual fsync completes in the background. Safe here because
+                # the caller is the sync endpoint, not an agent about to
+                # search the collection.
+                threading.Thread(
+                    target=_flush_in_background,
+                    args=(col, str(project_id)[:8]),
+                    daemon=True,
+                    name='websearch-flush',
+                ).start()
+            else:
+                await sync_to_async(col.flush)()
             timings['flush'] = round((time.time() - t_flush_start) * 1000, 1)
 
         except Exception as e:
@@ -453,7 +567,8 @@ class WebRAGService:
                 'timings_ms': timings,
             }
 
-        # 7. Set all index flags in one MSET.
+        # 7. Set all index flags + cache content hashes so the next sync
+        # can take the fast path if the content is unchanged.
         try:
             cache.set_many(
                 {flag_keys[url]: 1 for url in final_chunks_per_url.keys()},
@@ -461,6 +576,10 @@ class WebRAGService:
             )
         except Exception as e:
             logger.warning(f"⚠️ WEB RAG: set_many flags failed: {e}")
+        for url in final_chunks_per_url.keys():
+            h = new_hash_by_url.get(url)
+            if h:
+                cache_service.cache_content_hash(url, project_id, h, ttl=cache_ttl)
 
         indexed = len(final_chunks_per_url)
         timings['total'] = round((time.time() - t0) * 1000, 1)
@@ -594,6 +713,7 @@ class WebRAGService:
             await sync_to_async(col.delete)(f'url_hash == "{uh}"')
             cache.delete(_index_flag_key(project_id, url))
             cache_service.invalidate_embeddings(url, project_id)
+            cache_service.invalidate_content_hash(url, project_id)
             logger.info(f"🌐 WEB RAG: Removed chunks for {url[:60]}")
         except Exception as e:
             logger.warning(f"⚠️ WEB RAG: Failed to remove URL chunks: {e}")
