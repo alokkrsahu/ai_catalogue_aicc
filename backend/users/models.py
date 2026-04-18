@@ -410,7 +410,20 @@ class IntelliDocProject(models.Model):
         default=False,
         help_text="When enabled, uses LLM-based folder organization (based on per-document short summaries) instead of filename/path auto-classification"
     )
-    
+
+    # RAG / semantic search toggle. When True, Start Processing indexes docs
+    # into Milvus for DocAware retrieval. When False, only the summary step
+    # runs — agents can still use tool-calling with summaries, but DocAware
+    # queries return empty. Default True preserves existing behaviour.
+    rag_enabled = models.BooleanField(
+        default=True,
+        help_text=(
+            'Index documents into Milvus for DocAware/RAG search. When off, '
+            'Start Processing only generates summaries; agent tool-calling '
+            'still works, DocAware queries return empty.'
+        ),
+    )
+
     created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='intellidoc_projects')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1038,11 +1051,24 @@ class DocumentVectorStatus(models.Model):
     topic_chunks_count = models.IntegerField(default=0, help_text='Number of chunks with topics')
     summarizer_used = models.CharField(max_length=50, default='none', help_text='Which summarizer was used (openai_gpt, simple, none)')
     topic_generator_used = models.CharField(max_length=50, default='none', help_text='Which topic generator was used (openai_gpt, simple, none)')
-    
+
+    # True once the document has been embedded and inserted into Milvus.
+    # False when the document was only summary-processed (RAG toggle OFF).
+    # Acts as the backfill flag — Start Processing promotes rag_indexed=False
+    # docs to True on the next run when project.rag_enabled is True again.
+    rag_indexed = models.BooleanField(
+        default=False,
+        help_text=(
+            'True once the document has been embedded and inserted into Milvus. '
+            'False for summary-only processing (backfill candidate when the '
+            'project RAG toggle is re-enabled).'
+        ),
+    )
+
     class Meta:
         ordering = ['-updated_at']
         unique_together = ['document', 'collection']
-    
+
     def __str__(self):
         return f"{self.document.original_filename} - {self.status}"
 

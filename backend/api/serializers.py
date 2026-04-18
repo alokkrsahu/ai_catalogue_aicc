@@ -288,6 +288,8 @@ class IntelliDocProjectSerializer(serializers.ModelSerializer):
             'total_pages', 'navigation_pages', 'processing_capabilities', 'validation_rules', 'ui_configuration',
             # Document organization settings
             'preserve_original_folder_structure',
+            # RAG / semantic-search toggle
+            'rag_enabled',
             # Project metadata
             'created_by', 'created_at', 'updated_at'
         ]

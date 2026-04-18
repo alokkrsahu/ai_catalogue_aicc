@@ -47,6 +47,34 @@ except ImportError as e:
 
 logger = logging.getLogger(__name__)
 
+
+def _cascade_disable_doc_aware(project) -> Tuple[int, int]:
+    """Flip doc_aware=False on every AssistantAgent node across every
+    AgentWorkflow in the given project. Returns (agents_affected,
+    workflows_affected). Persists each workflow whose graph was
+    mutated; other workflows are left untouched. Idempotent — running
+    it twice when no agents remain doc_aware-enabled is a no-op."""
+    agents_affected = 0
+    workflows_affected = 0
+    for wf in AgentWorkflow.objects.filter(project=project):
+        graph = wf.graph_json or {}
+        nodes = graph.get('nodes') or []
+        changed = False
+        for node in nodes:
+            if node.get('type') != 'AssistantAgent':
+                continue
+            data = node.get('data') or {}
+            if data.get('doc_aware'):
+                data['doc_aware'] = False
+                node['data'] = data
+                changed = True
+                agents_affected += 1
+        if changed:
+            wf.graph_json = graph
+            wf.save(update_fields=['graph_json', 'updated_at'])
+            workflows_affected += 1
+    return agents_affected, workflows_affected
+
 class UniversalProjectViewSet(viewsets.ModelViewSet):
     """
     Universal Project API - Phase 3 (CUSTOM Agent Implementation)
@@ -1492,6 +1520,72 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
         logger.info(f"🎯 UNIVERSAL: Delegating capabilities check for project {project.project_id}")
         return get_project_capabilities_consolidated(request._request, str(project.project_id))
     
+    @action(detail=True, methods=['patch'], url_path='rag-setting')
+    def rag_setting(self, request, project_id=None):
+        """
+        Update the RAG (semantic search) toggle for a project.
+
+        When disabled, Start Processing skips Milvus indexing — agents can
+        still use tool-calling with summaries but DocAware queries return
+        empty. When flipping from enabled→disabled, every AssistantAgent
+        with doc_aware=True across every workflow in the project is
+        auto-flipped to doc_aware=False. Vectors in Milvus are kept so
+        re-enabling later skips re-embedding the same docs.
+
+        PATCH /api/projects/{project_id}/rag-setting/
+        Body: {"rag_enabled": true/false}
+        """
+        project = self.get_object()
+
+        rag_enabled = request.data.get('rag_enabled')
+        if rag_enabled is None:
+            return Response({
+                'error': 'rag_enabled field is required',
+                'api_version': 'universal_v1'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if isinstance(rag_enabled, str):
+            rag_enabled = rag_enabled.lower() in ('true', '1', 'yes')
+        rag_enabled = bool(rag_enabled)
+
+        old_value = bool(getattr(project, 'rag_enabled', True))
+        disabled_agents = 0
+        affected_workflows = 0
+
+        if old_value and not rag_enabled:
+            # Cascade — flip doc_aware=False on every AssistantAgent across
+            # every workflow in this project before flipping the toggle.
+            disabled_agents, affected_workflows = _cascade_disable_doc_aware(project)
+            logger.info(
+                "🛑 UNIVERSAL: RAG disabled for project %s — disabled doc_aware on "
+                "%d agents across %d workflows",
+                project.name, disabled_agents, affected_workflows,
+            )
+
+        project.rag_enabled = rag_enabled
+        project.save(update_fields=['rag_enabled', 'updated_at'])
+
+        logger.info(
+            "🔁 UNIVERSAL: RAG toggle %s -> %s for project %s (%s)",
+            old_value, rag_enabled, project.name, project_id,
+        )
+
+        if rag_enabled:
+            msg = 'RAG enabled. Existing summary-only documents will be indexed on the next Start Processing.'
+        else:
+            msg = 'RAG disabled. Start Processing will generate summaries only.'
+            if disabled_agents:
+                msg += f' Auto-disabled DocAware on {disabled_agents} agent(s) across {affected_workflows} workflow(s).'
+
+        return Response({
+            'project_id': str(project.project_id),
+            'rag_enabled': project.rag_enabled,
+            'doc_aware_agents_disabled': disabled_agents,
+            'workflows_updated': affected_workflows,
+            'message': msg,
+            'api_version': 'universal_v1',
+        })
+
     @action(detail=True, methods=['patch'], url_path='folder-structure-setting')
     def folder_structure_setting(self, request, project_id=None):
         """

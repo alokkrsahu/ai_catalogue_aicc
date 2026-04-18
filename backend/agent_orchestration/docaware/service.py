@@ -86,6 +86,17 @@ class EnhancedDocAwareAgentService:
         """
         logger.info(f"📚 SEARCH: Starting {search_method.value} search for: '{query[:50]}...'")
 
+        # Defensive gate — if the project has the RAG toggle disabled, return
+        # nothing regardless of what's in Milvus or any stale doc_aware flag
+        # on the calling agent. Safe fallback even if the auto-disable cascade
+        # in universal_project_views._cascade_disable_doc_aware missed one.
+        if not bool(getattr(self.project, 'rag_enabled', True)):
+            logger.info(
+                f"📚 SEARCH: RAG disabled for project {self.project_id} — "
+                "returning empty result set"
+            )
+            return []
+
         # Build combined content filter expression from multiple filters
         content_filter_expr = self._build_multi_content_filter_expression(content_filters) if content_filters else None
         if content_filter_expr:

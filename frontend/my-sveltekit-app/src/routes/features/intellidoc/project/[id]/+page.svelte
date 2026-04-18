@@ -99,7 +99,18 @@
   // vector_count maps to processing_progress.completed on the backend:
   // the count of ProjectDocument rows with DocumentVectorStatus.status=COMPLETED.
   // This is not the raw Milvus chunk count.
-  $: processedCount = Number(processingStatus?.vector_status?.vector_count) || 0;
+  // DocAware-aware progress counter:
+  //  - When DocAware (RAG) is ON, only count fully-indexed docs as done.
+  //    Summary-only docs (from a prior RAG-off run) are still pending
+  //    backfill, so they should count toward the target, not toward done.
+  //  - When DocAware is OFF, the target is summary-only processing — every
+  //    COMPLETED doc (summary-only or legacy-indexed) counts as done.
+  $: ragStatusEnabled = processingStatus?.vector_status?.rag_enabled !== false;
+  $: ragIndexedCount = Number(processingStatus?.vector_status?.rag_indexed_count) || 0;
+  $: summaryOnlyCount = Number(processingStatus?.vector_status?.summary_only_count) || 0;
+  $: processedCount = ragStatusEnabled
+    ? ragIndexedCount
+    : (Number(processingStatus?.vector_status?.vector_count) || 0);
   $: totalDocumentsCount = processingStatus?.vector_status?.total_documents ?? 0;
   $: rawProcessingStatus = processingStatus?.vector_status?.processing_status || processingStatus?.vector_status?.collection_status || 'not_created';
   $: isTerminalProcessingStatus = ['completed', 'failed', 'error'].includes(rawProcessingStatus);
@@ -179,6 +190,15 @@
   // Folder structure preservation setting
   let preserveOriginalFolderStructure = false;
   let updatingFolderStructureSetting = false;
+
+  // RAG / semantic-search project-level toggle. When off, Start Processing
+  // skips Milvus indexing — agents can still use tool-calling with summaries
+  // but DocAware queries return empty. Flipping off also cascades doc_aware=false
+  // on every AssistantAgent in every workflow under this project.
+  let ragEnabled = true;
+  let updatingRagSetting = false;
+  let ragDisableModalOpen = false;
+  let ragDisableModalInfo: { workflows: number; agents: number } | null = null;
 
   // Document view mode: list (default grid) vs folder (hierarchical browser)
   let documentsViewMode: 'list' | 'folder' = 'list';
@@ -604,6 +624,8 @@
       
       // Load folder structure preservation setting
       preserveOriginalFolderStructure = project.preserve_original_folder_structure || false;
+      // RAG toggle — default true for pre-migration / missing field
+      ragEnabled = project.rag_enabled !== false;
       
       // Set up navigation based on cloned project data
       if (hasNavigation && project.total_pages > 1) {
@@ -726,7 +748,97 @@
       updatingFolderStructureSetting = false;
     }
   }
-  
+
+  // Count AssistantAgent nodes with doc_aware=true across this project's
+  // workflows — used to warn the admin before turning RAG off. Best-effort:
+  // if the workflows endpoint fails we skip the warning modal.
+  async function _countDocAwareAgents(): Promise<{ agents: number; workflows: number }> {
+    try {
+      const auth = get(authStore);
+      const token = auth?.token || '';
+      const resp = await fetch(`/api/projects/${projectId}/workflows/`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (!resp.ok) return { agents: 0, workflows: 0 };
+      const data = await resp.json();
+      const list = Array.isArray(data) ? data : (data.workflows || data.results || []);
+      let agents = 0;
+      let workflows = 0;
+      for (const wf of list) {
+        const nodes = (wf.graph_json && wf.graph_json.nodes) || [];
+        let wfAgents = 0;
+        for (const n of nodes) {
+          if (n.type === 'AssistantAgent' && (n.data || {}).doc_aware) {
+            wfAgents++;
+          }
+        }
+        if (wfAgents > 0) {
+          agents += wfAgents;
+          workflows++;
+        }
+      }
+      return { agents, workflows };
+    } catch {
+      return { agents: 0, workflows: 0 };
+    }
+  }
+
+  async function onRagToggleChange(newValue: boolean) {
+    if (!newValue && ragEnabled) {
+      // Flip ON → OFF: check for doc_aware agents and show confirmation
+      const impact = await _countDocAwareAgents();
+      if (impact.agents > 0) {
+        ragDisableModalInfo = { agents: impact.agents, workflows: impact.workflows };
+        ragDisableModalOpen = true;
+        return; // wait for user confirmation; modal calls _applyRagSetting
+      }
+    }
+    await _applyRagSetting(newValue);
+  }
+
+  async function _applyRagSetting(newValue: boolean) {
+    try {
+      updatingRagSetting = true;
+      const auth = get(authStore);
+      const token = auth?.token || '';
+      if (!token) throw new Error('Not authenticated. Please log in again.');
+
+      const resp = await fetch(`/api/projects/${projectId}/rag-setting/`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ rag_enabled: newValue }),
+      });
+
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        throw new Error(body.error || `Failed to update setting: ${resp.statusText}`);
+      }
+
+      const result = await resp.json();
+      ragEnabled = !!result.rag_enabled;
+      toasts.success(result.message || 'RAG setting updated');
+      ragDisableModalOpen = false;
+      ragDisableModalInfo = null;
+    } catch (error: any) {
+      console.error('❌ UNIVERSAL: Failed to update RAG setting:', error);
+      toasts.error(`Failed to update setting: ${error.message}`);
+      // Revert the toggle on error — reload from backend for source of truth.
+      await loadProject();
+    } finally {
+      updatingRagSetting = false;
+    }
+  }
+
+  function cancelRagDisable() {
+    ragDisableModalOpen = false;
+    ragDisableModalInfo = null;
+    // Revert the visual state of the toggle.
+    ragEnabled = true;
+  }
+
   async function loadDocuments() {
     try {
       console.log(`📄 UNIVERSAL: Loading documents for project ${projectId}`);
@@ -1405,11 +1517,17 @@
                         <span class="ml-2 text-xs text-gray-400">{processedCount}/{totalDocumentsCount}</span>
                       {/if}
                     </summary>
-                    <div class="absolute right-0 top-full mt-2 bg-white border border-gray-200 rounded-lg p-3 min-w-[220px] shadow-lg z-20">
+                    <div class="absolute right-0 top-full mt-2 bg-white border border-gray-200 rounded-lg p-3 min-w-[240px] shadow-lg z-20">
                       <div class="flex items-center justify-between text-sm mb-2">
                         <span class="font-medium text-gray-700">Processing Status:</span>
                         <span class="text-oxford-blue font-semibold">
                           {formatProcessingStatus(effectiveProcessingStatus)}
+                        </span>
+                      </div>
+                      <div class="flex items-center justify-between text-[11px] mb-2">
+                        <span class="text-gray-500">Mode:</span>
+                        <span class="font-medium {ragStatusEnabled ? 'text-oxford-blue' : 'text-amber-600'}">
+                          {ragStatusEnabled ? 'DocAware (indexed)' : 'Summary only'}
                         </span>
                       </div>
                       {#if totalDocumentsCount > 0}
@@ -1420,8 +1538,14 @@
                           ></div>
                         </div>
                         <div class="text-xs text-gray-500 mt-1">
-                          {processedCount}/{totalDocumentsCount} processed
+                          {processedCount}/{totalDocumentsCount} {ragStatusEnabled ? 'indexed' : 'processed'}
                         </div>
+                        {#if ragStatusEnabled && summaryOnlyCount > 0}
+                          <div class="text-[11px] text-amber-600 mt-1">
+                            <i class="fas fa-arrow-rotate-right mr-1"></i>
+                            {summaryOnlyCount} summary-only {summaryOnlyCount === 1 ? 'doc' : 'docs'} waiting to be indexed
+                          </div>
+                        {/if}
                         {#if processingStatus.status_timestamp}
                           <div class="text-[11px] text-gray-500 mt-1">
                             Updated at {new Date(processingStatus.status_timestamp).toLocaleTimeString()}
@@ -2052,13 +2176,43 @@
                         </p>
                       </div>
                       <label class="relative inline-flex items-center cursor-pointer">
-                        <input 
-                          type="checkbox" 
+                        <input
+                          type="checkbox"
                           id="enable-summary-toggle"
                           bind:checked={llmConfig.enableSummary}
                           class="sr-only peer"
                         />
                         <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-oxford-blue/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-oxford-blue"></div>
+                      </label>
+                    </div>
+
+                    <!-- Semantic Search (RAG) Toggle — project-level, sticky -->
+                    <div class="flex items-center justify-between p-3 bg-white rounded-lg border border-gray-200 mt-3">
+                      <div class="flex-1">
+                        <label class="text-sm font-medium text-gray-900 cursor-pointer" for="rag-toggle">
+                          <i class="fas fa-search mr-1 text-oxford-blue"></i>DocAware
+                        </label>
+                        <p class="text-xs text-gray-500 mt-1">
+                          Index documents into the vector store so agents with
+                          DocAware can retrieve them. Turn off to skip the
+                          vector pipeline — agents can still use document
+                          summaries via tool-calling. Flipping back on later
+                          re-indexes summary-only documents automatically.
+                        </p>
+                      </div>
+                      <label class="relative inline-flex items-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          id="rag-toggle"
+                          checked={ragEnabled}
+                          on:change={(e) => onRagToggleChange((e.target as HTMLInputElement).checked)}
+                          disabled={updatingRagSetting}
+                          class="sr-only peer"
+                        />
+                        <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-oxford-blue/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-oxford-blue peer-disabled:opacity-50"></div>
+                        {#if updatingRagSetting}
+                          <div class="ml-2 animate-spin rounded-full h-4 w-4 border-b-2 border-oxford-blue"></div>
+                        {/if}
                       </label>
                     </div>
                     
@@ -2601,6 +2755,46 @@
         <i class="fas fa-arrow-left mr-2"></i>
         Back to Projects
       </button>
+    </div>
+  </div>
+{/if}
+
+<!-- RAG disable confirmation modal — mounted at top level so it overlays any tab. -->
+{#if ragDisableModalOpen && ragDisableModalInfo}
+  <div class="fixed inset-0 z-[10000] flex items-center justify-center bg-black/40" role="dialog" aria-modal="true">
+    <div class="bg-white rounded-2xl shadow-xl p-6 max-w-md w-[90%]">
+      <h3 class="text-lg font-semibold text-gray-900 mb-2 flex items-center">
+        <i class="fas fa-triangle-exclamation text-amber-500 mr-2"></i>
+        Disable DocAware?
+      </h3>
+      <p class="text-sm text-gray-600 mb-3">
+        Turning off DocAware will automatically disable it on
+        <strong>{ragDisableModalInfo.agents}</strong>
+        agent{ragDisableModalInfo.agents === 1 ? '' : 's'} across
+        <strong>{ragDisableModalInfo.workflows}</strong>
+        workflow{ragDisableModalInfo.workflows === 1 ? '' : 's'}.
+      </p>
+      <p class="text-xs text-gray-500 mb-5">
+        Those agents will still run — they just won't retrieve from the
+        vector store. If you re-enable DocAware later, the per-agent
+        setting stays off until you turn it back on manually.
+      </p>
+      <div class="flex justify-end gap-2">
+        <button
+          type="button"
+          class="px-4 py-2 text-sm text-gray-700 rounded-md hover:bg-gray-100 transition-colors"
+          on:click={cancelRagDisable}
+          disabled={updatingRagSetting}
+        >Cancel</button>
+        <button
+          type="button"
+          class="px-4 py-2 text-sm bg-oxford-blue text-white rounded-md hover:bg-blue-900 transition-colors disabled:opacity-50"
+          on:click={() => _applyRagSetting(false)}
+          disabled={updatingRagSetting}
+        >
+          {updatingRagSetting ? 'Disabling…' : 'Disable DocAware'}
+        </button>
+      </div>
     </div>
   </div>
 {/if}

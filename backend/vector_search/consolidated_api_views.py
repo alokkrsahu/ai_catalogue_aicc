@@ -447,6 +447,26 @@ def get_vector_status_consolidated(request, project_id):
         is_count_complete = total_documents > 0 and vector_count >= total_documents
         effective_is_processing = raw_is_processing and not is_terminal_status and not is_count_complete
 
+        # RAG toggle counters — let the UI distinguish "fully indexed" from
+        # "summary-only" docs so admins can see pending backfill at a glance.
+        rag_enabled = bool(getattr(project, 'rag_enabled', True))
+        try:
+            from users.models import DocumentVectorStatus, VectorProcessingStatus
+            rag_indexed_count = DocumentVectorStatus.objects.filter(
+                document__project=project,
+                status=VectorProcessingStatus.COMPLETED,
+                rag_indexed=True,
+            ).count()
+            summary_only_count = DocumentVectorStatus.objects.filter(
+                document__project=project,
+                status=VectorProcessingStatus.COMPLETED,
+                rag_indexed=False,
+            ).count()
+        except Exception as count_err:
+            logger.warning(f"⚠️ CONSOLIDATED: Could not compute RAG counters: {count_err}")
+            rag_indexed_count = 0
+            summary_only_count = 0
+
         consolidated_status = {
             'project_id': project_id,
             'project_name': project.name,
@@ -457,7 +477,10 @@ def get_vector_status_consolidated(request, project_id):
                 'ready_documents': ready_documents,
                 'collection_status': normalized_status,
                 'processing_status': normalized_status,  # Use normalized status for processing_status too
-                'is_processing': effective_is_processing
+                'is_processing': effective_is_processing,
+                'rag_enabled': rag_enabled,
+                'rag_indexed_count': rag_indexed_count,
+                'summary_only_count': summary_only_count,
             },
             'processing_capabilities': project.processing_capabilities or {},
             'template_info': {

@@ -217,18 +217,36 @@ class UnifiedVectorSearchManager:
             except Exception as e:
                 logger.error("❌ Failed generating document summaries batch: %s", e)
 
-        # Incremental: skip docs already successfully embedded in Milvus
-        already_completed_doc_ids = DocumentVectorStatus.objects.filter(
-            document__in=ready_documents,
-            status=VectorProcessingStatus.COMPLETED,
-        ).values_list('document_id', flat=True)
+        # RAG toggle — project.rag_enabled gates the extract/chunk/embed/index
+        # steps. When OFF, the pipeline still runs summary generation (above)
+        # but skips Milvus entirely. When ON, we also re-index docs that were
+        # previously processed as summary-only (rag_indexed=False) so
+        # flipping the toggle back on retroactively indexes older uploads.
+        run_rag_stages = bool(getattr(project, 'rag_enabled', True))
 
-        documents = ready_documents.exclude(id__in=already_completed_doc_ids)
+        if run_rag_stages:
+            # Fully-indexed docs are the only ones we skip — summary-only docs
+            # (rag_indexed=False) are backfill candidates that need the vector
+            # pipeline run on them.
+            already_done_doc_ids = DocumentVectorStatus.objects.filter(
+                document__in=ready_documents,
+                status=VectorProcessingStatus.COMPLETED,
+                rag_indexed=True,
+            ).values_list('document_id', flat=True)
+        else:
+            # Summary-only run — skip every doc that already has a
+            # COMPLETED summary, regardless of RAG state.
+            already_done_doc_ids = DocumentVectorStatus.objects.filter(
+                document__in=ready_documents,
+                status=VectorProcessingStatus.COMPLETED,
+            ).values_list('document_id', flat=True)
 
-        skipped_count = len(already_completed_doc_ids)
+        documents = ready_documents.exclude(id__in=already_done_doc_ids)
+
+        skipped_count = len(already_done_doc_ids)
         logger.info(
-            f"  • Skipping {skipped_count} already-COMPLETED documents; "
-            f"{documents.count()} to process"
+            f"  • RAG enabled: {run_rag_stages}; skipping {skipped_count} "
+            f"already-done documents; {documents.count()} to process"
         )
 
         if not documents.exists():
@@ -268,10 +286,55 @@ class UnifiedVectorSearchManager:
         total_chunks_created = 0
         processing_details = []
 
-        # Process documents using the enhanced hierarchical processor
+        # RAG disabled — skip extraction/chunking/embedding/indexing entirely.
+        # Mark each doc as COMPLETED + rag_indexed=False so a future run with
+        # the toggle flipped back on picks them up as backfill candidates.
+        if not run_rag_stages:
+            logger.info(
+                f"🛑 RAG indexing disabled for project {project.name} — "
+                f"marking {len(documents_list)} docs as summary-only COMPLETED"
+            )
+            for original_doc in documents_list:
+                try:
+                    self._update_document_status(
+                        str(project.project_id),
+                        str(original_doc.document_id),
+                        'completed',
+                        'Summary-only processing (RAG disabled)',
+                        enable_summary=doc_summaries_will_generate,
+                        rag_indexed=False,
+                    )
+                    processed_count += 1
+                    processing_details.append({
+                        'file_name': original_doc.original_filename,
+                        'chunks_created': 0,
+                        'document_summaries_generated': bool(doc_summaries_will_generate),
+                        'rag_indexed': False,
+                        'summary_only': True,
+                    })
+                except Exception as e:
+                    logger.error(f"❌ Failed marking {original_doc.original_filename} as summary-only: {e}")
+                    failed_count += 1
+            # Update collection status once and return early.
+            duration_seconds = time.time() - start_time
+            self._update_collection_status(project, processed_count, failed_count, 'enhanced')
+            return {
+                'status': 'completed',
+                'processed_documents': processed_count,
+                'failed_documents': failed_count,
+                'skipped_documents': skipped_count,
+                'summaries_generated': summaries_generated,
+                'total_chunks_created': 0,
+                'processing_mode': 'enhanced',
+                'rag_indexed': False,
+                'duration_seconds': duration_seconds,
+                'details': processing_details,
+            }
+
+        # Process documents using the enhanced hierarchical processor (RAG on)
         processor.folder_organization_map = folder_organization_map or {}
         doc_infos = processor.process_project_documents_enhanced(documents_list)
-        
+
         for doc_info in doc_infos:
             try:
                 # Find the original document object
@@ -309,10 +372,11 @@ class UnifiedVectorSearchManager:
                         # 🎯 ENHANCED ATOMICITY SUCCESS
                         self._update_document_status(
                             str(project.project_id),
-                            str(original_doc.document_id), 
-                            'completed', 
+                            str(original_doc.document_id),
+                            'completed',
                             f'Enhanced processing: {len(doc_info.chunks)} chunks (chunk summaries removed); doc summaries generated={bool(doc_summaries_will_generate)}',
                             enable_summary=doc_summaries_will_generate,
+                            rag_indexed=True,
                         )
                         
                         processed_count += 1
@@ -391,11 +455,16 @@ class UnifiedVectorSearchManager:
             'collection_name': collection.collection_name if collection else 'default'
         }
     
-    def _update_document_status(self, project_id: str, document_id: str, status: str, message: str, enable_summary: bool = True):
+    def _update_document_status(self, project_id: str, document_id: str, status: str, message: str, enable_summary: bool = True, rag_indexed: Optional[bool] = None):
         """Update individual document processing status for frontend tracking using DocumentVectorStatus
-        
+
         SECURITY: Requires project_id to ensure document belongs to the correct project.
         This prevents potential cross-project document access.
+
+        rag_indexed: When provided, overrides the stored rag_indexed flag on the
+        DocumentVectorStatus row. Pass True on successful Milvus insert, False
+        for summary-only runs, None to leave untouched (e.g. during the
+        intermediate 'processing' update).
         """
         try:
             from users.models import ProjectDocument, DocumentVectorStatus, ProjectVectorCollection, VectorProcessingStatus
@@ -434,7 +503,7 @@ class UnifiedVectorSearchManager:
             if status in vector_status_map:
                 doc_vector_status.status = vector_status_map[status]
                 doc_vector_status.error_message = message if status == 'failed' else ''
-                
+
                 if status == 'completed':
                     doc_vector_status.processed_at = timezone.now()
                     # Document-level summaries (no per-chunk summaries/topics anymore)
@@ -448,7 +517,12 @@ class UnifiedVectorSearchManager:
                     doc_vector_status.topic_generated_at = None
                     doc_vector_status.topic_chunks_count = 0
                     doc_vector_status.topic_generator_used = 'none'
-                
+
+                # rag_indexed — explicitly tracked so a later re-run can
+                # identify summary-only docs and backfill them.
+                if rag_indexed is not None:
+                    doc_vector_status.rag_indexed = bool(rag_indexed)
+
                 doc_vector_status.updated_at = timezone.now()
                 doc_vector_status.save()
                 
