@@ -81,7 +81,8 @@
   let dragStartPan = { x: 0, y: 0 };
   const MIN_ZOOM = 0.1;    // Allow much more zoom out
   const MAX_ZOOM = 5;      // Allow much more zoom in
-  const ZOOM_STEP = 0.1;
+  const ZOOM_STEP = 0.1;             // Coarse step for toolbar + / - buttons
+  const WHEEL_ZOOM_STEP = 0.03;      // Gentler step for scroll-wheel / trackpad
 
   // 🌟 INFINITE CANVAS: Enhanced canvas dimensions
   const CANVAS_WIDTH = 20000;   // Much larger canvas
@@ -128,6 +129,9 @@
   // which category it came from so the resulting edge carries a source_handle.
   let sourceCategoryId: string | null = null;
   let sourceCategoryName: string | null = null;
+  // When a drag starts from a SplitterAgent's "+ connect agent" row, remember
+  // that this is a new-slot drag so edge creation sets source_handle = target.id.
+  let sourceSplitterNew = false;
   let isDraggingNode = false;
   let dragOffset = { x: 0, y: 0 };
   let hasDraggedSignificantly = false;
@@ -793,73 +797,79 @@
   
   
   
+  // Actual rendered dimensions of a node (must stay in sync with the inline
+  // formulas the node render loop uses). Shared by the render loop and
+  // centerView() so fit-to-content uses the real bbox, not a fixed 250×80.
+  function getNodeDimensions(node: any): { width: number; height: number } {
+    if (node.type === 'GroupChatManager') return { width: 300, height: 120 };
+    if (node.type === 'ClassifierAgent') {
+      const catCount = (node.data?.categories || []).length || 2;
+      return { width: 260, height: 76 + 36 * catCount };
+    }
+    if (node.type === 'SplitterAgent') {
+      const outCount = edges.filter(e => e.source === node.id).length;
+      // +1 for the "+ connect agent" row
+      return { width: 260, height: 76 + 36 * (outCount + 1) };
+    }
+    return { width: 250, height: 80 };
+  }
+
   // Zoom functions
+  function applyZoomAroundPoint(newZoom: number, anchorX: number, anchorY: number) {
+    newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
+    if (newZoom === zoomLevel) return;
+    const zoomRatio = newZoom / zoomLevel;
+    // Keeps the world-point under (anchorX, anchorY) fixed through the zoom:
+    //   screenPoint = worldPoint * zoom + pan   →   solve for the new pan
+    panOffset = {
+      x: anchorX - (anchorX - panOffset.x) * zoomRatio,
+      y: anchorY - (anchorY - panOffset.y) * zoomRatio
+    };
+    zoomLevel = newZoom;
+    throttledConnectionUpdate();
+  }
+
+  function viewportCenter(): { x: number; y: number } {
+    const rect = canvasElement?.getBoundingClientRect();
+    return { x: (rect?.width || 800) / 2, y: (rect?.height || 600) / 2 };
+  }
+
   function handleZoomIn() {
-    const newZoom = Math.min(MAX_ZOOM, zoomLevel + ZOOM_STEP);
-    if (newZoom !== zoomLevel) {
-      setZoomLevel(newZoom);
-    }
+    const { x, y } = viewportCenter();
+    applyZoomAroundPoint(zoomLevel + ZOOM_STEP, x, y);
   }
-  
+
   function handleZoomOut() {
-    const newZoom = Math.max(MIN_ZOOM, zoomLevel - ZOOM_STEP);
-    if (newZoom !== zoomLevel) {
-      setZoomLevel(newZoom);
-    }
+    const { x, y } = viewportCenter();
+    applyZoomAroundPoint(zoomLevel - ZOOM_STEP, x, y);
   }
-  
+
   function resetZoom() {
-    if (zoomLevel !== 1 || panOffset.x !== 0 || panOffset.y !== 0) {
-      zoomLevel = 1;
-      panOffset = { x: 0, y: 0 };
-      throttledConnectionUpdate();
-      console.log('🔄 STABLE ZOOM: Reset to 100%');
-    }
+    // Reset zoom to 100% while keeping the point under the viewport center
+    // fixed, so the view doesn't jump to screen (10000, 10000) — which is
+    // what `panOffset = {0,0}` used to do (nodes live at world + CANVAS_CENTER).
+    const { x, y } = viewportCenter();
+    applyZoomAroundPoint(1, x, y);
+    console.log('🔄 STABLE ZOOM: Reset to 100% (anchored on viewport center)');
   }
-  
+
   function setZoomLevel(newZoom: number) {
     if (newZoom !== zoomLevel) {
       zoomLevel = newZoom;
-      // 🌟 PREVENT FLICKER: Throttled batch update
       throttledConnectionUpdate();
       console.log('🔍 STABLE ZOOM: Set zoom level to', Math.round(zoomLevel * 100) + '%');
     }
   }
-  
+
   function handleWheel(event: WheelEvent) {
     if (event.ctrlKey || event.metaKey) {
       event.preventDefault();
-      
-      // 🌟 STABLE ZOOM: Prevent flickering with smooth zoom implementation
       const rect = canvasElement?.getBoundingClientRect();
       if (!rect) return;
-      
-      // Get mouse position relative to canvas
       const mouseX = event.clientX - rect.left;
       const mouseY = event.clientY - rect.top;
-      
-      // Calculate zoom delta
-      const delta = event.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP;
-      const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoomLevel + delta));
-      
-      if (newZoom !== zoomLevel) {
-        // 🌟 SMOOTH ZOOM: Calculate pan adjustment to zoom toward mouse position
-        const zoomRatio = newZoom / zoomLevel;
-        
-        // Adjust pan offset to zoom toward mouse cursor
-        panOffset = {
-          x: mouseX - (mouseX - panOffset.x) * zoomRatio,
-          y: mouseY - (mouseY - panOffset.y) * zoomRatio
-        };
-        
-        // Apply new zoom level
-        zoomLevel = newZoom;
-        
-        // 🌟 PREVENT FLICKER: Throttled batch update to prevent multiple renders
-        throttledConnectionUpdate();
-        
-        console.log('🔍 STABLE ZOOM: Zoomed to', Math.round(zoomLevel * 100) + '% at mouse position', { mouseX, mouseY });
-      }
+      const delta = event.deltaY > 0 ? -WHEEL_ZOOM_STEP : WHEEL_ZOOM_STEP;
+      applyZoomAroundPoint(zoomLevel + delta, mouseX, mouseY);
     }
   }
 
@@ -1037,38 +1047,56 @@
     setTimeout(() => centerView(), 150);
   }
 
-  // Center view function
+  // Center view function — fits all nodes in the viewport (pans AND zooms).
   function centerView() {
-    // Ensure canvas rect is updated
     updateCanvasRect();
-    
+    const viewportW = canvasRect?.width || 800;
+    const viewportH = canvasRect?.height || 600;
+
     if (nodes.length === 0) {
-      // 🌟 INFINITE CANVAS: Center on canvas center if no nodes
-      console.log('🎯 CENTERING: No nodes, centering on canvas center');
+      zoomLevel = 1;
       panOffset = {
-        x: (canvasRect?.width || 800) / 2 - CANVAS_CENTER_X,
-        y: (canvasRect?.height || 600) / 2 - CANVAS_CENTER_Y
+        x: viewportW / 2 - CANVAS_CENTER_X,
+        y: viewportH / 2 - CANVAS_CENTER_Y
       };
-      console.log('🎯 CENTERED: New panOffset =', panOffset);
-    } else {
-      // Center on nodes
-      const minX = Math.min(...nodes.map(n => n.position.x + CANVAS_CENTER_X));
-      const maxX = Math.max(...nodes.map(n => n.position.x + CANVAS_CENTER_X + 250));
-      const minY = Math.min(...nodes.map(n => n.position.y + CANVAS_CENTER_Y));
-      const maxY = Math.max(...nodes.map(n => n.position.y + CANVAS_CENTER_Y + 80));
-      
-      console.log('🎯 CENTERING: On nodes, bounds =', { minX, maxX, minY, maxY });
-      
-      const centerX = (minX + maxX) / 2;
-      const centerY = (minY + maxY) / 2;
-      
-      panOffset = {
-        x: (canvasRect?.width || 800) / 2 - centerX,
-        y: (canvasRect?.height || 600) / 2 - centerY
-      };
+      throttledConnectionUpdate();
+      return;
     }
-    
-    console.log('🎯 CANVAS: Centered view');
+
+    // Bounding box in world-space — uses real per-node dimensions, so
+    // GroupChatManager (300×120) and Classifier/Splitter (variable height with
+    // rows) contribute correctly instead of an assumed 250×80.
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of nodes) {
+      const { width, height } = getNodeDimensions(n);
+      const left   = n.position.x + CANVAS_CENTER_X;
+      const top    = n.position.y + CANVAS_CENTER_Y;
+      const right  = left + width;
+      const bottom = top + height;
+      if (left   < minX) minX = left;
+      if (top    < minY) minY = top;
+      if (right  > maxX) maxX = right;
+      if (bottom > maxY) maxY = bottom;
+    }
+    const bboxW = Math.max(1, maxX - minX);
+    const bboxH = Math.max(1, maxY - minY);
+    const bboxCx = (minX + maxX) / 2;
+    const bboxCy = (minY + maxY) / 2;
+
+    // Fit bbox into 90% of the viewport; clamp to [MIN_ZOOM, 1] so a tiny
+    // graph is not magnified past 100%.
+    const margin = 0.9;
+    const fitZoom = Math.min((viewportW * margin) / bboxW, (viewportH * margin) / bboxH);
+    const targetZoom = Math.max(MIN_ZOOM, Math.min(1, fitZoom));
+
+    zoomLevel = targetZoom;
+    // Screen-to-world: screen = world * zoom + pan  ⇒  pan = screenCenter - worldCenter * zoom
+    panOffset = {
+      x: viewportW / 2 - bboxCx * targetZoom,
+      y: viewportH / 2 - bboxCy * targetZoom
+    };
+    throttledConnectionUpdate();
+    console.log('🎯 CANVAS: Fit', nodes.length, 'nodes at', Math.round(targetZoom * 100) + '%');
   }
   
   function addNodeToCanvas(nodeType: string, position: { x: number; y: number }) {
@@ -1303,8 +1331,8 @@
   
   // Connection creation handlers
 
-  function handleConnectionStart(event: MouseEvent, node: any, categoryId: string | null = null, categoryName: string | null = null) {
-    console.log('🟦 CONNECTION START: Event triggered on node', node.data.name, categoryId ? `(category: ${categoryName})` : '');
+  function handleConnectionStart(event: MouseEvent, node: any, categoryId: string | null = null, categoryName: string | null = null, splitterNew: boolean = false) {
+    console.log('🟦 CONNECTION START: Event triggered on node', node.data.name, categoryId ? `(category: ${categoryName})` : (splitterNew ? '(splitter new-slot)' : ''));
     event.preventDefault();
     event.stopPropagation();
 
@@ -1316,12 +1344,14 @@
       tempConnection = null;
       sourceCategoryId = null;
       sourceCategoryName = null;
+      sourceSplitterNew = false;
     }
 
     isConnecting = true;
     sourceNode = node;
     sourceCategoryId = categoryId;
     sourceCategoryName = categoryName;
+    sourceSplitterNew = splitterNew;
     
     console.log('🎆 CONNECTION START: Set isConnecting=true, sourceNode=', sourceNode.data.name);
     
@@ -1381,6 +1411,7 @@
         sourceNode = null;
         sourceCategoryId = null;
         sourceCategoryName = null;
+        sourceSplitterNew = false;
         tempConnection = null;
         mousePosition = { x: 0, y: 0 }; // Reset mouse position
       }
@@ -1401,6 +1432,7 @@
       sourceNode = null;
       sourceCategoryId = null;
       sourceCategoryName = null;
+      sourceSplitterNew = false;
       return;
     }
 
@@ -1411,8 +1443,9 @@
     sourceNode = null;
     sourceCategoryId = null;
     sourceCategoryName = null;
+    sourceSplitterNew = false;
   }
-  
+
   function createConnection(source: any, target: any) {
     // CLASSIFIER VALIDATION: source handle must be a category if source is a Classifier.
     if (source.type === 'ClassifierAgent' && !sourceCategoryId) {
@@ -1444,12 +1477,13 @@
     }
 
     // Classifier fan-out: allow multiple edges from the SAME category handle (parallel).
-    // But de-dupe on (source, target, source_handle).
-    const existingConnection = edges.find(edge =>
-      edge.source === source.id &&
-      edge.target === target.id &&
-      (edge.source_handle || null) === (sourceCategoryId || null)
-    );
+    // Splitter: at most one edge per (source, target) — each row IS the target.
+    // Otherwise de-dupe on (source, target, source_handle).
+    const existingConnection = edges.find(edge => {
+      if (edge.source !== source.id || edge.target !== target.id) return false;
+      if (source.type === 'SplitterAgent') return true;
+      return (edge.source_handle || null) === (sourceCategoryId || null);
+    });
 
     if (existingConnection) {
       console.log('⚠️ CANVAS: Connection already exists');
@@ -1524,6 +1558,10 @@
     if (sourceCategoryId) {
       newConnection.source_handle = sourceCategoryId;
       newConnection.category_name = sourceCategoryName || '';
+    } else if (source.type === 'SplitterAgent') {
+      // Splitter "slot" handle id = target agent id (lets the edge path renderer
+      // find the row for this edge, and makes rows inherit the target's config).
+      newConnection.source_handle = target.id;
     }
 
     edges = [...edges, newConnection];
@@ -1598,6 +1636,18 @@
         x: sourceNode.position.x + CANVAS_CENTER_X + sourceWidth,
         y: sourceNode.position.y + CANVAS_CENTER_Y + yInNode,
       };
+    } else if (sourceNode.type === 'SplitterAgent') {
+      // Per-slot output handle: Y depends on this edge's row index among outgoing edges.
+      // Same row height formula as Classifier (32 + 4 gap).
+      const sourceWidth = 260;
+      const outEdges = edges.filter(e => e.source === sourceNode.id);
+      const rowIdx = Math.max(0, outEdges.findIndex(e => e === connection
+        || (e.source === connection?.source && e.target === connection?.target)));
+      const yInNode = 50 + 8 + rowIdx * 36 + 16;
+      sourcePos = {
+        x: sourceNode.position.x + CANVAS_CENTER_X + sourceWidth,
+        y: sourceNode.position.y + CANVAS_CENTER_Y + yInNode,
+      };
     } else {
       // Standard node positioning
       const sourceWidth = 250;
@@ -1632,8 +1682,10 @@
         x: targetNode.position.x + CANVAS_CENTER_X,              // Left edge
         y: targetNode.position.y + CANVAS_CENTER_Y + targetHeight / 2  // Center height
       };
-    } else if (targetNode.type === 'ClassifierAgent') {
-      // Classifier's input handle is fixed at y=50 in node-local coordinates (header center).
+    } else if (targetNode.type === 'ClassifierAgent' || targetNode.type === 'SplitterAgent') {
+      // Classifier/Splitter input handle is fixed at y=50 in node-local
+      // coordinates (header center) — matches the `top-[50px]` of the rendered
+      // dot in the connection-handles block.
       targetPos = {
         x: targetNode.position.x + CANVAS_CENTER_X,
         y: targetNode.position.y + CANVAS_CENTER_Y + 50,
@@ -1711,6 +1763,16 @@
           y: sourceNode.position.y + CANVAS_CENTER_Y + sourceHeight / 3
         };
       }
+    } else if (sourceNode.type === 'SplitterAgent' && sourceSplitterNew) {
+      // Drag started from the "+ connect agent" row (last row). Anchor the temp
+      // line at that row's right-edge dot.
+      const sourceWidth = 260;
+      const outCount = edges.filter(e => e.source === sourceNode.id).length;
+      const yInNode = 50 + 8 + outCount * 36 + 16;
+      sourcePos = {
+        x: sourceNode.position.x + CANVAS_CENTER_X + sourceWidth,
+        y: sourceNode.position.y + CANVAS_CENTER_Y + yInNode
+      };
     } else {
       // Standard node positioning
       const sourceWidth = sourceNode.type === 'DelegateAgent' ? 250 : 250;
@@ -2273,9 +2335,9 @@
             {@const isValidTarget = isConnecting && sourceNode && node.id !== sourceNode.id}
             {@const isCurrentSource = isConnecting && sourceNode && node.id === sourceNode.id}
             {@const isRequiringInput = agentsRequiringInput.has(node.id)}
-            {@const nodeWidth = node.type === 'GroupChatManager' ? 300 : (node.type === 'ClassifierAgent' ? 260 : 250)}
-            {@const classifierCatCount = node.type === 'ClassifierAgent' ? ((node.data?.categories || []).length || 2) : 0}
-            {@const nodeHeight = node.type === 'GroupChatManager' ? 120 : (node.type === 'ClassifierAgent' ? (76 + 36 * classifierCatCount) : 80)}
+            {@const _dims = getNodeDimensions(node)}
+            {@const nodeWidth = _dims.width}
+            {@const nodeHeight = _dims.height}
             <div 
               class="agent-node absolute bg-white border-2 rounded-xl shadow-lg transition-all duration-200 hover:shadow-xl cursor-pointer select-none {selectedNode?.id === node.id ? 'border-oxford-blue ring-2 ring-oxford-blue ring-opacity-20' : isRequiringInput ? 'border-orange-400 ring-2 ring-orange-400 ring-opacity-30 animate-pulse human-input-node' : isValidTarget ? 'border-green-400 ring-2 ring-green-400 ring-opacity-30' : isCurrentSource ? 'border-blue-500 ring-2 ring-blue-500 ring-opacity-30' : 'border-gray-300 hover:border-oxford-blue'}"
               style="left: {node.position.x + CANVAS_CENTER_X}px; top: {node.position.y + CANVAS_CENTER_Y}px; width: {nodeWidth}px; height: {nodeHeight}px; pointer-events: auto;"
@@ -2376,6 +2438,64 @@
                         </div>
                       </div>
                     {/each}
+                  </div>
+                </div>
+              {:else if node.type === 'SplitterAgent'}
+                <!-- Splitter Layout: header + one row per connected agent (inherited label) + "+ connect" row -->
+                <div class="h-full flex flex-col p-2">
+                  <!-- Header -->
+                  <div class="flex items-center space-x-2 mb-2 pb-2 border-b border-gray-100">
+                    <div
+                      class="w-9 h-9 rounded-lg flex items-center justify-center text-white shadow-md flex-shrink-0"
+                      style="background-color: {getNodeColor(node)};"
+                    >
+                      <i class="fas {getAgentIcon(node.type)} text-sm"></i>
+                    </div>
+                    <div class="flex-1 min-w-0">
+                      <div class="font-semibold text-gray-900 truncate text-sm">
+                        {node.data?.name || 'Splitter'}
+                      </div>
+                      <div class="text-xs text-gray-500">SplitterAgent</div>
+                    </div>
+                  </div>
+                  <!-- Per-outgoing-edge rows (label inherited from connected target agent) -->
+                  <div class="flex-1 flex flex-col gap-1 relative">
+                    {#each edges.filter(e => e.source === node.id) as outEdge, rowIdx (outEdge.id)}
+                      {@const tgt = nodes.find(n => n.id === outEdge.target)}
+                      <div
+                        class="relative flex items-center px-3 py-2 rounded-md bg-blue-50 border border-blue-100 text-sm text-gray-800"
+                        style="height: 32px;"
+                        title={tgt?.data?.name ? `Output → ${tgt.data.name}` : 'Output slot'}
+                      >
+                        <div class="truncate flex-1 pr-4">{tgt?.data?.name || 'Unconnected'}</div>
+                        <!-- Output-anchor dot (not draggable — this slot already has an edge) -->
+                        <div
+                          class="absolute right-0 w-4 h-4 rounded-full border-2 border-white shadow-md bg-blue-500"
+                          style="top: 50%; transform: translate(50%, -50%); z-index: 100;"
+                        >
+                          <div class="absolute inset-0 rounded-full opacity-30 bg-blue-400"></div>
+                        </div>
+                      </div>
+                    {/each}
+                    <!-- Persistent "+ connect agent" row — the drag source for NEW edges -->
+                    <div
+                      class="relative flex items-center px-3 py-2 rounded-md border border-dashed border-blue-300 text-sm"
+                      style="height: 32px;"
+                      title="Drag to connect a new agent"
+                    >
+                      <div class="truncate flex-1 pr-4 text-blue-500 italic">+ connect agent</div>
+                      <div
+                        class="connection-handle absolute right-0 w-4 h-4 rounded-full border-2 shadow-md cursor-crosshair hover:scale-110 transition-all duration-200 {isCurrentSource && sourceSplitterNew ? 'bg-blue-500 border-white' : 'bg-white border-blue-500'}"
+                        style="top: 50%; transform: translate(50%, -50%); z-index: 100;"
+                        title="Drag to connect a new agent"
+                        on:mousedown|stopPropagation={(e) => {
+                          console.log('🪓 SPLITTER HANDLE: new slot drag for', node.data.name);
+                          handleConnectionStart(e, node, null, null, true);
+                        }}
+                      >
+                        <div class="absolute inset-0 rounded-full opacity-30 {isCurrentSource && sourceSplitterNew ? 'bg-blue-400 animate-pulse' : ''}"></div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               {:else}
@@ -2485,6 +2605,14 @@
                   class="absolute left-0 top-[50px] w-4 h-4 rounded-full border-2 border-white shadow-md transition-all {isValidTarget ? 'bg-green-500 scale-110 animate-pulse' : 'bg-amber-400'}"
                   style="transform: translate(-50%, -50%); z-index: 50;"
                   title="Connection input (text to classify)"
+                ></div>
+              {:else if node.type === 'SplitterAgent'}
+                <!-- Splitter: per-slot output handles are rendered inside the node body;
+                     here we only render the single input handle on the left. -->
+                <div
+                  class="absolute left-0 top-[50px] w-4 h-4 rounded-full border-2 border-white shadow-md transition-all {isValidTarget ? 'bg-green-500 scale-110 animate-pulse' : 'bg-blue-400'}"
+                  style="transform: translate(-50%, -50%); z-index: 50;"
+                  title="Connection input (text to split)"
                 ></div>
               {:else}
                 <!-- Standard Agent Connection Handles -->
