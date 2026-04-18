@@ -1733,17 +1733,20 @@ class WorkflowBuilder:
             if len(incoming) > 1:
                 node_type_by_id = {n["id"]: n["type"] for n in self.nodes}
 
-                def _traces_back_to_classifier(src_id, seen=None):
-                    seen = seen if seen is not None else set()
-                    if src_id in seen:
+                def _traces_back_to_classifier(src_id, _path=frozenset()):
+                    # Per-path cycle guard. Using a frozenset (immutable) ensures
+                    # sibling branches don't mutate each other's visited set — a
+                    # shared-ancestor (e.g. Splitter feeding several specialists)
+                    # must be visitable via each sibling independently.
+                    if src_id in _path:
                         return False
-                    seen.add(src_id)
                     if node_type_by_id.get(src_id) == "ClassifierAgent":
                         return True
                     upstream = [e for e in self.edges if e["target"] == src_id]
                     if not upstream:
                         return False
-                    return all(_traces_back_to_classifier(e["source"], seen) for e in upstream)
+                    new_path = _path | {src_id}
+                    return all(_traces_back_to_classifier(e["source"], new_path) for e in upstream)
 
                 if not all(_traces_back_to_classifier(e["source"]) for e in incoming):
                     errors.append(f"EndNode has {len(incoming)} incoming connections (max 1)")
@@ -2185,18 +2188,21 @@ def _auto_repair_connections(builder: WorkflowBuilder):
     if len(end_incoming) > 1:
         node_type_by_id = {n["id"]: n["type"] for n in builder.nodes}
 
-        def _traces_back_to_classifier(src_id: str, seen: Optional[set] = None) -> bool:
-            """True iff every path leading into src_id originates from a classifier branch."""
-            seen = seen if seen is not None else set()
-            if src_id in seen:
+        def _traces_back_to_classifier(src_id: str, _path: frozenset = frozenset()) -> bool:
+            """True iff every path leading into src_id originates from a classifier branch.
+            Uses a per-path frozenset guard so sibling branches that share an ancestor
+            (e.g. specialists all upstream of the same Splitter) each get to visit the
+            shared ancestor independently — a mutable shared ``seen`` set would
+            incorrectly short-circuit the second sibling's traversal."""
+            if src_id in _path:
                 return False
-            seen.add(src_id)
             if node_type_by_id.get(src_id) == "ClassifierAgent":
                 return True
             upstream = [e for e in builder.edges if e["target"] == src_id]
             if not upstream:
                 return False
-            return all(_traces_back_to_classifier(e["source"], seen) for e in upstream)
+            new_path = _path | {src_id}
+            return all(_traces_back_to_classifier(e["source"], new_path) for e in upstream)
 
         if all(_traces_back_to_classifier(e["source"]) for e in end_incoming):
             logger.info(
@@ -2215,14 +2221,24 @@ def _auto_repair_connections(builder: WorkflowBuilder):
     # an edge A → B (or B → A) between them, the inter-specialist edge is almost
     # always a leftover from the LLM's initial chained output — Splitter
     # specialists should run in parallel, not in series. Delete the chain edges.
+    # IMPORTANT: EXCLUDE Synthesizer-like nodes from "specialists" — those are
+    # aggregators, not parallel workers, and Specialist → Synthesizer edges
+    # must be preserved as the fan-in wiring.
     for splitter in splitter_nodes:
         direct_children = {
             e["target"] for e in builder.edges if e["source"] == splitter["id"]
         }
+        # Synthesizers/aggregators are not specialists even if the verifier
+        # incorrectly added a Splitter → Synthesizer edge. Their role is to
+        # collect specialist outputs, so they must be excluded from the
+        # chain-cleanup set to avoid stripping legitimate fan-in edges.
+        specialists_only = {
+            cid for cid in direct_children if not _looks_like_synthesizer(cid)
+        }
         chain_edges = [
             e for e in builder.edges
-            if e["source"] in direct_children
-            and e["target"] in direct_children
+            if e["source"] in specialists_only
+            and e["target"] in specialists_only
             and e["source"] != splitter["id"]
         ]
         for e in chain_edges:
@@ -2248,6 +2264,79 @@ def _auto_repair_connections(builder: WorkflowBuilder):
                 f"🔧 AUTO-REPAIR: removed backwards edge into Splitter "
                 f"({_name_of(e['source'])} → {_name_of(e['target'])})"
             )
+
+    # 6c: Remove direct Splitter → Synthesizer edges. Synthesizers aggregate
+    # specialists' outputs; the Splitter must not feed them directly, or the
+    # fan-in pattern collapses. The verifier occasionally mis-adds this edge
+    # when trying to address router-wiring warnings.
+    for splitter in splitter_nodes:
+        bad_edges = [
+            e for e in builder.edges
+            if e["source"] == splitter["id"] and _looks_like_synthesizer(e["target"])
+        ]
+        for e in bad_edges:
+            builder.edges.remove(e)
+            logger.info(
+                f"🔧 AUTO-REPAIR: removed Splitter → Synthesizer direct edge "
+                f"({_name_of(e['source'])} → {_name_of(e['target'])})"
+            )
+
+    # 6d: Remove Splitter → X edges where X belongs to a different router
+    # branch (its incoming includes a ClassifierAgent). Those targets live in
+    # a sibling branch of the classifier, not downstream of this splitter.
+    classifier_ids_local = {n["id"] for n in builder.nodes if n["type"] == "ClassifierAgent"}
+    for splitter in splitter_nodes:
+        bad_edges = [
+            e for e in builder.edges
+            if e["source"] == splitter["id"] and any(
+                e2["target"] == e["target"] and e2["source"] in classifier_ids_local
+                for e2 in builder.edges
+            )
+        ]
+        for e in bad_edges:
+            builder.edges.remove(e)
+            logger.info(
+                f"🔧 AUTO-REPAIR: removed Splitter → classifier-branch-target edge "
+                f"({_name_of(e['source'])} → {_name_of(e['target'])})"
+            )
+
+    # ── Fix 7: Terminal integrity sweep (runs last) ──
+    # 7a: EndNode is terminal — it must never have outgoing edges. LLM-produced
+    # cycles back from End occasionally sneak through earlier fixes.
+    end_outgoing = [e for e in builder.edges if e["source"] == end["id"]]
+    for e in end_outgoing:
+        builder.edges.remove(e)
+        logger.info(
+            f"🔧 AUTO-REPAIR: removed outgoing edge from EndNode "
+            f"({_name_of(e['source'])} → {_name_of(e['target'])})"
+        )
+
+    # 7b: Any remaining agent with no outgoing edges → route forward.
+    # Earlier fixes (2, 5, 6) can leave an agent stranded if an edge was removed
+    # during deduplication or chain-cleanup. This final sweep guarantees every
+    # non-Classifier agent has a forward path.
+    # Router-aware: Splitter specialists prefer the Synthesizer over End so the
+    # fan-in aggregation is preserved; everyone else goes straight to End.
+    sources = {e["source"] for e in builder.edges}
+    for a in agents:
+        if a["type"] == "ClassifierAgent":
+            continue
+        if a["id"] in sources:
+            continue
+        if _is_splitter_specialist(a["id"]) and not _looks_like_synthesizer(a["id"]):
+            synth = _find_synthesizer_for_splitter_specialist()
+            if synth and synth != a["id"]:
+                _add_edge(a["id"], synth)
+                logger.info(
+                    f"🔧 AUTO-REPAIR: final sweep — connected Splitter specialist "
+                    f"'{_name_of(a['id'])}' → Synthesizer '{_name_of(synth)}'"
+                )
+                continue
+        _add_edge(a["id"], end["id"])
+        logger.info(
+            f"🔧 AUTO-REPAIR: final sweep — connected '{_name_of(a['id'])}' → End "
+            f"(no outgoing edges after earlier fixes)"
+        )
 
 
 # ── Diff helper (Pillar 4) ─────────────────────────────────────────────
@@ -2920,6 +3009,14 @@ async def generate_workflow(
 
         except Exception as verify_err:
             logger.warning(f"⚠️ WORKFLOW GEN: Verification agent failed: {verify_err}")
+
+        # Post-verifier auto-repair: the verifier LLM can call delete_edge /
+        # rewire_edge while "fixing" router wiring, which may re-introduce the
+        # problems auto-repair already handled (End → X cycles, agents with no
+        # outgoing, orphan specialists). Re-run auto-repair so the terminal
+        # integrity sweep (Fix 7) catches any post-verifier damage.
+        logger.info("🔧 WORKFLOW GEN: running post-verifier auto-repair sweep")
+        _auto_repair_connections(builder)
 
     # Build and validate
     graph_json = builder.build_graph_json()
