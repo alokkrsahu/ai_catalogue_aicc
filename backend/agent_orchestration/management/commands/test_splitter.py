@@ -84,6 +84,34 @@ def test_tool_schema_and_prompt() -> None:
     _ok("overlap-allowed prompt uses overlap wording")
 
 
+def test_prompt_uses_system_message_not_description() -> None:
+    print("\n▸ system_prompt uses ONLY system_message, not description")
+    agents = [
+        {
+            "id": "a1",
+            "name": "Researcher",
+            "system_message": "SYS_MSG_MARKER_RESEARCHER",
+            "description": "DESC_MARKER_RESEARCHER_SHOULD_NOT_APPEAR",
+        },
+        {
+            "id": "a2",
+            "name": "Writer",
+            # no system_message at all
+            "description": "DESC_MARKER_WRITER_SHOULD_NOT_APPEAR",
+        },
+    ]
+    prompt = _build_system_prompt(agents, overlap_allowed=False)
+    assert "SYS_MSG_MARKER_RESEARCHER" in prompt, \
+        "system_message text must be included in the prompt"
+    assert "DESC_MARKER_RESEARCHER_SHOULD_NOT_APPEAR" not in prompt, \
+        "description text leaked into prompt when system_message was present"
+    assert "DESC_MARKER_WRITER_SHOULD_NOT_APPEAR" not in prompt, \
+        "description text leaked into prompt when system_message was missing"
+    assert "no system_message configured" in prompt, \
+        "missing system_message should be labelled so the LLM knows"
+    _ok("description is never injected into the splitter's decision input")
+
+
 def test_execute_happy_path() -> None:
     print("\n▸ execute_splitter happy path — partial allocation prunes unassigned")
     splitter_node = {"id": "s1", "data": {"name": "Task Splitter", "overlap_allowed": False}}
@@ -254,6 +282,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         print("🪓 Splitter plumbing smoke test")
         test_tool_schema_and_prompt()
+        test_prompt_uses_system_message_not_description()
         test_execute_happy_path()
         test_retry_then_recover()
         test_retry_then_fail()

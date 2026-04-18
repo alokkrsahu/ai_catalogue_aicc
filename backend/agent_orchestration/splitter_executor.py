@@ -115,7 +115,14 @@ def _build_allocation_tool(downstream_agents: List[Dict[str, Any]]) -> Dict[str,
 
 def _build_system_prompt(downstream_agents: List[Dict[str, Any]], overlap_allowed: bool) -> str:
     """Auto-generated system prompt for the splitter LLM. Lists each downstream
-    agent's name + role so the LLM knows what kind of work each agent handles."""
+    agent's name + role so the LLM knows what kind of work each agent handles.
+
+    Role text comes exclusively from the agent's ``system_message``. The
+    free-form ``description`` (a UI-surface field) is intentionally NOT
+    consulted — the splitter must reason only from the operational prompt
+    that will actually run on the downstream agent, not from UI copy that
+    can drift from behaviour.
+    """
     lines = [
         "You are a task splitter. Your job is to read the input and allocate "
         "one specific subtask to each relevant agent based on the agent's role.",
@@ -142,15 +149,25 @@ def _build_system_prompt(downstream_agents: List[Dict[str, Any]], overlap_allowe
         "- Each subtask should be written as a clear brief — it becomes the "
         "input message for that downstream agent."
     )
+    lines.append(
+        "- Provide a short `reasoning` string with each allocation explaining "
+        "WHY that subtask fits that agent — this is logged and surfaced to "
+        "operators."
+    )
     lines.append("")
     lines.append("Downstream agents available for allocation:")
     for idx, agent in enumerate(downstream_agents, start=1):
         name = agent.get("name", f"Agent {idx}")
-        role = (agent.get("system_message") or agent.get("description") or "").strip()
+        # Only the system_message defines the agent's operational role.
+        # Intentionally not falling back to `description` — that's UI copy
+        # and can drift from behaviour.
+        role = (agent.get("system_message") or "").strip()
         lines.append(f"  {idx}. {name}")
         if role:
             snippet = role[:400] + ("…" if len(role) > 400 else "")
             lines.append(f"     Role: {snippet}")
+        else:
+            lines.append("     Role: (no system_message configured)")
     return "\n".join(lines)
 
 
@@ -337,18 +354,47 @@ async def execute_splitter(
 
         # Pruned = every downstream target NOT in the allocation
         allocated_target_ids = set(per_target.keys())
-        pruned_target_ids = [a.get("id") for a in downstream_agents if a.get("id") not in allocated_target_ids]
+        pruned_targets = [a for a in downstream_agents if a.get("id") not in allocated_target_ids]
+        pruned_target_ids = [a.get("id") for a in pruned_targets]
 
         logger.info(
             f"✅ SPLITTER '{splitter_name}': allocated {len(per_target)} agent(s), "
-            f"pruned {len(pruned_target_ids)} branch(es)"
+            f"pruned {len(pruned_target_ids)} branch(es) "
+            f"(mode={'overlap' if overlap_allowed else 'strict-partition'})"
         )
+        # Per-allocation reasoning log so operators can see WHY each subtask
+        # was routed where, before the downstream agents start running.
+        for entry in raw_allocations:
+            agent_name = entry.get("agent_name", "?")
+            reasoning = entry.get("reasoning") or "(no reasoning provided)"
+            subtask_preview = entry.get("subtask", "").replace("\n", " ").strip()
+            if len(subtask_preview) > 200:
+                subtask_preview = subtask_preview[:197] + "..."
+            logger.info(
+                f"🪓 SPLITTER '{splitter_name}' → {agent_name}: {reasoning}"
+            )
+            logger.info(
+                f"    ↪ subtask: {subtask_preview}"
+            )
+        # Log pruned agents by name so operators know which branches are
+        # skipped this turn and why they got no input.
+        if pruned_targets:
+            pruned_names = ", ".join(
+                (a.get("name") or a.get("id") or "?") for a in pruned_targets
+            )
+            logger.info(
+                f"🪓 SPLITTER '{splitter_name}' pruned (no relevant subtask): {pruned_names}"
+            )
+
         if event_callback:
             try:
                 event_callback("splitter_decision", {
                     "agent": splitter_name,
                     "allocations": raw_allocations,
                     "pruned_count": len(pruned_target_ids),
+                    "pruned_agent_names": [
+                        (a.get("name") or a.get("id") or "") for a in pruned_targets
+                    ],
                     "overlap_allowed": overlap_allowed,
                 })
             except Exception:
