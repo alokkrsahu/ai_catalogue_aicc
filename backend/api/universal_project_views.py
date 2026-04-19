@@ -428,16 +428,30 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['get'], url_path='experiment-metrics')
     def experiment_metrics(self, request, project_id=None):
-        """Get experiment metrics for System Performance Analysis"""
+        """Get experiment metrics for System Performance Analysis.
+
+        Supports filtering via query params:
+          - ?evaluation_id=<uuid>  → scope to one evaluation (legacy)
+          - ?execution_id=<str>    → scope to one workflow run (new)
+        The new sub-tab "Workflow Performance" drives the latter; the
+        general "Project Analytics" tab leaves both empty.
+        """
         from users.models import WorkflowEvaluation, WorkflowEvaluationResult, ExperimentMetric
         from django.db.models import Avg, Count, Q, Sum, Min, Max
-        
+
         project = self.get_object()
-        
+
         try:
             # Read metrics from database
             try:
                 experiment_metrics = ExperimentMetric.objects.filter(project=project).order_by('-created_at')
+
+                # Optional per-run filter (used by the Workflow Performance tab).
+                execution_id_filter = request.query_params.get('execution_id', None)
+                if execution_id_filter:
+                    experiment_metrics = experiment_metrics.filter(execution_id=execution_id_filter)
+                    logger.info(f"📊 PERFORMANCE: Filtering all metrics by execution_id={execution_id_filter}")
+
                 total_count = experiment_metrics.count()
                 logger.info(f"📊 PERFORMANCE: Found {total_count} experiment metrics for project {project.project_id}")
                 
@@ -626,11 +640,16 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
             
             # 3. Agent Statistics - Per-agent performance metrics
             from users.models import WorkflowExecutionMessage, WorkflowExecution
-            
+
             # Get all workflow executions for this project
             project_workflows = AgentWorkflow.objects.filter(project=project)
             project_executions = WorkflowExecution.objects.filter(workflow__in=project_workflows)
-            
+            # If the caller is scoping to a single run, limit agent_statistics
+            # to that execution too — otherwise the drill-down view would
+            # mix project-wide numbers into a per-run view.
+            if execution_id_filter:
+                project_executions = project_executions.filter(execution_id=execution_id_filter)
+
             # Aggregate agent statistics from WorkflowExecutionMessage
             agent_stats_query = WorkflowExecutionMessage.objects.filter(
                 execution__in=project_executions
@@ -660,10 +679,51 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
             
             result_data['agent_statistics'] = agent_statistics
             logger.info(f"📊 PERFORMANCE: Found {len(agent_statistics)} agents with statistics")
-            
+
+            # 4. Splitter decisions (one row per execute_splitter call)
+            splitter_metrics = list(experiment_metrics.filter(experiment_type='splitter'))
+            if splitter_metrics:
+                split_durations = [m.metric_data.get('duration_ms') for m in splitter_metrics if m.metric_data.get('duration_ms') is not None]
+                allocated_counts = [m.metric_data.get('allocated_count') or 0 for m in splitter_metrics]
+                pruned_counts = [m.metric_data.get('pruned_count') or 0 for m in splitter_metrics]
+                # Per-agent allocation tally for a simple top-list.
+                allocation_tally: dict = {}
+                for m in splitter_metrics:
+                    for name in (m.metric_data.get('allocated_agent_names') or []):
+                        if name:
+                            allocation_tally[name] = allocation_tally.get(name, 0) + 1
+                result_data['splitter_stats'] = {
+                    'total_decisions': len(splitter_metrics),
+                    'avg_duration_ms': round(sum(split_durations) / len(split_durations), 1) if split_durations else None,
+                    'avg_allocated': round(sum(allocated_counts) / len(allocated_counts), 2) if allocated_counts else None,
+                    'avg_pruned': round(sum(pruned_counts) / len(pruned_counts), 2) if pruned_counts else None,
+                    'top_targets': sorted(
+                        [{'agent_name': k, 'allocations': v} for k, v in allocation_tally.items()],
+                        key=lambda x: -x['allocations'],
+                    )[:10],
+                }
+
+            # 5. Classifier decisions
+            classifier_metrics = list(experiment_metrics.filter(experiment_type='classifier'))
+            if classifier_metrics:
+                cls_durations = [m.metric_data.get('duration_ms') for m in classifier_metrics if m.metric_data.get('duration_ms') is not None]
+                category_tally: dict = {}
+                for m in classifier_metrics:
+                    name = m.metric_data.get('category_name')
+                    if name:
+                        category_tally[name] = category_tally.get(name, 0) + 1
+                result_data['classifier_stats'] = {
+                    'total_decisions': len(classifier_metrics),
+                    'avg_duration_ms': round(sum(cls_durations) / len(cls_durations), 1) if cls_durations else None,
+                    'category_distribution': sorted(
+                        [{'category_name': k, 'count': v} for k, v in category_tally.items()],
+                        key=lambda x: -x['count'],
+                    ),
+                }
+
             # Add configurations to response
             result_data['configurations'] = configurations
-            
+
             return Response(result_data, status=status.HTTP_200_OK)
             
         except Exception as e:
@@ -674,6 +734,63 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                 'error': f'Failed to retrieve experiment metrics: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
+    @action(detail=True, methods=['get'], url_path='recent-executions')
+    def recent_executions(self, request, project_id=None):
+        """
+        Return the most recent workflow executions for this project —
+        powers the "Workflow Performance" sub-tab's dropdown.
+
+        Query params:
+          - ?limit=<int>   default 50, capped at 200
+
+        Response shape:
+          { "executions": [
+              { "execution_id": str, "workflow_id": str|null,
+                "workflow_name": str, "started_at": iso8601,
+                "duration_s": float|null, "status": str,
+                "total_nodes": int, "parallel_batches": int }
+            , …] }
+        """
+        from users.models import WorkflowExecution, AgentWorkflow
+
+        project = self.get_object()
+        try:
+            limit = int(request.query_params.get('limit') or 50)
+        except (TypeError, ValueError):
+            limit = 50
+        limit = max(1, min(limit, 200))
+
+        qs = (
+            WorkflowExecution.objects
+            .filter(workflow__project=project)
+            .select_related('workflow')
+            .order_by('-start_time')[:limit]
+        )
+
+        executions = []
+        for ex in qs:
+            wf = ex.workflow
+            # duration_seconds is authoritative when set; otherwise compute
+            # from timestamps so still-running executions show an estimate.
+            duration_s = ex.duration_seconds
+            if duration_s is None and ex.start_time and ex.end_time:
+                try:
+                    duration_s = round((ex.end_time - ex.start_time).total_seconds(), 2)
+                except Exception:
+                    duration_s = None
+            executions.append({
+                'execution_id': ex.execution_id,
+                'workflow_id': str(wf.workflow_id) if wf else None,
+                'workflow_name': (wf.name if wf else '(deleted workflow)'),
+                'started_at': ex.start_time.isoformat() if ex.start_time else None,
+                'duration_s': duration_s,
+                'status': ex.status,
+                'total_agents_involved': ex.total_agents_involved,
+                'total_messages': ex.total_messages,
+                'executed_nodes_count': len(ex.executed_nodes or {}),
+            })
+        return Response({'executions': executions}, status=status.HTTP_200_OK)
+
     @action(detail=True, methods=['get'], url_path='analytics')
     def analytics(self, request, project_id=None):
         """
@@ -767,10 +884,14 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                 tool_breakdown = []
 
             # ── 3. WebSearch latency ──────────────────────────────────
+            # Fix from previous version: filter was using the wrong
+            # experiment_type values ('websearch_performance', 'web_search')
+            # that are never written — the actual writer emits 'websearch'.
+            # That's why cache_hit_rate stayed at None for everyone.
             ws_metrics = list(
                 ExperimentMetric.objects.filter(
                     project=project,
-                    experiment_type__in=['websearch_performance', 'web_search'],
+                    experiment_type='websearch',
                 ).order_by('-created_at')[:50]
             )
 
@@ -799,9 +920,74 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                         'date': str(m.created_at.date()),
                         'duration_ms': (m.metric_data or {}).get('duration_ms'),
                         'cache_hit': (m.metric_data or {}).get('cache_hit'),
+                        'cache_tier': (m.metric_data or {}).get('cache_tier'),
+                        'mode': (m.metric_data or {}).get('mode'),
+                        'agent_name': (m.metric_data or {}).get('agent_name'),
                         'query': (m.metric_data or {}).get('query', '')[:80],
                     }
                     for m in ws_metrics[:20]
+                ],
+            }
+
+            # ── 3b. Cache-tier breakdown ─────────────────────────────
+            # Count websearch calls by cache_tier across the whole sample
+            # plus aggregate the websearch_index_batch per-tier URL hits
+            # from sync-index runs. These two together explain how much
+            # work the caches are saving.
+            tier_counts: dict = {}
+            for m in ws_metrics:
+                tier = (m.metric_data or {}).get('cache_tier') or 'unknown'
+                tier_counts[tier] = tier_counts.get(tier, 0) + 1
+
+            batch_metrics = list(
+                ExperimentMetric.objects.filter(
+                    project=project,
+                    experiment_type='websearch_index_batch',
+                ).order_by('-created_at')[:50]
+            )
+            batch_totals = {
+                'flag_alive_hits': 0,
+                'content_hash_hits': 0,
+                'embed_cache_hits': 0,
+                'cold_count': 0,
+                'n_urls': 0,
+                'sync_runs': len(batch_metrics),
+            }
+            for m in batch_metrics:
+                md = m.metric_data or {}
+                batch_totals['flag_alive_hits'] += int(md.get('flag_alive_hits') or 0)
+                batch_totals['content_hash_hits'] += int(md.get('content_hash_hits') or 0)
+                batch_totals['embed_cache_hits'] += int(md.get('embed_cache_hits') or 0)
+                batch_totals['cold_count'] += int(md.get('cold_count') or 0)
+                batch_totals['n_urls'] += int(md.get('n_urls') or 0)
+            cache_tier_breakdown = {
+                'call_tier_counts': tier_counts,      # { tier: N websearch calls at this tier }
+                'url_tier_totals': batch_totals,       # cumulative URL hits across sync-index runs
+            }
+
+            # ── 3c. Summary-job health ───────────────────────────────
+            summary_jobs_qs = list(
+                ExperimentMetric.objects.filter(
+                    project=project,
+                    experiment_type='summary_job',
+                ).order_by('-created_at')[:20]
+            )
+            summary_jobs = {
+                'total_jobs': len(summary_jobs_qs),
+                'ok_count': sum(1 for m in summary_jobs_qs if (m.metric_data or {}).get('status') == 'ok'),
+                'error_count': sum(1 for m in summary_jobs_qs if (m.metric_data or {}).get('status') == 'error'),
+                'recent': [
+                    {
+                        'date': m.created_at.isoformat(),
+                        'urls_queued': (m.metric_data or {}).get('urls_queued'),
+                        'summarized': (m.metric_data or {}).get('summarized'),
+                        'failed': (m.metric_data or {}).get('failed'),
+                        'duration_ms': (m.metric_data or {}).get('duration_ms'),
+                        'status': (m.metric_data or {}).get('status'),
+                        'error': (m.metric_data or {}).get('error'),
+                        'llm_model': (m.metric_data or {}).get('llm_model'),
+                    }
+                    for m in summary_jobs_qs
                 ],
             }
 
@@ -888,6 +1074,8 @@ class UniversalProjectViewSet(viewsets.ModelViewSet):
                 'planning_time': planning_time,
                 'tool_breakdown': tool_breakdown,
                 'websearch': websearch,
+                'cache_tier_breakdown': cache_tier_breakdown,
+                'summary_jobs': summary_jobs,
                 'execution_volume': execution_volume,
                 'query_wordcloud': query_wordcloud,
             }, status=status.HTTP_200_OK)
