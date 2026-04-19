@@ -997,9 +997,16 @@ class DeploymentViewSet(viewsets.ViewSet):
             project_id_str = str(project_id)
             urls_snapshot = list(urls)  # defensive copy into the closure
 
+            job_provider_name = provider_name
+            job_model_name = model_name or 'gpt-4o-mini'
+
             def _run_in_background():
+                import time as _time
+                _t_start = _time.time()
+                _result = None
+                _error = None
                 try:
-                    asyncio.run(handler.summarize_urls_for_project(
+                    _result = asyncio.run(handler.summarize_urls_for_project(
                         urls=urls_snapshot,
                         project_id=project_id_str,
                         llm_provider=llm,
@@ -1010,12 +1017,46 @@ class DeploymentViewSet(viewsets.ViewSet):
                         f"for project {project_id_str[:8]}"
                     )
                 except Exception as e:
+                    _error = str(e)
                     logger.error(f"❌ SUMMARIZE URLS (bg): {e}", exc_info=True)
                 finally:
                     try:
                         django_cache.delete(flag_key)
                     except Exception:
                         pass
+                # Emit a summary_job metric row so the Project Analytics
+                # page can show job history + success rate. In-thread sync
+                # write — we're already on a worker thread so no need for
+                # sync_to_async.
+                try:
+                    from users.models import IntelliDocProject, ExperimentMetric
+                    _duration_ms = round((_time.time() - _t_start) * 1000, 1)
+                    _project = IntelliDocProject.objects.get(project_id=project_id_str)
+                    ExperimentMetric.objects.create(
+                        project=_project,
+                        experiment_type='summary_job',
+                        metric_data={
+                            'experiment': 'summary_job',
+                            'project_id': project_id_str,
+                            'urls_queued': len(urls_snapshot),
+                            'summarized': (_result or {}).get('summarized', 0) if isinstance(_result, dict) else 0,
+                            'skipped': (_result or {}).get('skipped', 0) if isinstance(_result, dict) else 0,
+                            'failed': (_result or {}).get('failed', 0) if isinstance(_result, dict) else len(urls_snapshot),
+                            'duration_ms': _duration_ms,
+                            'status': 'error' if _error else 'ok',
+                            'error': _error,
+                            'llm_provider': job_provider_name,
+                            'llm_model': job_model_name,
+                        },
+                        configuration={
+                            'llm_provider': job_provider_name,
+                            'llm_model': job_model_name,
+                            'cache_ttl': cache_ttl,
+                        },
+                        execution_id='',
+                    )
+                except Exception as metric_err:
+                    logger.warning(f"⚠️ SUMMARIZE URLS (bg): metric logging failed: {metric_err}")
 
             threading.Thread(
                 target=_run_in_background,
@@ -1263,6 +1304,37 @@ class DeploymentViewSet(viewsets.ViewSet):
                     indexed = batch_result['indexed']
                     already_indexed += batch_result['skipped']
                     failed = batch_result['failed'] + pre_fail
+
+                    # Emit an analytics row recording which cache tiers
+                    # saved work on this sync. Feeds the Project Analytics
+                    # cache-tier breakdown chart.
+                    try:
+                        from .metrics_logger import log_experiment_metric
+                        timings = batch_result.get('timings_ms', {}) or {}
+                        await log_experiment_metric(
+                            project_id=pid,
+                            experiment_type='websearch_index_batch',
+                            metric_data={
+                                'experiment': 'websearch_index_batch',
+                                'project_id': pid,
+                                'n_urls': len(batch_items),
+                                'indexed': indexed,
+                                'skipped': batch_result.get('skipped', 0),
+                                'failed': batch_result.get('failed', 0),
+                                'flag_alive_hits': batch_result.get('flag_alive_hits', 0),
+                                'content_hash_hits': batch_result.get('content_hash_hits', 0),
+                                'embed_cache_hits': batch_result.get('embed_cache_hits', 0),
+                                'cold_count': batch_result.get('cold_count', 0),
+                                'duration_ms': timings.get('total', 0),
+                                'embed_ms': timings.get('embed', 0),
+                                'milvus_ms': timings.get('milvus', 0),
+                                'flush_ms': timings.get('flush', 0),
+                            },
+                            configuration={'cache_ttl': cache_ttl},
+                            log_tag='EXP_METRIC_WEBSEARCH_INDEX_BATCH',
+                        )
+                    except Exception as exc:
+                        logger.warning(f"⚠️ SYNC INDEX: metric logging failed: {exc}")
                 else:
                     indexed = 0
                     failed = pre_fail

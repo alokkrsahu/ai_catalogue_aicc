@@ -126,6 +126,7 @@ async def run_delegate_doc_tool_loop(
     event_callback=None,
     websearch_handler=None,
     docaware_handler=None,
+    execution_id: Optional[str] = None,
 ) -> str:
     """
     Execute a delegate's work using the existing doc-tool-calling loop.
@@ -428,7 +429,11 @@ async def run_delegate_doc_tool_loop(
                     return tc, f"[Unknown URL tool: {tc['name']}]"
                 _ttl = delegate_node.get('data', {}).get('web_search_cache_ttl', 2592000)
                 try:
-                    result = await websearch_handler._get_url_context([_target_url], _ttl, project_id)
+                    # _get_url_context returns (context, cache_meta); we only
+                    # need the context string here.
+                    result, _ = await websearch_handler._get_url_context(
+                        [_target_url], _ttl, project_id,
+                    )
                 except Exception as exc:
                     logger.error(f"URL fetch failed in delegate {delegate_name}: {exc}")
                     result = f"[URL fetch error: {exc}]"
@@ -439,7 +444,8 @@ async def run_delegate_doc_tool_loop(
                     return tc, "[Web search handler not available]"
                 try:
                     result = await websearch_handler.execute_websearch_tool(
-                        delegate_node, query, project_id
+                        delegate_node, query, project_id,
+                        execution_id=execution_id,
                     )
                 except Exception as exc:
                     logger.error(f"Web search failed in delegate {delegate_name}: {exc}")
@@ -453,7 +459,8 @@ async def run_delegate_doc_tool_loop(
                 try:
                     limit = tc["arguments"].get("limit", 5)
                     result = await docaware_handler.execute_docaware_tool(
-                        delegate_node, query, project_id, limit=limit
+                        delegate_node, query, project_id, limit=limit,
+                        execution_id=execution_id,
                     )
                 except Exception as exc:
                     logger.error(f"DocAware search failed in delegate {delegate_name}: {exc}")
@@ -788,6 +795,7 @@ async def execute_tool_based_delegation(
                         event_callback=event_callback,
                         websearch_handler=websearch_handler,
                         docaware_handler=docaware_handler,
+                        execution_id=execution_id,
                     )
                 except Exception as exc:
                     logger.error(f"Delegate {delegate_name} execution failed: {exc}")

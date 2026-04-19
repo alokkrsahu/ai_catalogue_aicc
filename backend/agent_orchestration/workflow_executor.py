@@ -641,7 +641,8 @@ class WorkflowExecutor:
                                 logger.info(f"📥 ORCHESTRATOR: Agent {node_name} has {len(input_sources)} input sources - using multi-input mode")
                                 aggregated_context = self.workflow_parser.aggregate_multiple_inputs(input_sources, executed_nodes)
                                 prompt_result = await self.chat_manager.craft_conversation_prompt_with_docaware(
-                                    aggregated_context, node, str(project_id), conversation_history
+                                    aggregated_context, node, str(project_id), conversation_history,
+                                    execution_id=execution_id,
                                 )
                                 # Handle dict return with potential file_references (Full Document Mode)
                                 llm_messages = prompt_result.get('messages', prompt_result) if isinstance(prompt_result, dict) else prompt_result
@@ -662,7 +663,8 @@ class WorkflowExecutor:
                                 # Use traditional single-input processing
                                 logger.info(f"📥 ORCHESTRATOR: Agent {node_name} has {len(input_sources)} input source - using single-input mode")
                                 prompt_result_single = await self.chat_manager.craft_conversation_prompt(
-                                    conversation_history, node, str(project_id)
+                                    conversation_history, node, str(project_id),
+                                    execution_id=execution_id,
                                 )
                                 # Handle dict return with potential file_references (File Attachments)
                                 llm_messages = prompt_result_single.get('messages', prompt_result_single) if isinstance(prompt_result_single, dict) else prompt_result_single
@@ -1182,6 +1184,8 @@ class WorkflowExecutor:
                             llm_provider=llm_provider,
                             provider_name=agent_config['llm_provider'],
                             event_callback=event_callback,
+                            project_id=str(project_id) if project_id else None,
+                            execution_id=execution_id,
                         )
                     except ClassifierSelectionError as cls_err:
                         logger.error(
@@ -1338,6 +1342,8 @@ class WorkflowExecutor:
                             llm_provider=llm_provider,
                             provider_name=agent_config['llm_provider'],
                             event_callback=event_callback,
+                            project_id=str(project_id) if project_id else None,
+                            execution_id=execution_id,
                         )
                     except SplitterAllocationError as split_err:
                         logger.error(
@@ -2008,7 +2014,8 @@ class WorkflowExecutor:
                         aggregated_context = self.workflow_parser.aggregate_multiple_inputs(input_sources, executed_nodes)
                         # CRITICAL FIX: Use craft_conversation_prompt_with_docaware for multi-input (same as main execution)
                         prompt_result = await self.chat_manager.craft_conversation_prompt_with_docaware(
-                            aggregated_context, node, str(project.project_id), conversation_history
+                            aggregated_context, node, str(project.project_id), conversation_history,
+                            execution_id=execution_record.execution_id,
                         )
                         # Handle dict return with potential file_references (Full Document Mode)
                         llm_messages = prompt_result.get('messages', prompt_result) if isinstance(prompt_result, dict) else prompt_result
@@ -2025,7 +2032,8 @@ class WorkflowExecutor:
                         # Single-input mode - CRITICAL FIX: Use proper prompt crafting
                         logger.info(f"📥 CONTINUE WORKFLOW: Agent {node_name} has {len(input_sources)} input source - using single-input mode")
                         prompt_result_single = await self.chat_manager.craft_conversation_prompt(
-                            conversation_history, node, str(project.project_id)
+                            conversation_history, node, str(project.project_id),
+                            execution_id=execution_record.execution_id,
                         )
                         # Handle dict return with potential file_references (File Attachments)
                         llm_messages = prompt_result_single.get('messages', prompt_result_single) if isinstance(prompt_result_single, dict) else prompt_result_single
@@ -2262,6 +2270,8 @@ class WorkflowExecutor:
                             llm_provider=cls_llm_provider,
                             provider_name=cls_agent_config['llm_provider'],
                             event_callback=None,
+                            project_id=str(project_id) if project_id else None,
+                            execution_id=execution_id,
                         )
                     except ClassifierSelectionError as cls_err:
                         logger.error(
@@ -2780,7 +2790,10 @@ class WorkflowExecutor:
                     if not _target_url:
                         return tc, f"[Unknown URL tool: {tc['name']}]", []
                     _ttl = node.get('data', {}).get('web_search_cache_ttl', 2592000)
-                    _result = await _ws._get_url_context([_target_url], _ttl, project_id)
+                    # _get_url_context now returns (context, cache_meta) — we
+                    # only use the context string here; cache_meta is picked
+                    # up when execute_websearch_tool fires the full metric.
+                    _result, _ = await _ws._get_url_context([_target_url], _ttl, project_id)
                     return tc, _result, []
 
                 # --- Web search tool ---
@@ -2788,7 +2801,10 @@ class WorkflowExecutor:
                     _ws = getattr(self.chat_manager, 'websearch_handler', None)
                     if not _ws:
                         return tc, "[Web search handler not available]", []
-                    _result = await _ws.execute_websearch_tool(node, _query, project_id)
+                    _result = await _ws.execute_websearch_tool(
+                        node, _query, project_id,
+                        execution_id=execution_record.execution_id,
+                    )
                     return tc, _result, []
 
                 # --- DocAware search tool ---
@@ -2798,7 +2814,10 @@ class WorkflowExecutor:
                     if not _da:
                         return tc, "[Document search handler not available]", []
                     _limit = tc["arguments"].get("limit", 5)
-                    _result = await _da.execute_docaware_tool(node, _query, project_id, limit=_limit)
+                    _result = await _da.execute_docaware_tool(
+                        node, _query, project_id, limit=_limit,
+                        execution_id=execution_record.execution_id,
+                    )
                     return tc, _result, []
 
                 # --- Document info tools ---
@@ -3762,7 +3781,8 @@ class WorkflowExecutor:
                 if len(input_sources) > 1:
                     aggregated_context = self.workflow_parser.aggregate_multiple_inputs(input_sources, executed_nodes)
                     prompt_result = await self.chat_manager.craft_conversation_prompt_with_docaware(
-                        aggregated_context, node, str(project_id), conversation_history
+                        aggregated_context, node, str(project_id), conversation_history,
+                        execution_id=execution_record.execution_id,
                     )
                     # Handle dict return with potential file_references (Full Document Mode)
                     llm_messages = prompt_result.get('messages', prompt_result) if isinstance(prompt_result, dict) else prompt_result
@@ -3777,7 +3797,8 @@ class WorkflowExecutor:
                         )
                 else:
                     prompt_result_single = await self.chat_manager.craft_conversation_prompt(
-                        conversation_history, node, str(project_id)
+                        conversation_history, node, str(project_id),
+                        execution_id=execution_record.execution_id,
                     )
                     # Handle dict return with potential file_references (File Attachments)
                     llm_messages = prompt_result_single.get('messages', prompt_result_single) if isinstance(prompt_result_single, dict) else prompt_result_single

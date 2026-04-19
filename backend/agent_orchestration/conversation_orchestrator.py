@@ -174,15 +174,12 @@ class ConversationOrchestrator:
         """
         return self.websearch_handler.is_websearch_enabled(agent_node)
     
-    async def craft_conversation_prompt(self, conversation_history: str, agent_node: Dict[str, Any], project_id: Optional[str] = None) -> List[Dict[str, str]]:
+    async def craft_conversation_prompt(self, conversation_history: str, agent_node: Dict[str, Any], project_id: Optional[str] = None, execution_id: Optional[str] = None) -> List[Dict[str, str]]:
         """
         Craft conversation messages array for an agent including full conversation history
         Delegates to ChatManager for actual implementation
-        
-        Returns:
-            List of message dicts with 'role' and 'content' keys
         """
-        return await self.chat_manager.craft_conversation_prompt(conversation_history, agent_node, project_id)
+        return await self.chat_manager.craft_conversation_prompt(conversation_history, agent_node, project_id, execution_id=execution_id)
     
     async def execute_group_chat_manager(self, chat_manager_node: Dict[str, Any], llm_provider, conversation_history: str, execution_sequence: List[Dict[str, Any]], graph_json: Dict[str, Any]) -> Dict[str, Any]:
         """

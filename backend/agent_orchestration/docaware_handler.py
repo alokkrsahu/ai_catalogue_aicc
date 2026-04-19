@@ -345,11 +345,12 @@ class DocAwareHandler:
         return validated
 
     async def get_docaware_context_from_conversation_query(
-        self, 
-        agent_node: Dict[str, Any], 
-        search_query: str, 
-        project_id: str, 
-        conversation_history: str
+        self,
+        agent_node: Dict[str, Any],
+        search_query: str,
+        project_id: str,
+        conversation_history: str,
+        execution_id: Optional[str] = None,
     ) -> str:
         """
         Retrieve document context using conversation-based search query for single agents.
@@ -556,6 +557,7 @@ class DocAwareHandler:
                                     experiment_type='docaware_single',
                                     metric_data=exp_payload,
                                     configuration=configuration,
+                                    execution_id=execution_id or '',
                                 )
                                 logger.info(f"✅ Stored DocAware experiment metric: id={metric.id}, project={project_id}")
                                 return metric.id
@@ -588,10 +590,11 @@ class DocAwareHandler:
             return f"⚠️ Document search failed: {str(e)}"
     
     def get_docaware_context(
-        self, 
-        agent_node: Dict[str, Any], 
-        conversation_history: str, 
-        project_id: str
+        self,
+        agent_node: Dict[str, Any],
+        conversation_history: str,
+        project_id: str,
+        execution_id: Optional[str] = None,
     ) -> str:
         """
         Retrieve document context using DocAware service (chunk-based only).
@@ -778,6 +781,7 @@ class DocAwareHandler:
                                 experiment_type='docaware_context',
                                 metric_data=exp_payload,
                                 configuration=configuration,
+                                execution_id=execution_id or '',
                             )
                             logger.info(f"✅ Stored DocAware context experiment metric: id={metric.id}, project={project_id}")
                         except IntelliDocProject.DoesNotExist:
@@ -1109,7 +1113,7 @@ Refined search query:"""
             # Fallback to original query on any error
             return query
     
-    async def get_docaware_context_from_query(self, agent_node: Dict[str, Any], search_query: str, project_id: str, aggregated_context: Dict[str, Any]) -> str:
+    async def get_docaware_context_from_query(self, agent_node: Dict[str, Any], search_query: str, project_id: str, aggregated_context: Dict[str, Any], execution_id: Optional[str] = None) -> str:
         """
         Retrieve document context using a specific search query (from aggregated input)
         
@@ -1348,6 +1352,7 @@ Refined search query:"""
         query: str,
         project_id: str,
         limit: int = 5,
+        execution_id: Optional[str] = None,
     ) -> str:
         """
         Execute a DocAware search tool call and return formatted results.

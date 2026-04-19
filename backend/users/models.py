@@ -1713,13 +1713,18 @@ class ExperimentMetric(models.Model):
     Store experiment metrics for System Performance Analysis
     
     This model stores structured experiment metrics from various system components
-    (intelligent delegation, workflow execution, DocAware, etc.) for analysis
-    and reporting in the System Performance Analysis page.
+    (workflow execution, websearch, DocAware, splitter/classifier decisions, etc.)
+    for analysis and reporting on the System Performance Analysis pages.
     """
     project = models.ForeignKey(IntelliDocProject, on_delete=models.CASCADE, related_name='experiment_metrics')
     experiment_type = models.CharField(
         max_length=50,
-        help_text="Type of experiment: intelligent_delegation, workflow_execution, docaware_single, docaware_context"
+        help_text=(
+            "Type of experiment recorded in this row. Active values: "
+            "workflow_execution, docaware_single, docaware_context, websearch, "
+            "websearch_index_batch, summary_job, splitter, classifier. "
+            "Filter by this plus execution_id to scope analytics to a single workflow run."
+        ),
     )
     metric_data = models.JSONField(
         default=dict,

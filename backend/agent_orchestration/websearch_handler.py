@@ -10,7 +10,7 @@ import asyncio
 import logging
 import time
 import json
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from asgiref.sync import sync_to_async
 
 # Import WebSearch services
@@ -74,37 +74,42 @@ class WebSearchHandler:
         return agent_data.get('web_search_mode') or 'general'
     
     async def get_websearch_context(
-        self, 
-        agent_node: Dict[str, Any], 
-        conversation_history: str, 
-        project_id: str
+        self,
+        agent_node: Dict[str, Any],
+        conversation_history: str,
+        project_id: str,
+        execution_id: Optional[str] = None,
     ) -> str:
         """
         Retrieve web search context based on agent configuration.
-        
+
         This is the main entry point for getting web context. It determines the
         search mode and delegates to the appropriate handler.
-        
+
         Args:
             agent_node: Agent configuration with websearch settings
             conversation_history: Conversation history for query extraction
             project_id: Project ID for logging and metrics
-            
+            execution_id: Optional WorkflowExecution id so the emitted
+                ExperimentMetric can be filtered per-run from the analytics
+                dashboard.
+
         Returns:
             Formatted web context string for agent consumption
         """
         if not self.is_websearch_enabled(agent_node):
             return ""
-        
+
         agent_data = agent_node.get('data', {})
         mode = self.get_websearch_mode(agent_node)
         cache_ttl = agent_data.get('web_search_cache_ttl', 2592000)
         max_results = agent_data.get('web_search_max_results', 5)
 
         logger.info(f"🌐 WEBSEARCH: Starting web search (mode: {mode}, cache_ttl: {cache_ttl}s, max_results: {max_results})")
-        
+
         start_time = time.time()
-        
+        cache_meta: Dict[str, Any] = {'cache_hit': False, 'cache_tier': 'cold'}
+
         try:
             if mode == 'urls':
                 # Direct URL fetching mode with RAG search
@@ -114,8 +119,10 @@ class WebSearchHandler:
                     return ""
                 query = self.extract_query_from_conversation(conversation_history)
                 top_k = agent_data.get('web_search_top_k', 5)
-                context = await self._get_url_context(urls, cache_ttl, project_id, query=query, top_k=top_k)
-                
+                context, cache_meta = await self._get_url_context(
+                    urls, cache_ttl, project_id, query=query, top_k=top_k,
+                )
+
             elif mode == 'domains':
                 # Domain-restricted search mode
                 domains = agent_data.get('web_search_domains', [])
@@ -123,19 +130,23 @@ class WebSearchHandler:
                 if not query:
                     logger.warning("🌐 WEBSEARCH: Could not extract query from conversation")
                     return ""
-                context = await self._get_domain_search_context(query, domains, max_results, cache_ttl, project_id)
-                
+                context, cache_meta = await self._get_domain_search_context(
+                    query, domains, max_results, cache_ttl, project_id,
+                )
+
             else:
                 # General search mode (default)
                 query = self.extract_query_from_conversation(conversation_history)
                 if not query:
                     logger.warning("🌐 WEBSEARCH: Could not extract query from conversation")
                     return ""
-                context = await self._get_general_search_context(query, max_results, cache_ttl, project_id)
-            
+                context, cache_meta = await self._get_general_search_context(
+                    query, max_results, cache_ttl, project_id,
+                )
+
             duration_ms = (time.time() - start_time) * 1000
-            logger.info(f"🌐 WEBSEARCH: Completed in {duration_ms:.2f}ms, context length: {len(context)} chars")
-            
+            logger.info(f"🌐 WEBSEARCH: Completed in {duration_ms:.2f}ms, context length: {len(context)} chars, tier={cache_meta.get('cache_tier')}")
+
             # Log experiment metrics
             await self._log_websearch_metrics(
                 project_id=project_id,
@@ -143,11 +154,13 @@ class WebSearchHandler:
                 mode=mode,
                 duration_ms=duration_ms,
                 context_length=len(context),
-                success=bool(context)
+                success=bool(context),
+                cache_meta=cache_meta,
+                execution_id=execution_id,
             )
-            
+
             return context
-            
+
         except Exception as e:
             logger.error(f"❌ WEBSEARCH: Error retrieving web context: {e}")
             import traceback
@@ -165,19 +178,23 @@ class WebSearchHandler:
         project_id: str,
         query: str = "",
         top_k: int = 5,
-    ) -> str:
+    ) -> Tuple[str, Dict[str, Any]]:
         """
         Fetch content from specific URLs with per-project caching,
         then use Milvus RAG to return only the most relevant chunks.
+
+        Returns (context_string, cache_meta) where cache_meta carries the
+        cache-tier breakdown so _log_websearch_metrics can record which
+        cache layers saved work — useful for the analytics dashboard.
         """
         logger.info(f"🌐 WEBSEARCH URL MODE: Fetching {len(urls)} URLs (RAG top_k={top_k})")
 
         # 1. Fetch / cache URLs
         cached_results = self.cache_service.get_cached_urls_batch(urls, project_id)
         urls_to_fetch = [url for url, content in cached_results.items() if content is None]
-        cached_count = len(urls) - len(urls_to_fetch)
+        url_cache_hits = len(urls) - len(urls_to_fetch)
 
-        logger.info(f"🌐 WEBSEARCH URL MODE: {cached_count} cached, {len(urls_to_fetch)} to fetch")
+        logger.info(f"🌐 WEBSEARCH URL MODE: {url_cache_hits} cached, {len(urls_to_fetch)} to fetch")
 
         if urls_to_fetch:
             fetch_results = await self.fetcher_service.fetch_urls_parallel(urls_to_fetch)
@@ -194,24 +211,55 @@ class WebSearchHandler:
                 if url:
                     cached_results[url] = result
 
-        # 2. Index all URLs in Milvus — single batched call
+        # 2. Index all URLs in Milvus — single batched call. The result
+        # carries per-tier counters we use to populate cache_meta below.
         batch_items = [
             (url, page) for url, page in cached_results.items()
             if page and not page.get('extraction_error')
         ]
+        batch_result: Dict[str, Any] = {}
         if batch_items:
-            await self.web_rag_service.index_urls_batch(
-                batch_items, project_id, cache_ttl=cache_ttl
+            batch_result = await self.web_rag_service.index_urls_batch(
+                batch_items, project_id, cache_ttl=cache_ttl,
             )
+
+        # Derive a summary cache tier + boolean for this call.
+        flag_alive = int(batch_result.get('flag_alive_hits', 0))
+        content_hash = int(batch_result.get('content_hash_hits', 0))
+        embed_cache = int(batch_result.get('embed_cache_hits', 0))
+        cold = int(batch_result.get('cold_count', 0))
+        n_batch = flag_alive + content_hash + embed_cache + cold
+        if n_batch == 0:
+            cache_tier = 'url_cache' if url_cache_hits else 'cold'
+        elif flag_alive == n_batch:
+            cache_tier = 'flag_alive'
+        elif content_hash == n_batch:
+            cache_tier = 'content_hash'
+        elif embed_cache == n_batch:
+            cache_tier = 'embed_cache'
+        elif cold == n_batch and url_cache_hits == 0:
+            cache_tier = 'cold'
+        else:
+            cache_tier = 'mixed'
+        cache_meta: Dict[str, Any] = {
+            'cache_hit': bool(flag_alive or content_hash or embed_cache or url_cache_hits),
+            'cache_tier': cache_tier,
+            'url_cache_hits': url_cache_hits,
+            'flag_alive_hits': flag_alive,
+            'content_hash_hits': content_hash,
+            'embed_cache_hits': embed_cache,
+            'cold_count': cold,
+            'n_urls': len(urls),
+        }
 
         # 3. Search Milvus for relevant chunks
         if not query:
             query = "general overview"  # minimal fallback query
         chunks = await self.web_rag_service.search(query, project_id, top_k=top_k)
         if chunks:
-            return self._format_rag_results(chunks)
+            return self._format_rag_results(chunks), cache_meta
 
-        return "No relevant content found in the configured web sources."
+        return "No relevant content found in the configured web sources.", cache_meta
     
     async def _get_domain_search_context(
         self,
@@ -219,79 +267,58 @@ class WebSearchHandler:
         domains: List[str],
         max_results: int,
         cache_ttl: int,
-        project_id: str
-    ) -> str:
-        """
-        Perform DuckDuckGo search restricted to specific domains (per-project cache).
-        
-        Args:
-            query: Search query
-            domains: List of domains to restrict search to
-            max_results: Maximum number of results
-            cache_ttl: Cache time-to-live in seconds
-            project_id: Project ID for per-project cache isolation
-            
-        Returns:
-            Formatted context string from search results
-        """
+        project_id: str,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """DuckDuckGo search restricted to domains. Returns (context, cache_meta)."""
         logger.info(f"🌐 WEBSEARCH DOMAIN MODE: Searching '{query[:50]}...' in domains: {domains}")
-        
-        # Check cache first (per-project)
+
         cached_results = self.cache_service.get_cached_search(query, project_id, domains=domains)
         if cached_results:
             logger.info(f"🌐 WEBSEARCH DOMAIN MODE: Using cached search results")
-            return self.search_service.format_results_for_context(cached_results)
-        
-        # Perform search (synchronous, run in thread pool)
+            return (
+                self.search_service.format_results_for_context(cached_results),
+                {'cache_hit': True, 'cache_tier': 'search_cache'},
+            )
+
         def do_search():
             return self.search_service.search(query, max_results=max_results, domains=domains)
-        
+
         results = await sync_to_async(do_search)()
-        
-        # Cache results (per-project)
         if results:
             self.cache_service.cache_search(query, results, project_id, domains=domains, ttl=cache_ttl)
-        
-        return self.search_service.format_results_for_context(results)
-    
+        return (
+            self.search_service.format_results_for_context(results),
+            {'cache_hit': False, 'cache_tier': 'cold'},
+        )
+
     async def _get_general_search_context(
         self,
         query: str,
         max_results: int,
         cache_ttl: int,
-        project_id: str
-    ) -> str:
-        """
-        Perform general DuckDuckGo search (per-project cache).
-        
-        Args:
-            query: Search query
-            max_results: Maximum number of results
-            cache_ttl: Cache time-to-live in seconds
-            project_id: Project ID for per-project cache isolation
-            
-        Returns:
-            Formatted context string from search results
-        """
+        project_id: str,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """General DuckDuckGo search. Returns (context, cache_meta)."""
         logger.info(f"🌐 WEBSEARCH GENERAL MODE: Searching '{query[:50]}...'")
-        
-        # Check cache first (per-project)
+
         cached_results = self.cache_service.get_cached_search(query, project_id, domains=None)
         if cached_results:
             logger.info(f"🌐 WEBSEARCH GENERAL MODE: Using cached search results")
-            return self.search_service.format_results_for_context(cached_results)
-        
-        # Perform search (synchronous, run in thread pool)
+            return (
+                self.search_service.format_results_for_context(cached_results),
+                {'cache_hit': True, 'cache_tier': 'search_cache'},
+            )
+
         def do_search():
             return self.search_service.search(query, max_results=max_results)
-        
+
         results = await sync_to_async(do_search)()
-        
-        # Cache results (per-project)
         if results:
             self.cache_service.cache_search(query, results, project_id, ttl=cache_ttl)
-        
-        return self.search_service.format_results_for_context(results)
+        return (
+            self.search_service.format_results_for_context(results),
+            {'cache_hit': False, 'cache_tier': 'cold'},
+        )
     
     # =========================================================================
     # Query Extraction
@@ -510,31 +537,30 @@ class WebSearchHandler:
         mode: str,
         duration_ms: float,
         context_length: int,
-        success: bool
+        success: bool,
+        cache_meta: Optional[Dict[str, Any]] = None,
+        execution_id: Optional[str] = None,
     ):
         """
-        Log WebSearch experiment metrics for analysis.
-        
-        Args:
-            project_id: Project ID
-            agent_node: Agent configuration
-            mode: WebSearch mode used
-            duration_ms: Time taken in milliseconds
-            context_length: Length of returned context
-            success: Whether search was successful
+        Log WebSearch experiment metrics for the analytics dashboard.
+
+        cache_meta carries the cache-tier breakdown from the mode handler
+        (cache_hit: bool, cache_tier: str, plus per-tier counts for URL
+        mode). execution_id links the row to its WorkflowExecution so the
+        dashboard can filter per-run.
         """
         try:
             agent_data = agent_node.get('data', {})
             agent_name = agent_data.get('name', 'UnknownAgent')
-            
+
             configuration = {
                 "agent_name": agent_name,
                 "mode": mode,
                 "cache_ttl": agent_data.get('web_search_cache_ttl', 2592000),
                 "max_results": agent_data.get('web_search_max_results', 5),
             }
-            
-            exp_payload = {
+
+            exp_payload: Dict[str, Any] = {
                 "experiment": "websearch",
                 "project_id": project_id,
                 "agent_name": agent_name,
@@ -542,21 +568,34 @@ class WebSearchHandler:
                 "duration_ms": duration_ms,
                 "context_length": context_length,
                 "success": success,
+                # Defaults — overridden below if cache_meta supplied them.
+                "cache_hit": False,
+                "cache_tier": "cold",
             }
-            
+            if cache_meta:
+                exp_payload.update({
+                    k: v for k, v in cache_meta.items()
+                    if k in {
+                        'cache_hit', 'cache_tier',
+                        'url_cache_hits', 'flag_alive_hits',
+                        'content_hash_hits', 'embed_cache_hits',
+                        'cold_count', 'n_urls',
+                    }
+                })
+
             # Add mode-specific data
             if mode == 'urls':
                 exp_payload['url_count'] = len(agent_data.get('web_search_urls', []))
             elif mode == 'domains':
                 exp_payload['domain_count'] = len(agent_data.get('web_search_domains', []))
-            
+
             logger.info(f"EXP_METRIC_WEBSEARCH | {json.dumps(exp_payload, default=str)}")
-            
+
             # Store in database
             if project_id:
                 try:
                     from users.models import IntelliDocProject, ExperimentMetric
-                    
+
                     def save_metric():
                         try:
                             project_obj = IntelliDocProject.objects.get(project_id=project_id)
@@ -565,8 +604,12 @@ class WebSearchHandler:
                                 experiment_type='websearch',
                                 metric_data=exp_payload,
                                 configuration=configuration,
+                                execution_id=execution_id or '',
                             )
-                            logger.info(f"✅ Stored WebSearch experiment metric: id={metric.id}")
+                            logger.info(
+                                f"✅ Stored WebSearch experiment metric: id={metric.id}"
+                                f"{' execution=' + execution_id if execution_id else ''}"
+                            )
                             return metric.id
                         except IntelliDocProject.DoesNotExist:
                             logger.warning(f"⚠️ Could not save WebSearch metric: Project {project_id} not found")
@@ -574,11 +617,11 @@ class WebSearchHandler:
                         except Exception as e:
                             logger.error(f"❌ Failed to save WebSearch metric: {e}")
                             return None
-                    
+
                     await sync_to_async(save_metric)()
                 except Exception as db_error:
                     logger.warning(f"⚠️ Failed to store WebSearch metric in database: {db_error}")
-                    
+
         except Exception as metric_error:
             logger.error(f"❌ EXP_METRIC_WEBSEARCH: Failed to log metrics: {metric_error}")
     
@@ -630,61 +673,68 @@ class WebSearchHandler:
         return combined_query
     
     async def get_websearch_context_from_query(
-        self, 
-        agent_node: Dict[str, Any], 
-        search_query: str, 
-        project_id: str
+        self,
+        agent_node: Dict[str, Any],
+        search_query: str,
+        project_id: str,
+        execution_id: Optional[str] = None,
     ) -> str:
         """
         Retrieve web search context using a specific search query (from aggregated input).
-        
+
         Args:
             agent_node: Agent configuration
             search_query: Search query extracted from aggregated inputs
             project_id: Project ID for logging
-            
-        Returns:
-            Formatted web context string
+            execution_id: Optional WorkflowExecution id to stamp on the metric row
         """
         if not self.is_websearch_enabled(agent_node):
             return ""
-        
+
         agent_data = agent_node.get('data', {})
         mode = self.get_websearch_mode(agent_node)
         cache_ttl = agent_data.get('web_search_cache_ttl', 2592000)
         max_results = agent_data.get('web_search_max_results', 5)
-        
+
         logger.info(f"🌐 WEBSEARCH FROM QUERY: mode={mode}, query='{search_query[:50]}...'")
-        
+
         start_time = time.time()
-        
+        cache_meta: Dict[str, Any] = {'cache_hit': False, 'cache_tier': 'cold'}
+
         try:
             if mode == 'urls':
-                # URL mode fetches configured URLs and uses RAG search with the query
                 urls = agent_data.get('web_search_urls', [])
                 if not urls:
                     return ""
                 top_k = agent_data.get('web_search_top_k', 5)
-                context = await self._get_url_context(urls, cache_ttl, project_id, query=search_query, top_k=top_k)
-                
+                context, cache_meta = await self._get_url_context(
+                    urls, cache_ttl, project_id, query=search_query, top_k=top_k,
+                )
+
             elif mode == 'domains':
                 domains = agent_data.get('web_search_domains', [])
-                context = await self._get_domain_search_context(search_query, domains, max_results, cache_ttl, project_id)
-                
+                context, cache_meta = await self._get_domain_search_context(
+                    search_query, domains, max_results, cache_ttl, project_id,
+                )
+
             else:
-                context = await self._get_general_search_context(search_query, max_results, cache_ttl, project_id)
-            
+                context, cache_meta = await self._get_general_search_context(
+                    search_query, max_results, cache_ttl, project_id,
+                )
+
             duration_ms = (time.time() - start_time) * 1000
-            
+
             await self._log_websearch_metrics(
                 project_id=project_id,
                 agent_node=agent_node,
                 mode=mode,
                 duration_ms=duration_ms,
                 context_length=len(context),
-                success=bool(context)
+                success=bool(context),
+                cache_meta=cache_meta,
+                execution_id=execution_id,
             )
-            
+
             return context
             
         except Exception as e:
@@ -778,12 +828,16 @@ class WebSearchHandler:
         agent_node: Dict[str, Any],
         query: str,
         project_id: str,
+        execution_id: Optional[str] = None,
     ) -> str:
         """
         Execute a web search tool call and return formatted results.
 
         Dispatches to the appropriate handler based on the agent's
         configured web search mode (general / domains / urls).
+        execution_id, when provided, is written onto the emitted
+        ExperimentMetric row so the analytics dashboard can scope
+        tool-initiated websearches to a specific workflow run.
         """
         agent_data = agent_node.get('data', {})
         mode = self.get_websearch_mode(agent_node)
@@ -794,32 +848,49 @@ class WebSearchHandler:
             f"🌐 WEBSEARCH TOOL: mode={mode}, query='{(query or '')[:60]}'"
         )
         start_time = time.time()
+        cache_meta: Dict[str, Any] = {'cache_hit': False, 'cache_tier': 'cold'}
 
         try:
             if mode == 'urls':
                 urls = agent_data.get('web_search_urls', [])
                 if not urls:
                     return "No URLs configured for web search."
-                context = await self._get_url_context(urls, cache_ttl, project_id)
+                context, cache_meta = await self._get_url_context(urls, cache_ttl, project_id)
             elif mode == 'domains':
                 domains = agent_data.get('web_search_domains', [])
                 if not query:
                     return "A search query is required for domain-restricted web search."
-                context = await self._get_domain_search_context(
-                    query, domains, max_results, cache_ttl, project_id
+                context, cache_meta = await self._get_domain_search_context(
+                    query, domains, max_results, cache_ttl, project_id,
                 )
             else:
                 if not query:
                     return "A search query is required for general web search."
-                context = await self._get_general_search_context(
-                    query, max_results, cache_ttl, project_id
+                context, cache_meta = await self._get_general_search_context(
+                    query, max_results, cache_ttl, project_id,
                 )
 
             duration_ms = (time.time() - start_time) * 1000
             logger.info(
                 f"🌐 WEBSEARCH TOOL: completed in {duration_ms:.0f}ms, "
-                f"{len(context)} chars"
+                f"{len(context)} chars, tier={cache_meta.get('cache_tier')}"
             )
+            # Tool-call path also emits a metric so the analytics page
+            # counts agent tool-call websearches the same way as context
+            # augmentation websearches.
+            try:
+                await self._log_websearch_metrics(
+                    project_id=project_id,
+                    agent_node=agent_node,
+                    mode=mode,
+                    duration_ms=duration_ms,
+                    context_length=len(context or ''),
+                    success=bool(context),
+                    cache_meta=cache_meta,
+                    execution_id=execution_id,
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ WEBSEARCH TOOL: metric logging failed: {e}")
             return context or "No results found."
 
         except Exception as e:

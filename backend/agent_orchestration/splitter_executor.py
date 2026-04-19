@@ -40,7 +40,8 @@ Design notes
 
 import json
 import logging
-from typing import Any, Dict, List
+import time
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("conversation_orchestrator")
 
@@ -188,6 +189,8 @@ async def execute_splitter(
     llm_provider,
     provider_name: str = "",
     event_callback=None,
+    project_id: Optional[str] = None,
+    execution_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run the splitter: force a structured tool call, parse the allocation,
     return per-target subtasks + pruned target ids.
@@ -223,6 +226,7 @@ async def execute_splitter(
     data = splitter_node.get("data", {}) or {}
     splitter_name = data.get("name", splitter_node.get("id", "Splitter"))
     overlap_allowed = bool(data.get("overlap_allowed", False))
+    t_start = time.time()
 
     if len(downstream_agents) < 2:
         raise SplitterAllocationError(
@@ -399,6 +403,43 @@ async def execute_splitter(
                 })
             except Exception:
                 pass  # never let callback errors fail the split
+
+        # Persist an ExperimentMetric row so the analytics dashboard can
+        # show per-workflow splitter decisions (duration, allocation
+        # distribution, pruned branches). Best-effort: never blocks the
+        # caller if the DB write fails.
+        try:
+            from .metrics_logger import log_experiment_metric
+            duration_ms = round((time.time() - t_start) * 1000, 1)
+            await log_experiment_metric(
+                project_id=project_id,
+                experiment_type='splitter',
+                metric_data={
+                    'experiment': 'splitter',
+                    'project_id': project_id,
+                    'agent_name': splitter_name,
+                    'duration_ms': duration_ms,
+                    'attempt': attempt + 1,
+                    'allocated_count': len(per_target),
+                    'pruned_count': len(pruned_target_ids),
+                    'allocated_agent_names': list({
+                        a.get('agent_name') for a in raw_allocations
+                    }),
+                    'pruned_agent_names': [
+                        (a.get('name') or a.get('id') or '') for a in pruned_targets
+                    ],
+                    'overlap_allowed': overlap_allowed,
+                },
+                configuration={
+                    'agent_name': splitter_name,
+                    'overlap_allowed': overlap_allowed,
+                    'downstream_count': len(downstream_agents),
+                },
+                execution_id=execution_id,
+                log_tag='EXP_METRIC_SPLITTER',
+            )
+        except Exception as exc:
+            logger.warning(f"🪓 SPLITTER: metric logging failed: {exc}")
 
         return {
             "per_target": per_target,

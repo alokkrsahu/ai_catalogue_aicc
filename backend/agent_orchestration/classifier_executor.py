@@ -23,7 +23,8 @@ Design notes
 import json
 import logging
 import re
-from typing import Any, Dict, List, Tuple
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger('conversation_orchestrator')
 
@@ -178,6 +179,8 @@ async def execute_classifier(
     llm_provider,
     provider_name: str = "",
     event_callback=None,
+    project_id: Optional[str] = None,
+    execution_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run the classifier: force a tool call, map it back to a category, return
@@ -195,11 +198,13 @@ async def execute_classifier(
         for a known category.
     """
     data = classifier_node.get("data", {}) or {}
+    classifier_name = data.get("name", classifier_node.get("id", "Classifier"))
     categories = data.get("categories") or []
     if len(categories) < 2:
         raise ClassifierSelectionError(
-            f"Classifier '{data.get('name', classifier_node.get('id'))}' must have at least 2 categories (got {len(categories)})."
+            f"Classifier '{classifier_name}' must have at least 2 categories (got {len(categories)})."
         )
+    t_start = time.time()
 
     tools, tool_map = build_classifier_tools(categories)
     system_prompt = build_classifier_system_prompt(categories)
@@ -282,6 +287,36 @@ async def execute_classifier(
                 })
             except Exception:  # never let callback errors fail classification
                 pass
+
+        # Persist an ExperimentMetric row so the analytics dashboard can
+        # show per-workflow classifier decisions. Best-effort.
+        try:
+            from .metrics_logger import log_experiment_metric
+            duration_ms = round((time.time() - t_start) * 1000, 1)
+            await log_experiment_metric(
+                project_id=project_id,
+                experiment_type='classifier',
+                metric_data={
+                    'experiment': 'classifier',
+                    'project_id': project_id,
+                    'agent_name': classifier_name,
+                    'duration_ms': duration_ms,
+                    'attempt': attempt + 1,
+                    'category_id': cat.get('id'),
+                    'category_name': cat.get('name'),
+                    'reasoning': reasoning,
+                    'tool_name': tool_name,
+                    'category_count': len(categories),
+                },
+                configuration={
+                    'agent_name': classifier_name,
+                    'category_count': len(categories),
+                },
+                execution_id=execution_id,
+                log_tag='EXP_METRIC_CLASSIFIER',
+            )
+        except Exception as exc:
+            logger.warning(f"🧭 CLASSIFIER: metric logging failed: {exc}")
 
         return {
             "category_id": cat.get("id"),

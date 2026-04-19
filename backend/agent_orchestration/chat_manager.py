@@ -368,11 +368,15 @@ class ChatManager:
             project=project,
         )
 
-    async def craft_conversation_prompt(self, conversation_history: str, agent_node: Dict[str, Any], project_id: Optional[str] = None) -> List[Dict[str, str]]:
+    async def craft_conversation_prompt(self, conversation_history: str, agent_node: Dict[str, Any], project_id: Optional[str] = None, execution_id: Optional[str] = None) -> List[Dict[str, str]]:
         """
         Craft conversation messages array for an agent including full conversation history
         Enhanced with DocAware RAG capabilities
-        
+
+        execution_id, when provided, is forwarded to WebSearchHandler /
+        DocAwareHandler so their emitted ExperimentMetric rows are
+        filterable per-run from the analytics dashboard.
+
         Returns:
             List of message dicts with 'role' and 'content' keys
         """
@@ -410,7 +414,8 @@ class ChatManager:
                     logger.info(f"📚 DOCAWARE: Query: {search_query[:100]}...")
                     
                     document_context = await self.docaware_handler.get_docaware_context_from_conversation_query(
-                        agent_node, search_query, project_id, conversation_history
+                        agent_node, search_query, project_id, conversation_history,
+                        execution_id=execution_id,
                     )
                     
                     if document_context:
@@ -511,7 +516,8 @@ class ChatManager:
             try:
                 logger.info(f"🌐 WEBSEARCH: Single agent {agent_name} - WebSearch enabled (context augmentation)")
                 websearch_context = await self.websearch_handler.get_websearch_context(
-                    agent_node, conversation_history, project_id
+                    agent_node, conversation_history, project_id,
+                    execution_id=execution_id,
                 )
                 
                 if websearch_context:
@@ -565,11 +571,12 @@ class ChatManager:
         return messages
     
     async def craft_conversation_prompt_with_docaware(
-        self, 
-        aggregated_context: Dict[str, Any], 
-        agent_node: Dict[str, Any], 
-        project_id: Optional[str] = None, 
-        conversation_history: str = ""
+        self,
+        aggregated_context: Dict[str, Any],
+        agent_node: Dict[str, Any],
+        project_id: Optional[str] = None,
+        conversation_history: str = "",
+        execution_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Enhanced conversation messages crafting with DocAware using aggregated input as search query.
@@ -623,7 +630,8 @@ class ChatManager:
                     logger.info(f"📚 DOCAWARE: Search query: {search_query[:100]}...")
                     
                     document_context = await self.docaware_handler.get_docaware_context_from_query(
-                        agent_node, search_query, project_id, aggregated_context
+                        agent_node, search_query, project_id, aggregated_context,
+                        execution_id=execution_id,
                     )
                     
                     if document_context:
@@ -723,13 +731,15 @@ class ChatManager:
                     # returns chunks relevant to A1+A2's outputs, not generic content.
                     agg_query = self.websearch_handler.extract_search_query_from_aggregated_input(aggregated_context)
                     websearch_context = await self.websearch_handler.get_websearch_context(
-                        agent_node, agg_query or "", project_id
+                        agent_node, agg_query or "", project_id,
+                        execution_id=execution_id,
                     )
                 else:
                     search_query = self.websearch_handler.extract_search_query_from_aggregated_input(aggregated_context)
                     if search_query:
                         websearch_context = await self.websearch_handler.get_websearch_context_from_query(
-                            agent_node, search_query, project_id
+                            agent_node, search_query, project_id,
+                            execution_id=execution_id,
                         )
 
                 if websearch_context:

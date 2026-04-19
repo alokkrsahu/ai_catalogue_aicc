@@ -336,6 +336,13 @@ class WebRAGService:
         indexed = 0
         skipped = 0
         failed = 0
+        # Split counters so analytics can distinguish which cache tier
+        # saved the work (flag still alive vs content-hash fast path vs
+        # embedding cache re-used vs full cold run).
+        flag_alive_hits = 0
+        content_hash_hits = 0
+        embed_cache_hits = 0
+        cold_count = 0
         timings: Dict[str, float] = {}
 
         # 1. Honour the per-URL index flag — skip pages whose flag is still alive.
@@ -347,11 +354,21 @@ class WebRAGService:
         alive_urls = {url for url, key in flag_keys.items() if alive_flags.get(key)}
 
         work_items = [(url, page) for url, page in items if url not in alive_urls]
+        flag_alive_hits += len(alive_urls)
         skipped += len(alive_urls)
 
         if not work_items:
             timings['total'] = round((time.time() - t0) * 1000, 1)
-            return {'indexed': 0, 'skipped': skipped, 'failed': 0, 'timings_ms': timings}
+            return {
+                'indexed': 0,
+                'skipped': skipped,
+                'failed': 0,
+                'flag_alive_hits': flag_alive_hits,
+                'content_hash_hits': 0,
+                'embed_cache_hits': 0,
+                'cold_count': 0,
+                'timings_ms': timings,
+            }
 
         # 1b. Content-hash short-circuit — if the page's content hash matches
         # the one cached from the previous index, skip everything and just
@@ -395,6 +412,7 @@ class WebRAGService:
                 f"(project {str(project_id)[:8]})"
             )
             skipped += len(hash_short_circuit_urls)
+            content_hash_hits += len(hash_short_circuit_urls)
 
         if not pending_items:
             timings['total'] = round((time.time() - t0) * 1000, 1)
@@ -402,6 +420,10 @@ class WebRAGService:
                 'indexed': 0,
                 'skipped': skipped,
                 'failed': failed,
+                'flag_alive_hits': flag_alive_hits,
+                'content_hash_hits': content_hash_hits,
+                'embed_cache_hits': 0,
+                'cold_count': 0,
                 'timings_ms': timings,
             }
 
@@ -456,8 +478,10 @@ class WebRAGService:
             if cached and len(cached) == len(chunks):
                 # Happy path: cached embeddings match current chunk count.
                 final_chunks_per_url[url] = cached
+                embed_cache_hits += 1
                 continue
             urls_to_embed.append(url)
+            cold_count += 1
             for c in chunks:
                 chunks_needing_embed.append(c)
                 embed_url_index.append(url)
@@ -564,6 +588,10 @@ class WebRAGService:
                 'indexed': 0,
                 'skipped': skipped,
                 'failed': failed + len(final_chunks_per_url),
+                'flag_alive_hits': flag_alive_hits,
+                'content_hash_hits': content_hash_hits,
+                'embed_cache_hits': embed_cache_hits,
+                'cold_count': cold_count,
                 'timings_ms': timings,
             }
 
@@ -591,6 +619,10 @@ class WebRAGService:
             'indexed': indexed,
             'skipped': skipped,
             'failed': failed,
+            'flag_alive_hits': flag_alive_hits,
+            'content_hash_hits': content_hash_hits,
+            'embed_cache_hits': embed_cache_hits,
+            'cold_count': cold_count,
             'timings_ms': timings,
         }
 
