@@ -231,7 +231,7 @@
     <main class="flex-1 min-h-0">
       <iframe
         title="Chat"
-        src="/api/workflow-deploy/{projectId}/embed/"
+        src="/api/workflow-deploy/{projectId}/embed/?hide_header=1"
         class="w-full h-full block border-0"
         style="height: calc(100vh - 49px);"
       ></iframe>
