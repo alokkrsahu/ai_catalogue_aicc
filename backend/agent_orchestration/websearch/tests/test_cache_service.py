@@ -156,3 +156,24 @@ class CacheServiceIsolationTests(TestCase):
     def test_content_hash_key_normalises_project_id(self):
         key = self.svc._make_content_hash_key('https://x.example/', 'abc-123-def')
         self.assertTrue(key.startswith('websearch_chash_abc_123_def_'))
+
+    # ------------------------------------------------------------------
+    # Summary-generation flag (background job marker)
+    # ------------------------------------------------------------------
+
+    def test_summary_gen_prefix_constant_shape(self):
+        # Prefix is a well-known value that deployment_views.py and the
+        # url-summaries GET endpoint both reference — keep it stable.
+        self.assertEqual(self.svc.SUMMARY_GEN_PREFIX, 'websearch_summary_gen_')
+
+    def test_clear_all_removes_summary_gen_flag(self):
+        # Seed the same-shape key the view sets, then clear.
+        pid = 'abc-123'
+        pid_norm = pid.replace('-', '_')
+        key = f'{self.svc.SUMMARY_GEN_PREFIX}{pid_norm}'
+        cache.set(key, True, timeout=60)
+        self.assertTrue(cache.get(key))
+
+        self.svc.clear_all_websearch_cache(pid)
+
+        self.assertIsNone(cache.get(key))

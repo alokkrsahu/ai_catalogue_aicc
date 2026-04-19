@@ -42,6 +42,10 @@ class WebSearchCacheService:
     INDEX_FLAG_PREFIX = "websearch_milvus_idx_"
     EMBED_PREFIX = "websearch_emb_"
     CONTENT_HASH_PREFIX = "websearch_chash_"
+    # Short-lived flag (no hash suffix) marking an in-flight summarise-urls
+    # job for the project — prevents double-starts and lets the UI show a
+    # "generating in background" status.
+    SUMMARY_GEN_PREFIX = "websearch_summary_gen_"
     
     def __init__(self):
         """Initialize cache service with settings from Django config."""
@@ -427,6 +431,8 @@ class WebSearchCacheService:
                 cache.delete_pattern(f"{self.INDEX_FLAG_PREFIX}{pid}_*")
                 cache.delete_pattern(f"{self.EMBED_PREFIX}{pid}_*")
                 cache.delete_pattern(f"{self.CONTENT_HASH_PREFIX}{pid}_*")
+                # Single-key flag (no hash suffix) — wildcard still matches it.
+                cache.delete(f"{self.SUMMARY_GEN_PREFIX}{pid}")
                 logger.info(f"🗑️ WEBSEARCH CACHE: Cleared all websearch cache for project {project_id[:8]}")
                 return True
 
@@ -454,6 +460,12 @@ class WebSearchCacheService:
                             deleted += len(keys)
                         if cursor == 0:
                             break
+                # Summary-gen flag is a single key (no hash suffix) — drop it too.
+                try:
+                    client.delete(f"{key_prefix}:{version}:{self.SUMMARY_GEN_PREFIX}{pid}")
+                    deleted += 1
+                except Exception:
+                    pass
                 logger.info(
                     f"🗑️ WEBSEARCH CACHE: Cleared {deleted} cache keys for project {project_id[:8]}"
                 )

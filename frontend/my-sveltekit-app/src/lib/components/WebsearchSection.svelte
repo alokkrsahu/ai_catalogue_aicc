@@ -14,6 +14,7 @@
 -->
 <script lang="ts">
   import api from '$lib/services/api';
+  import { onDestroy } from 'svelte';
   import type { AgentNodeData } from '$lib/types';
 
   /** Two-way bound node config. */
@@ -56,6 +57,10 @@
   let urlSummaryStatus: string | null = null;
   let regeneratingUrl: string | null = null;
   let expandedSummaryUrl: string | null = null;
+  let summaryPollTimer: ReturnType<typeof setTimeout> | null = null;
+  // Mirror of backend's summary-generation Redis flag — true while a
+  // detached thread is still producing summaries for this project.
+  let generationInProgress = false;
 
   // ---- Clear-cache state ------------------------------------------------
   let clearingWebCache = false;
@@ -130,18 +135,63 @@
     }
   }
 
-  async function loadUrlSummaries() {
-    if (!projectId) return;
+  async function loadUrlSummaries(): Promise<boolean> {
+    // Returns the latest generation_in_progress flag so the poller can
+    // decide whether to schedule another tick.
+    if (!projectId) return false;
     try {
       const res = await api.get(`/agent-orchestration/projects/${projectId}/url-summaries/`);
       const map: Record<string, UrlSummary> = {};
       for (const s of (res.data?.summaries ?? [])) map[s.url] = s;
       urlSummariesByUrl = map;
       urlSummariesLoaded = true;
+      generationInProgress = Boolean(res.data?.generation_in_progress);
+      return generationInProgress;
     } catch (err) {
       console.warn('Load URL summaries failed:', err);
       urlSummariesLoaded = true;
+      return false;
     }
+  }
+
+  /**
+   * Poll `/url-summaries/` every 3s while the backend's generation flag
+   * is alive. Progress text is derived from how many of the configured
+   * URLs now have a summary — the per-URL checkmarks in the list above
+   * re-render automatically as `urlSummariesByUrl` updates.
+   * Safety stop: 15 minutes (matches the backend Redis flag TTL).
+   */
+  async function pollSummaryProgress() {
+    if (summaryPollTimer) clearTimeout(summaryPollTimer);
+    const deadline = Date.now() + 15 * 60 * 1000;
+
+    const tick = async () => {
+      const stillRunning = await loadUrlSummaries();
+      const configured = (nodeConfig.web_search_urls || []).filter(
+        (u: string) => u.startsWith('http://') || u.startsWith('https://'),
+      );
+      const done = configured.filter((u: string) => urlSummariesByUrl[u]).length;
+      if (stillRunning && Date.now() < deadline) {
+        urlSummaryStatus = `Generating in background… ${done}/${configured.length} done`;
+        summaryPollTimer = setTimeout(tick, 3000);
+      } else {
+        generatingUrlSummaries = false;
+        regeneratingUrl = null;
+        summaryPollTimer = null;
+        if (!stillRunning) {
+          urlSummaryStatus = done >= configured.length && configured.length > 0
+            ? `All ${done} summaries ready`
+            : `${done}/${configured.length} summaries ready`;
+        } else {
+          urlSummaryStatus = 'Still generating in background — close this panel and return later';
+        }
+        setTimeout(() => { urlSummaryStatus = null; }, 6000);
+      }
+    };
+
+    // Fire first tick immediately so UI reflects whatever completed
+    // before this function was called.
+    tick();
   }
 
   async function generateMissingUrlSummaries() {
@@ -155,7 +205,7 @@
       return;
     }
     generatingUrlSummaries = true;
-    urlSummaryStatus = 'Generating summaries…';
+    urlSummaryStatus = 'Starting…';
     try {
       const res = await api.post(
         `/agent-orchestration/projects/${projectId}/summarize-urls/`,
@@ -168,18 +218,30 @@
         },
       );
       const d = res.data || {};
-      const parts: string[] = [];
-      if (d.summarized) parts.push(`${d.summarized} summarized`);
-      if (d.skipped) parts.push(`${d.skipped} already had summaries`);
-      if (d.failed) parts.push(`${d.failed} failed`);
-      urlSummaryStatus = parts.length ? parts.join(', ') : 'No new summaries generated';
-      await loadUrlSummaries();
+      // 200 with status='noop' means nothing to do (all URLs had summaries
+      // and force=false). 202 with status='started' means the background
+      // thread was kicked off — start polling.
+      if (d.status === 'noop') {
+        urlSummaryStatus = 'All URLs already have summaries';
+        generatingUrlSummaries = false;
+        await loadUrlSummaries();
+        setTimeout(() => { urlSummaryStatus = null; }, 4000);
+        return;
+      }
+      urlSummaryStatus = `Queued ${d.urls_queued ?? urls.length} URL(s) — generating in background…`;
+      await pollSummaryProgress();
     } catch (err: any) {
+      const statusCode = err?.response?.status;
       const msg = err?.response?.data?.error || err?.message || 'Request failed';
-      urlSummaryStatus = `Error: ${msg}`;
-    } finally {
-      generatingUrlSummaries = false;
-      setTimeout(() => { urlSummaryStatus = null; }, 6000);
+      if (statusCode === 409) {
+        // Already running — join the existing run via polling.
+        urlSummaryStatus = 'Already generating — joining in-progress run…';
+        await pollSummaryProgress();
+      } else {
+        urlSummaryStatus = `Error: ${msg}`;
+        generatingUrlSummaries = false;
+        setTimeout(() => { urlSummaryStatus = null; }, 6000);
+      }
     }
   }
 
@@ -187,7 +249,7 @@
     if (!projectId || regeneratingUrl) return;
     regeneratingUrl = url;
     try {
-      await api.post(
+      const res = await api.post(
         `/agent-orchestration/projects/${projectId}/summarize-urls/`,
         {
           urls: [url],
@@ -197,11 +259,27 @@
           force: true,
         },
       );
-      await loadUrlSummaries();
-    } catch (err) {
-      console.warn('Regenerate URL summary failed:', err);
+      const d = res.data || {};
+      if (d.status === 'started' || d.status === 'noop') {
+        // Single URL regeneration is usually fast, but still detached on
+        // the backend — poll briefly for the fresh summary.
+        generatingUrlSummaries = true;
+        await pollSummaryProgress();
+      } else {
+        await loadUrlSummaries();
+      }
+    } catch (err: any) {
+      const statusCode = err?.response?.status;
+      if (statusCode === 409) {
+        generatingUrlSummaries = true;
+        await pollSummaryProgress();
+      } else {
+        console.warn('Regenerate URL summary failed:', err);
+      }
     } finally {
-      regeneratingUrl = null;
+      // regeneratingUrl is cleared by the poller once generation finishes;
+      // if the POST failed outright, clear it now.
+      if (!generatingUrlSummaries) regeneratingUrl = null;
     }
   }
 
@@ -223,14 +301,36 @@
   }
 
   // Lazy-load summaries the first time the user switches into URL mode.
+  // If a background generation is already running server-side (another
+  // tab started it, or the page reloaded during a run), pick up the
+  // polling automatically so the user sees progress.
   $: if (
     projectId &&
     nodeConfig?.web_search_enabled &&
     nodeConfig?.web_search_mode === 'urls' &&
     !urlSummariesLoaded
   ) {
-    loadUrlSummaries();
+    loadUrlSummaries().then((running) => {
+      if (running && !generatingUrlSummaries) {
+        generatingUrlSummaries = true;
+        urlSummaryStatus = 'Generation already in progress — tracking…';
+        pollSummaryProgress();
+      }
+    });
   }
+
+  // Stop the polling timer when this component is torn down so it
+  // doesn't keep firing after the panel closes.
+  onDestroy(() => {
+    if (summaryPollTimer) {
+      clearTimeout(summaryPollTimer);
+      summaryPollTimer = null;
+    }
+    if (webIndexDebounceTimer) {
+      clearTimeout(webIndexDebounceTimer);
+      webIndexDebounceTimer = null;
+    }
+  });
 
   $: toggleDisabled = gatedByDocToolCalling && !nodeConfig.doc_tool_calling;
   $: showConfig = nodeConfig.web_search_enabled && (!gatedByDocToolCalling || nodeConfig.doc_tool_calling);
@@ -370,6 +470,9 @@
             <label class="block text-sm font-medium text-gray-700">
               Per-URL Summaries
               <span class="text-xs text-gray-500 ml-1">(LLM-generated; enables selective URL tools)</span>
+              <span class="block text-[11px] text-gray-500 font-normal mt-0.5">
+                Runs in the background — safe to close this panel; summaries will keep generating and show up when you return.
+              </span>
             </label>
             <button
               type="button"

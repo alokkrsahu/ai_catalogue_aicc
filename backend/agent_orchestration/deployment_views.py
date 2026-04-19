@@ -869,14 +869,38 @@ class DeploymentViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'], url_path='projects/(?P<project_id>[^/.]+)/summarize-urls')
     def summarize_urls(self, request, project_id=None):
         """
-        Generate LLM summaries for a list of web search URLs.
+        Kick off LLM-summary generation for a list of web-search URLs.
+
+        Runs in a detached daemon thread so the HTTP request returns
+        immediately (~200 ms) — a 20-URL run can take 5-15 minutes at
+        two LLM calls per URL and would otherwise hit gunicorn/nginx
+        timeouts.
 
         POST /api/agent-orchestration/projects/{project_id}/summarize-urls/
-        Body: { "urls": ["https://..."], "llm_provider": "openai", "llm_model": "gpt-4o-mini" }
+        Body: {
+            "urls": ["https://..."],
+            "llm_provider": "openai",
+            "llm_model":    "gpt-4o-mini",
+            "cache_ttl":    2592000,
+            "force":        false
+        }
+
+        Returns 202 Accepted with:
+            { "status": "started", "urls_queued": N,
+              "dropped_invalid": N, "dropped_over_cap": N }
+
+        Returns 409 Conflict if a generation is already running for
+        this project (Redis flag websearch_summary_gen_<pid>).
+
+        Poll GET /url-summaries/ to observe progress and completion.
         """
         import asyncio
+        import threading
+        from asgiref.sync import async_to_sync
+        from django.core.cache import cache as django_cache
         from .websearch_handler import WebSearchHandler
-        from .chat_manager import ChatManager
+        from .websearch import WebSearchCacheService
+        from .llm_provider_manager import LLMProviderManager
 
         try:
             project = get_object_or_404(IntelliDocProject, project_id=project_id)
@@ -912,8 +936,11 @@ class DeploymentViewSet(viewsets.ViewSet):
                 )
                 urls = [u for u in urls if u not in existing]
                 if not urls:
+                    # Nothing to do — return immediately with the legacy
+                    # shape so clients don't have to special-case it.
                     return Response(
                         {
+                            'status': 'noop',
                             'summarized': 0,
                             'skipped': original_count,
                             'failed': 0,
@@ -928,36 +955,83 @@ class DeploymentViewSet(viewsets.ViewSet):
             model_name = body.get('llm_model', '')
             cache_ttl = int(body.get('cache_ttl', 2592000))  # default 30 days
 
-            handler = WebSearchHandler()
-
-            async def _run():
-                from .llm_provider_manager import LLMProviderManager
-                mgr = LLMProviderManager()
-                agent_config = {
-                    'llm_provider': provider_name,
-                    'llm_model': model_name or 'gpt-4o-mini',
-                }
-                llm = await mgr.get_llm_provider(agent_config, project=project)
-                if not llm:
-                    raise ValueError(
-                        f'No {provider_name} API key configured for this project. '
-                        'Add one in Project Settings → API Keys.'
-                    )
-                return await handler.summarize_urls_for_project(
-                    urls=urls,
-                    project_id=str(project_id),
-                    llm_provider=llm,
-                    cache_ttl=cache_ttl,
+            # --- Pre-flight: resolve the LLM provider synchronously so we
+            # can return a helpful 400 BEFORE kicking off a background job.
+            mgr = LLMProviderManager()
+            agent_config = {
+                'llm_provider': provider_name,
+                'llm_model': model_name or 'gpt-4o-mini',
+            }
+            try:
+                llm = async_to_sync(mgr.get_llm_provider)(agent_config, project=project)
+            except Exception as e:
+                logger.error(f"❌ SUMMARIZE URLS: provider resolution failed: {e}")
+                return Response({'error': f'LLM provider error: {e}'}, status=status.HTTP_400_BAD_REQUEST)
+            if not llm:
+                return Response(
+                    {
+                        'error': f'No {provider_name} API key configured for this project. '
+                                 'Add one in Project Settings → API Keys.',
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            try:
-                result = asyncio.run(_run())
-            except ValueError as e:
-                return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-            if isinstance(result, dict):
-                result.setdefault('dropped_invalid', dropped_invalid)
-                result.setdefault('dropped_over_cap', dropped_over_cap)
-            return Response(result, status=status.HTTP_200_OK)
+            # --- Double-start guard via Redis flag.
+            cache_svc = WebSearchCacheService()
+            pid_for_key = str(project_id).replace('-', '_')
+            flag_key = f"{cache_svc.SUMMARY_GEN_PREFIX}{pid_for_key}"
+            if django_cache.get(flag_key):
+                return Response(
+                    {
+                        'error': 'generation_in_progress',
+                        'detail': 'A summary generation job is already running for this project.',
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            # 15-minute TTL acts as a circuit breaker: if the thread dies
+            # without clearing the flag (worker recycle, OOM, etc.) the
+            # flag self-expires instead of blocking the endpoint forever.
+            django_cache.set(flag_key, True, timeout=900)
+
+            handler = WebSearchHandler()
+            project_id_str = str(project_id)
+            urls_snapshot = list(urls)  # defensive copy into the closure
+
+            def _run_in_background():
+                try:
+                    asyncio.run(handler.summarize_urls_for_project(
+                        urls=urls_snapshot,
+                        project_id=project_id_str,
+                        llm_provider=llm,
+                        cache_ttl=cache_ttl,
+                    ))
+                    logger.info(
+                        f"✅ SUMMARIZE URLS (bg): finished {len(urls_snapshot)} URL(s) "
+                        f"for project {project_id_str[:8]}"
+                    )
+                except Exception as e:
+                    logger.error(f"❌ SUMMARIZE URLS (bg): {e}", exc_info=True)
+                finally:
+                    try:
+                        django_cache.delete(flag_key)
+                    except Exception:
+                        pass
+
+            threading.Thread(
+                target=_run_in_background,
+                daemon=True,
+                name='websearch-summarize',
+            ).start()
+
+            return Response(
+                {
+                    'status': 'started',
+                    'urls_queued': len(urls_snapshot),
+                    'dropped_invalid': dropped_invalid,
+                    'dropped_over_cap': dropped_over_cap,
+                },
+                status=status.HTTP_202_ACCEPTED,
+            )
 
         except Exception as e:
             logger.error(f"❌ SUMMARIZE URLS: {e}", exc_info=True)
@@ -1015,7 +1089,23 @@ class DeploymentViewSet(viewsets.ViewSet):
                 }
                 for s in qs.order_by('url')
             ]
-            return Response({'summaries': summaries}, status=status.HTTP_200_OK)
+
+            # Expose the background-generation flag so the UI can poll
+            # this endpoint and stop when the Redis key has cleared.
+            from django.core.cache import cache as django_cache
+            from .websearch import WebSearchCacheService
+            cache_svc = WebSearchCacheService()
+            pid_for_key = str(project_id).replace('-', '_')
+            flag_key = f"{cache_svc.SUMMARY_GEN_PREFIX}{pid_for_key}"
+            generation_in_progress = bool(django_cache.get(flag_key))
+
+            return Response(
+                {
+                    'summaries': summaries,
+                    'generation_in_progress': generation_in_progress,
+                },
+                status=status.HTTP_200_OK,
+            )
         except Exception as e:
             logger.error(f"❌ LIST URL SUMMARIES: {e}", exc_info=True)
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
