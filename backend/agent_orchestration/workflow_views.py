@@ -153,9 +153,236 @@ class AgentWorkflowViewSet(viewsets.ModelViewSet):
         workflow = self.get_object()
         
         logger.info(f"🗑️ WORKFLOW DELETE: {workflow.workflow_id} by {request.user.email}")
-        
+
         return super().destroy(request, *args, **kwargs)
-    
+
+    # =========================================================================
+    # Export / Import — download a workflow as JSON, import one back
+    # =========================================================================
+
+    # Bump this if the bundle shape ever changes in a backward-incompatible
+    # way. Import refuses bundles whose schema_version it doesn't know.
+    EXPORT_SCHEMA_VERSION = "1"
+
+    @action(detail=True, methods=['get'], url_path='export')
+    def export(self, request, *args, **kwargs):
+        """
+        Download the selected workflow as a self-describing JSON bundle.
+
+        GET /api/projects/<pid>/workflows/<wid>/export/
+
+        Response body: see EXPORT_SCHEMA_VERSION="1" shape below.
+        Response headers: Content-Disposition forces a browser download named
+        "<slug>.workflow.json".
+        """
+        import json
+        import re
+
+        workflow = self.get_object()
+        # get_object() already enforces project access via get_queryset.
+
+        bundle = {
+            "schema_version": self.EXPORT_SCHEMA_VERSION,
+            "exported_at": timezone.now().isoformat(),
+            "source": {
+                "project_id": str(workflow.project.project_id),
+                "project_name": workflow.project.name,
+                "workflow_id": str(workflow.workflow_id),
+                "exported_by": request.user.email,
+            },
+            "workflow": {
+                "name": workflow.name,
+                "description": workflow.description or "",
+                "status": workflow.status,
+                "version": workflow.version,
+                "tags": workflow.tags or [],
+                "supports_rag": workflow.supports_rag,
+                "vector_collections": workflow.vector_collections or [],
+                "custom_config": workflow.custom_config or {},
+                "max_agents_limit": workflow.max_agents_limit,
+                "supports_function_tools": workflow.supports_function_tools,
+                "graph_json": workflow.graph_json or {"nodes": [], "edges": []},
+            },
+        }
+
+        # Sluggify the workflow name for the filename — keep [a-z0-9_-] only
+        # and fall back to "workflow" if the result is empty.
+        slug = re.sub(r'[^A-Za-z0-9_-]+', '_', workflow.name or '').strip('_') or 'workflow'
+        filename = f"{slug}.workflow.json"
+
+        response = Response(bundle, status=status.HTTP_200_OK)
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        logger.info(
+            f"📤 WORKFLOW EXPORT: {workflow.workflow_id} → {filename} by {request.user.email}"
+        )
+        return response
+
+    @action(detail=False, methods=['post'], url_path='import')
+    def import_bundle(self, request, *args, **kwargs):
+        """
+        Create a new workflow in this project from an uploaded bundle.
+
+        POST /api/projects/<pid>/workflows/import/
+        Body (JSON): the bundle produced by the export action.
+
+        Behaviour:
+          - Always creates a NEW workflow in the target project.
+          - Name collision → auto-rename as "<name> (2)", "(3)", etc.
+          - Cross-project references that don't belong in the new project
+            (file_attachment refs carrying provider file IDs) are stripped
+            silently — those are tied to the source project's LLM keys.
+          - doc_tool_calling_documents refs are KEPT as-is but warnings are
+            collected listing any documents NOT present in the target project.
+          - Returns {workflow: <serialized>, warnings: [str, ...]}.
+        """
+        project_id = kwargs.get('project_id')
+        project = get_object_or_404(IntelliDocProject, project_id=project_id)
+        if not project.has_user_access(request.user):
+            return Response(
+                {'error': 'You do not have permission to import into this project'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        bundle = request.data
+        if not isinstance(bundle, dict):
+            return Response(
+                {'error': 'Body must be a JSON object matching the export bundle shape.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        schema_version = bundle.get('schema_version')
+        if schema_version != self.EXPORT_SCHEMA_VERSION:
+            return Response(
+                {
+                    'error': (
+                        f"Unsupported schema_version {schema_version!r}. "
+                        f"This server only understands version "
+                        f"{self.EXPORT_SCHEMA_VERSION!r}."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        wf_blob = bundle.get('workflow')
+        if not isinstance(wf_blob, dict):
+            return Response(
+                {'error': "Missing or invalid 'workflow' object in the bundle."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        graph_json = wf_blob.get('graph_json') or {'nodes': [], 'edges': []}
+        if not isinstance(graph_json, dict) or 'nodes' not in graph_json or 'edges' not in graph_json:
+            return Response(
+                {'error': "'graph_json' must be an object with 'nodes' and 'edges' arrays."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Strip file_attachment_documents — they carry provider-specific file
+        # IDs (OpenAI/Anthropic/Google) tied to the source project's keys.
+        # Leaving them in would point at IDs that don't exist for the target
+        # project and would fail at execution time.
+        warnings: List[str] = []
+        stripped_attachments = 0
+        for node in (graph_json.get('nodes') or []):
+            data = node.get('data') or {}
+            if data.get('file_attachment_documents'):
+                stripped_attachments += len(data['file_attachment_documents'])
+                data['file_attachment_documents'] = []
+                # Also clear the enabled flag so the node doesn't claim file
+                # attachments are active when none remain.
+                if 'file_attachments_enabled' in data:
+                    data['file_attachments_enabled'] = False
+        if stripped_attachments:
+            warnings.append(
+                f"Stripped {stripped_attachments} file_attachment reference(s) tied "
+                "to the source project's LLM keys — re-upload any needed files "
+                "and re-enable per agent."
+            )
+
+        # Collect doc_tool_calling_documents refs + surface warnings for
+        # documents not present in the target project. We keep the refs
+        # (user said "import + warn, keep refs") so the user can upload
+        # matching docs later.
+        try:
+            from users.models import ProjectDocument
+            existing_doc_names = set(
+                ProjectDocument.objects.filter(project=project)
+                .values_list('original_filename', flat=True)
+            )
+        except Exception:
+            existing_doc_names = set()
+        referenced_docs: set = set()
+        for node in (graph_json.get('nodes') or []):
+            data = node.get('data') or {}
+            for ref in (data.get('doc_tool_calling_documents') or []):
+                if ref:
+                    referenced_docs.add(ref)
+        missing = sorted(referenced_docs - existing_doc_names)
+        if missing:
+            warnings.append(
+                f"{len(missing)} document reference(s) not yet in this project: "
+                + ', '.join(missing[:10])
+                + (', …' if len(missing) > 10 else '')
+            )
+
+        # Resolve the workflow name with auto-rename on collision.
+        base_name = (wf_blob.get('name') or 'Imported Workflow').strip() or 'Imported Workflow'
+        desired_name = base_name
+        suffix = 1
+        while AgentWorkflow.objects.filter(project=project, name=desired_name).exists():
+            suffix += 1
+            desired_name = f"{base_name} ({suffix})"
+        if desired_name != base_name:
+            warnings.append(
+                f"Renamed to '{desired_name}' — a workflow named '{base_name}' "
+                "already exists in this project."
+            )
+
+        # Status: never carry ACTIVE / VALIDATED across import — a fresh
+        # workflow starts as DRAFT so the user explicitly promotes it.
+        allowed_statuses = {AgentWorkflowStatus.DRAFT}
+        incoming_status = wf_blob.get('status')
+        final_status = (
+            incoming_status if incoming_status in allowed_statuses
+            else AgentWorkflowStatus.DRAFT
+        )
+
+        try:
+            workflow = AgentWorkflow.objects.create(
+                project=project,
+                name=desired_name,
+                description=(wf_blob.get('description') or '')[:2000],
+                graph_json=graph_json,
+                status=final_status,
+                version=(wf_blob.get('version') or '1.0.0')[:50],
+                tags=wf_blob.get('tags') or [],
+                supports_rag=bool(wf_blob.get('supports_rag', False)),
+                vector_collections=wf_blob.get('vector_collections') or [],
+                custom_config=wf_blob.get('custom_config') or {},
+                max_agents_limit=int(wf_blob.get('max_agents_limit') or 10),
+                supports_function_tools=bool(wf_blob.get('supports_function_tools', True)),
+                created_by=request.user,
+            )
+        except Exception as e:
+            logger.error(f"❌ WORKFLOW IMPORT: failed to create row: {e}", exc_info=True)
+            return Response(
+                {'error': f'Failed to create imported workflow: {str(e)[:500]}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        logger.info(
+            f"📥 WORKFLOW IMPORT: created {workflow.workflow_id} "
+            f"('{workflow.name}') in project {project.project_id} "
+            f"by {request.user.email}; warnings={len(warnings)}"
+        )
+        return Response(
+            {
+                'workflow': AgentWorkflowSerializer(workflow).data,
+                'warnings': warnings,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
     @action(
         detail=True,
         methods=['post'],

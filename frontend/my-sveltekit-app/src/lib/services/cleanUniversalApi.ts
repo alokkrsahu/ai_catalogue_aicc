@@ -1341,6 +1341,70 @@ export class CleanUniversalApiService {
     }
     return response.json();
   }
+
+  /**
+   * Download the selected workflow as a self-describing JSON bundle and
+   * kick off a browser save. Returns the bundle for callers that want to
+   * inspect it.
+   */
+  async exportWorkflow(projectId: string, workflowId: string): Promise<any> {
+    const url = `${API_BASE}/projects/${projectId}/workflows/${workflowId}/export/`;
+    const response = await this.handleAuthenticatedRequest(url, {
+      method: 'GET',
+      headers: this.getAuthHeaders(),
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Export workflow failed: ${response.status}`);
+    }
+    const bundle = await response.json();
+
+    // Derive the filename from the Content-Disposition header the backend
+    // set. If it's missing (proxy stripped it), fall back to the workflow
+    // name.
+    let filename = 'workflow.workflow.json';
+    const cd = response.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename="?([^";]+)"?/i);
+    if (m) {
+      filename = m[1];
+    } else if (bundle?.workflow?.name) {
+      filename = `${(bundle.workflow.name as string).replace(/[^A-Za-z0-9_-]+/g, '_') || 'workflow'}.workflow.json`;
+    }
+
+    // Save to disk via a throwaway anchor — works in every evergreen
+    // browser without requiring a polyfill.
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+    const href = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = href;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(href);
+
+    return bundle;
+  }
+
+  /**
+   * Import a workflow bundle into the target project. Backend always
+   * creates a NEW workflow (auto-renamed on name collision). Returns
+   * { workflow, warnings } — warnings lists stripped file refs / missing
+   * doc refs / rename notices.
+   */
+  async importWorkflow(projectId: string, bundle: any): Promise<any> {
+    const url = `${API_BASE}/projects/${projectId}/workflows/import/`;
+    const response = await this.handleAuthenticatedRequest(url, {
+      method: 'POST',
+      headers: { ...this.getAuthHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(bundle),
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Import workflow failed: ${response.status}`);
+    }
+    return response.json();
+  }
 }
 
 // Export singleton instance

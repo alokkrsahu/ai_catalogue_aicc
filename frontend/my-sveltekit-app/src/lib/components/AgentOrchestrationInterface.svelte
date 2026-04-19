@@ -3,6 +3,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { toasts } from '$lib/stores/toast';
   import api from '$lib/services/api';
+  import { cleanUniversalApi } from '$lib/services/cleanUniversalApi';
   import { llmModelsService, ensureModelsLoaded, type BulkModelData } from '$lib/stores/llmModelsStore';
   import { workflowStatus, pendingInputsCount, isWorkflowStatusActive } from '$lib/stores/workflowStatus';
   import { validateWorkflowGraph } from '$lib/stores/workflowStore';
@@ -604,10 +605,83 @@
       }
       
       console.log(`✅ WORKFLOWS LOADED: ${allWorkflows.length} workflows from database`);
-      
+
     } catch (error) {
       console.error('❌ LOADING WORKFLOWS: Failed to load from database:', error);
       allWorkflows = [];
+    }
+  }
+
+  // ── Workflow import / export ──────────────────────────────────────────
+  // Download the currently selected workflow as a JSON bundle, and import
+  // a bundle back into this project as a new workflow. See
+  // cleanUniversalApi.exportWorkflow / importWorkflow for the shapes.
+
+  let importFileInput: HTMLInputElement | null = null;
+  let exportingWorkflow = false;
+  let importingWorkflow = false;
+
+  async function doDownloadWorkflow() {
+    if (!selectedWorkflow || exportingWorkflow) return;
+    exportingWorkflow = true;
+    try {
+      await cleanUniversalApi.exportWorkflow(projectId, selectedWorkflow.workflow_id);
+      toasts.success(`Downloaded '${selectedWorkflow.name}' as JSON`);
+    } catch (err: any) {
+      console.error('❌ WORKFLOW EXPORT:', err);
+      toasts.error(`Download failed: ${err?.message || err}`);
+    } finally {
+      exportingWorkflow = false;
+    }
+  }
+
+  function triggerImportFilePicker() {
+    if (importingWorkflow) return;
+    importFileInput?.click();
+  }
+
+  async function onImportFileSelected(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    // Reset so the same file can be selected again after failure.
+    if (input) input.value = '';
+    if (!file) return;
+
+    importingWorkflow = true;
+    try {
+      const text = await file.text();
+      let bundle: any;
+      try {
+        bundle = JSON.parse(text);
+      } catch (parseErr: any) {
+        throw new Error(`Selected file is not valid JSON: ${parseErr?.message || parseErr}`);
+      }
+
+      const res = await cleanUniversalApi.importWorkflow(projectId, bundle);
+      const wf = res?.workflow;
+      const warnings: string[] = res?.warnings || [];
+
+      // Pull the updated list and switch to the newly-created workflow so
+      // the canvas renders the import immediately.
+      await loadWorkflowsFromDatabase();
+      if (wf?.workflow_id) {
+        const matched = allWorkflows.find((w) => w.workflow_id === wf.workflow_id);
+        if (matched) selectedWorkflow = matched;
+      }
+
+      toasts.success(
+        `Imported as '${wf?.name}'`
+        + (warnings.length ? ` (${warnings.length} warning${warnings.length === 1 ? '' : 's'})` : ''),
+      );
+      // Surface each warning as its own info toast so none get swallowed.
+      for (const w of warnings) {
+        toasts.info(w);
+      }
+    } catch (err: any) {
+      console.error('❌ WORKFLOW IMPORT:', err);
+      toasts.error(`Import failed: ${err?.message || err}`);
+    } finally {
+      importingWorkflow = false;
     }
   }
 
@@ -1096,7 +1170,45 @@
             New Workflow
           {/if}
         </button>
-        
+
+        <!-- Download Workflow (export graph_json as JSON bundle) -->
+        {#if selectedWorkflow}
+          <button
+            class="px-3 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 hover:border-oxford-blue transition-all text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+            on:click={doDownloadWorkflow}
+            disabled={exportingWorkflow}
+            title="Download the selected workflow as a JSON bundle"
+          >
+            {#if exportingWorkflow}
+              <i class="fas fa-spinner fa-spin mr-2"></i>Downloading…
+            {:else}
+              <i class="fas fa-download mr-2"></i>Download
+            {/if}
+          </button>
+        {/if}
+
+        <!-- Upload Workflow (imports a JSON bundle as a new workflow) -->
+        <button
+          class="px-3 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 hover:border-oxford-blue transition-all text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+          on:click={triggerImportFilePicker}
+          disabled={importingWorkflow}
+          title="Import a workflow from a JSON bundle — creates a new workflow in this project"
+        >
+          {#if importingWorkflow}
+            <i class="fas fa-spinner fa-spin mr-2"></i>Importing…
+          {:else}
+            <i class="fas fa-upload mr-2"></i>Upload
+          {/if}
+        </button>
+        <!-- Hidden file input driven by the Upload button above -->
+        <input
+          type="file"
+          accept=".json,application/json"
+          bind:this={importFileInput}
+          on:change={onImportFileSelected}
+          class="hidden"
+        />
+
         <!-- Execute Button -->
         {#if selectedWorkflow}
           <button

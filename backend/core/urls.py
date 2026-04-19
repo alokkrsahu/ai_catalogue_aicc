@@ -121,6 +121,15 @@ urlpatterns = [
         'post': 'upload_file_attachment'
     }), name='project-workflow-upload-file-attachment'),
 
+    # Export a workflow as a JSON bundle (download).
+    path('api/projects/<uuid:project_id>/workflows/<uuid:workflow_id>/export/', AgentWorkflowViewSet.as_view({
+        'get': 'export'
+    }), name='project-workflow-export'),
+    # Import a JSON bundle as a new workflow in this project.
+    path('api/projects/<uuid:project_id>/workflows/import/', AgentWorkflowViewSet.as_view({
+        'post': 'import_bundle'
+    }), name='project-workflow-import'),
+
     # Document summary endpoint (explicit registration — router version not matched in live server)
     path('api/projects/<uuid:project_id>/documents/<uuid:document_id>/summary/', UniversalProjectViewSet.as_view({
         'get': 'document_summary'
