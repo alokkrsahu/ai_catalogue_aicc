@@ -5,6 +5,7 @@ Uses LLM tool-calling to create nodes, configure agents, and connect them.
 import uuid
 import json
 import logging
+import time
 from typing import Dict, Any, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -3028,6 +3029,236 @@ async def generate_workflow(
         # integrity sweep (Fix 7) catches any post-verifier damage.
         logger.info("🔧 WORKFLOW GEN: running post-verifier auto-repair sweep")
         _auto_repair_connections(builder)
+
+    # ── Self-critique phase (4th phase, always-on) ─────────────────────
+    # The invariant verifier above checks structural rules (router wiring,
+    # terminal reachability, regression guard). The self-critique phase
+    # operates one level up: it looks for SEMANTIC / CONFIGURATION issues
+    # that a rigid invariant check cannot see — redundant agents, system
+    # messages that don't describe the agent's role, wrong provider for
+    # the task, classifier categories that don't meaningfully separate
+    # cases, edge ordering that puts steps out of logical sequence, etc.
+    #
+    # Replaces the common manual follow-up prompt: "find the issues in
+    # the current workflow and fix the errors". Runs silently; the
+    # final diff combines initial-build + verifier + self-critique edits.
+    if builder.nodes and len(builder.nodes) >= 3:
+        try:
+            sc_tool_calls_before = len(builder.tool_calls_log)
+            sc_t_start = time.time()
+
+            crit_graph = builder.build_graph_json()
+            c_nodes = crit_graph["nodes"]
+            c_edges = crit_graph["edges"]
+            node_id_to_name_c = {n["id"]: n.get("data", {}).get("name", "?") for n in c_nodes}
+
+            crit_desc_lines = ["Current workflow after invariant verification:"]
+            _c_start = next((n for n in c_nodes if n.get("type") == "StartNode"), None)
+            if _c_start:
+                _csp = (_c_start.get("data", {}).get("prompt") or "").strip()
+                if _csp:
+                    crit_desc_lines.append(f'StartNode prompt: "{_csp[:500]}{"…" if len(_csp) > 500 else ""}"')
+            crit_desc_lines.append(f"Nodes ({len(c_nodes)}):")
+            for n in c_nodes:
+                d = n.get("data", {})
+                nid = n["id"]
+                inc = len([e for e in c_edges if e["target"] == nid])
+                out = len([e for e in c_edges if e["source"] == nid])
+                line = f'  {n["type"]}: "{d.get("name", "?")}" ({out} out, {inc} in)'
+                if d.get("llm_provider") or d.get("llm_model"):
+                    line += f" [{d.get('llm_provider', 'openai')}/{d.get('llm_model', '?')}]"
+                temp = d.get("temperature")
+                if temp is not None and temp != 0.7:
+                    line += f" [temp={temp}]"
+                if d.get("doc_tool_calling_documents"):
+                    line += f" [docs: {len(d['doc_tool_calling_documents'])}]"
+                if d.get("doc_aware"):
+                    line += " [doc_aware]"
+                if d.get("web_search_enabled"):
+                    line += " [web_search]"
+                crit_desc_lines.append(line)
+                _csm = (d.get("system_message") or "").strip()
+                if _csm and n["type"] not in ("StartNode", "EndNode"):
+                    _snip = _csm[:500] + ("…" if len(_csm) > 500 else "")
+                    crit_desc_lines.append(f"      system_message: {_snip}")
+                if n["type"] == "ClassifierAgent":
+                    cats = d.get("categories") or []
+                    if cats:
+                        crit_desc_lines.append("      categories:")
+                        for c in cats:
+                            _cn = c.get("name", "?")
+                            _cd = (c.get("description") or "").strip()
+                            crit_desc_lines.append(f"        • {_cn}" + (f" — {_cd[:200]}" if _cd else ""))
+            crit_desc_lines.append(f"Connections ({len(c_edges)}):")
+            c_classifier_cat_names = {
+                n["id"]: {
+                    c.get("id"): c.get("name", "?")
+                    for c in (n.get("data", {}).get("categories") or [])
+                }
+                for n in c_nodes if n.get("type") == "ClassifierAgent"
+            }
+            for e in c_edges:
+                src = node_id_to_name_c.get(e["source"], "?")
+                tgt = node_id_to_name_c.get(e["target"], "?")
+                handle_suffix = ""
+                if e.get("source_handle") and e["source"] in c_classifier_cat_names:
+                    cat_name = c_classifier_cat_names[e["source"]].get(e["source_handle"])
+                    if cat_name:
+                        handle_suffix = f" [category: {cat_name}]"
+                crit_desc_lines.append(f"  {src} → {tgt} ({e.get('type', 'sequential')}){handle_suffix}")
+            crit_desc = "\n".join(crit_desc_lines)
+
+            critique_prompt = (
+                "You are performing a final QUALITY REVIEW of a workflow that has "
+                "just been built and has already passed structural/invariant "
+                "verification (router wiring, terminal reachability, regression "
+                "guard). Your job is different from the invariant verifier — find "
+                "SEMANTIC and CONFIGURATION issues a rigid check cannot see.\n\n"
+                f"The user's ORIGINAL REQUEST was:\n  \"{user_message[:800]}\"\n\n"
+                f"{crit_desc}\n\n"
+                "Review the workflow critically and look for issues such as:\n"
+                "  • An agent whose system_message is vague, generic, or does not "
+                "describe the agent's actual role for THIS user request.\n"
+                "  • Two or more agents with overlapping purpose (redundant hops).\n"
+                "  • A missing agent needed to accomplish the stated task (e.g. a "
+                "'write a report' task with no writer; a 'research topic X' task "
+                "with no source-gathering or web_search agent).\n"
+                "  • An agent with a provider/model that is a poor fit for its job "
+                "(heavy reasoning on a tiny model; creative generation at temperature=0).\n"
+                "  • Document or web_search assignments that don't match what the "
+                "agent is being asked to do.\n"
+                "  • ClassifierAgent categories that overlap or don't meaningfully "
+                "separate the routing cases described in the user's request.\n"
+                "  • SplitterAgent downstreams whose system_messages don't describe "
+                "distinct specialties — the splitter needs to route BY role.\n"
+                "  • Edge ordering that puts steps out of logical sequence "
+                "(e.g. editor before writer; synthesis before analysis).\n"
+                "  • System messages that fail to reference the documents, tools, "
+                "or web_search the agent actually has configured.\n\n"
+                "If the workflow is already high-quality, respond with "
+                "'Self-critique passed — no changes needed.' and DO NOT call any tools.\n\n"
+                "If you find issues, FIX them using the available tools. Prefer "
+                "surgical edits (update_node_property, rewire_edge, connect_nodes, "
+                "delete_edge, add_category) over destructive ones. Do NOT remove "
+                "agents the user explicitly asked for. Do NOT rebuild from scratch."
+            )
+
+            critique_messages = [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": critique_prompt},
+            ]
+
+            logger.info(
+                f"🎯 WORKFLOW GEN: Self-critique phase on {len(c_nodes)} nodes, "
+                f"{len(c_edges)} edges"
+            )
+
+            # 4 iterations is usually enough — LLM either has a short list of
+            # fixes or it passes immediately. Early-exit on no tool calls.
+            sc_iterations = 0
+            sc_final_text = ""
+            for sc_iter in range(4):
+                sc_iterations = sc_iter + 1
+                sc_response = await llm_provider.generate_response(
+                    messages=critique_messages, tools=WORKFLOW_TOOLS,
+                )
+                if sc_response.error:
+                    logger.warning(
+                        f"⚠️ WORKFLOW GEN: Self-critique provider error: {sc_response.error}"
+                    )
+                    break
+                if sc_response.text:
+                    sc_final_text = sc_response.text
+                    logger.info(
+                        f"🎯 WORKFLOW GEN: Self-critique iter {sc_iter + 1}: {sc_response.text[:200]}"
+                    )
+                # No tool calls → the critic is satisfied (or can't find anything).
+                if not sc_response.tool_calls:
+                    break
+
+                formatted_sc_calls = []
+                for tc in sc_response.tool_calls:
+                    fn = tc.get("function", {})
+                    raw_args = fn.get("arguments", tc.get("arguments", "{}"))
+                    args_str = json.dumps(raw_args) if isinstance(raw_args, dict) else str(raw_args)
+                    formatted_sc_calls.append({
+                        "id": tc.get("id", f"call_{uuid.uuid4().hex[:8]}"),
+                        "type": "function",
+                        "function": {
+                            "name": fn.get("name", tc.get("name", "")),
+                            "arguments": args_str,
+                        },
+                    })
+                critique_messages.append({
+                    "role": "assistant",
+                    "content": sc_response.text or "",
+                    "tool_calls": formatted_sc_calls,
+                })
+                for tc in formatted_sc_calls:
+                    fn_args = (
+                        json.loads(tc["function"]["arguments"])
+                        if isinstance(tc["function"]["arguments"], str)
+                        else tc["function"]["arguments"]
+                    )
+                    result = builder.execute_tool_call(tc["function"]["name"], fn_args)
+                    logger.info(
+                        f"🔧 WORKFLOW GEN (self-critique): {tc['function']['name']} → {result}"
+                    )
+                    critique_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": result,
+                    })
+
+            sc_tool_calls_after = len(builder.tool_calls_log)
+            sc_tool_calls_made = sc_tool_calls_after - sc_tool_calls_before
+            sc_duration_ms = round((time.time() - sc_t_start) * 1000, 1)
+
+            # If self-critique made ANY changes, run the auto-repair sweep
+            # once more to catch any structural damage (e.g. a rewire_edge
+            # that left an orphan, or a delete_edge that broke a terminal
+            # path). When self-critique was a no-op, skip the work.
+            if sc_tool_calls_made > 0:
+                logger.info(
+                    f"🔧 WORKFLOW GEN: self-critique made {sc_tool_calls_made} tool "
+                    "call(s) — running post-critique auto-repair sweep"
+                )
+                _auto_repair_connections(builder)
+                explanation += f"\n\n**Self-critique:** {sc_final_text or f'applied {sc_tool_calls_made} fix(es)'}"
+            else:
+                logger.info(
+                    f"🎯 WORKFLOW GEN: self-critique passed without changes "
+                    f"after {sc_iterations} iteration(s)"
+                )
+
+            # Emit an observability metric so we can see how often the critic
+            # adds value, and how expensive it is per build.
+            try:
+                from .metrics_logger import log_experiment_metric
+                await log_experiment_metric(
+                    project_id=str(project.project_id),
+                    experiment_type='workflow_self_critique',
+                    metric_data={
+                        'experiment': 'workflow_self_critique',
+                        'iterations': sc_iterations,
+                        'tool_calls_made': sc_tool_calls_made,
+                        'duration_ms': sc_duration_ms,
+                        'final_status': (
+                            'passed' if sc_tool_calls_made == 0 else 'fixes_applied'
+                        ),
+                        'nodes_before': len(c_nodes),
+                        'edges_before': len(c_edges),
+                    },
+                    configuration={'phase': 'self_critique', 'max_iterations': 4},
+                    log_tag='EXP_METRIC_WORKFLOW_SELF_CRITIQUE',
+                )
+            except Exception as metric_err:
+                logger.warning(
+                    f"⚠️ WORKFLOW GEN: self-critique metric logging failed: {metric_err}"
+                )
+
+        except Exception as sc_err:
+            logger.warning(f"⚠️ WORKFLOW GEN: Self-critique phase failed: {sc_err}")
 
     # Build and validate
     graph_json = builder.build_graph_json()
