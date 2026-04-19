@@ -1286,12 +1286,15 @@ export class CleanUniversalApiService {
   // ============================================================================
 
   /**
-   * Get experiment metrics for System Performance Analysis
+   * Get experiment metrics for System Performance Analysis.
+   * Optional execution_id scopes the response to a single workflow run
+   * (used by the Workflow Performance sub-tab).
    */
-  async getExperimentMetrics(projectId: string): Promise<any> {
-    console.log(`📊 PERFORMANCE: Getting experiment metrics for project ${projectId}`);
-    
-    const response = await this.handleAuthenticatedRequest(`${API_BASE}/projects/${projectId}/experiment-metrics/`, {
+  async getExperimentMetrics(projectId: string, opts: { executionId?: string | null } = {}): Promise<any> {
+    const qs = opts.executionId ? `?execution_id=${encodeURIComponent(opts.executionId)}` : '';
+    console.log(`📊 PERFORMANCE: Getting experiment metrics for project ${projectId}${opts.executionId ? ` (execution=${opts.executionId})` : ''}`);
+
+    const response = await this.handleAuthenticatedRequest(`${API_BASE}/projects/${projectId}/experiment-metrics/${qs}`, {
       method: 'GET',
       headers: this.getAuthHeaders(),
     });
@@ -1307,7 +1310,7 @@ export class CleanUniversalApiService {
   }
 
   /**
-   * Get agent timing analytics for the Analytics page
+   * Get agent timing analytics for the Analytics page / Project Analytics sub-tab.
    */
   async getAnalytics(projectId: string): Promise<any> {
     const response = await this.handleAuthenticatedRequest(`${API_BASE}/projects/${projectId}/analytics/`, {
@@ -1320,6 +1323,22 @@ export class CleanUniversalApiService {
       throw new Error(errorData.error || `Get analytics failed: ${response.status}`);
     }
 
+    return response.json();
+  }
+
+  /**
+   * List recent workflow executions for the per-workflow dropdown in
+   * the Workflow Performance sub-tab.
+   */
+  async getRecentExecutions(projectId: string, limit: number = 50): Promise<any> {
+    const response = await this.handleAuthenticatedRequest(`${API_BASE}/projects/${projectId}/recent-executions/?limit=${limit}`, {
+      method: 'GET',
+      headers: this.getAuthHeaders(),
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Get recent executions failed: ${response.status}`);
+    }
     return response.json();
   }
 }
