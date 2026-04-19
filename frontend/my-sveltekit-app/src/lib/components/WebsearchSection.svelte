@@ -61,6 +61,11 @@
   // Mirror of backend's summary-generation Redis flag — true while a
   // detached thread is still producing summaries for this project.
   let generationInProgress = false;
+  // If the backend returned a non-retryable error (missing API key,
+  // provider config), stop auto-triggering from the textarea debounce
+  // so we don't spam the user on every keystroke. The manual button
+  // still works — it clears this flag on success.
+  let autoSummarySuppressed = false;
 
   // ---- Clear-cache state ------------------------------------------------
   let clearingWebCache = false;
@@ -90,7 +95,13 @@
 
   function debouncedSyncWebIndex(urls: string[]) {
     if (webIndexDebounceTimer) clearTimeout(webIndexDebounceTimer);
-    webIndexDebounceTimer = setTimeout(() => doSyncWebIndex(urls), 2000);
+    webIndexDebounceTimer = setTimeout(() => {
+      // Run the two pieces in parallel — they target different systems
+      // (Milvus for the RAG index, LLM for the per-URL summaries) and
+      // don't depend on each other.
+      doSyncWebIndex(urls);
+      maybeAutoGenerateSummaries();
+    }, 2000);
   }
 
   async function doSyncWebIndex(urls: string[]) {
@@ -194,6 +205,36 @@
     tick();
   }
 
+  /**
+   * Auto-trigger summary generation for URLs that don't have summaries yet.
+   * Called after the debounced URL-textarea change and on initial URL-mode
+   * entry so the user doesn't have to remember to click "Generate missing".
+   *
+   * Safe to call on every input:
+   *  - No-op if URL mode isn't active, no URLs are configured, or a
+   *    generation is already running.
+   *  - Checks the client-side summaries map first and only POSTs when at
+   *    least one URL is genuinely missing a summary.
+   *  - Re-uses generateMissingUrlSummaries so 409 handling, polling, and
+   *    status text all stay consistent with the manual button path.
+   */
+  async function maybeAutoGenerateSummaries() {
+    if (!projectId) return;
+    if (!nodeConfig.web_search_enabled) return;
+    if (nodeConfig.web_search_mode !== 'urls') return;
+    if (generatingUrlSummaries) return;
+    if (autoSummarySuppressed) return;  // non-retryable error — wait for manual button
+    const urls = (nodeConfig.web_search_urls || []).filter(
+      (u: string) => u.startsWith('http://') || u.startsWith('https://'),
+    );
+    if (urls.length === 0) return;
+    // Need a fresh snapshot — a summary may have landed since last poll.
+    if (!urlSummariesLoaded) await loadUrlSummaries();
+    const missing = urls.filter((u: string) => !urlSummariesByUrl[u]);
+    if (missing.length === 0) return;
+    await generateMissingUrlSummaries();
+  }
+
   async function generateMissingUrlSummaries() {
     if (!projectId || generatingUrlSummaries) return;
     const urls = (nodeConfig.web_search_urls || []).filter(
@@ -224,10 +265,13 @@
       if (d.status === 'noop') {
         urlSummaryStatus = 'All URLs already have summaries';
         generatingUrlSummaries = false;
+        autoSummarySuppressed = false;  // clear any previous suppression
         await loadUrlSummaries();
         setTimeout(() => { urlSummaryStatus = null; }, 4000);
         return;
       }
+      // Successful 202 → clear suppression so auto-gen can try again later.
+      autoSummarySuppressed = false;
       urlSummaryStatus = `Queued ${d.urls_queued ?? urls.length} URL(s) — generating in background…`;
       await pollSummaryProgress();
     } catch (err: any) {
@@ -238,6 +282,10 @@
         urlSummaryStatus = 'Already generating — joining in-progress run…';
         await pollSummaryProgress();
       } else {
+        // 400 usually means "no API key configured" — non-retryable from
+        // the client's side. Suppress auto-gen to stop nagging on every
+        // keystroke; the manual button still works for a deliberate retry.
+        if (statusCode === 400) autoSummarySuppressed = true;
         urlSummaryStatus = `Error: ${msg}`;
         generatingUrlSummaries = false;
         setTimeout(() => { urlSummaryStatus = null; }, 6000);
@@ -315,6 +363,11 @@
         generatingUrlSummaries = true;
         urlSummaryStatus = 'Generation already in progress — tracking…';
         pollSummaryProgress();
+      } else {
+        // Fresh entry: if there are URLs configured without summaries
+        // (e.g. a saved agent opened for the first time), auto-kick the
+        // same background path so the user doesn't have to click.
+        maybeAutoGenerateSummaries();
       }
     });
   }
@@ -471,14 +524,14 @@
               Per-URL Summaries
               <span class="text-xs text-gray-500 ml-1">(LLM-generated; enables selective URL tools)</span>
               <span class="block text-[11px] text-gray-500 font-normal mt-0.5">
-                Runs in the background — safe to close this panel; summaries will keep generating and show up when you return.
+                Auto-generates in the background whenever you add URLs — safe to close this panel. The button is only needed for a manual retry (e.g. after fixing an API-key issue).
               </span>
             </label>
             <button
               type="button"
               class="px-2 py-1 text-xs rounded-md border border-green-600 text-green-700 hover:bg-green-50 disabled:opacity-50 disabled:cursor-not-allowed"
               disabled={generatingUrlSummaries || !(nodeConfig.web_search_urls || []).length}
-              on:click={() => generateMissingUrlSummaries()}
+              on:click={() => { autoSummarySuppressed = false; generateMissingUrlSummaries(); }}
             >
               {#if generatingUrlSummaries}
                 <i class="fas fa-spinner fa-spin mr-1"></i>Generating…
