@@ -1367,6 +1367,16 @@ class WorkflowBuilder:
                     f"Available: {cat_names}"
                 )
             source_handle = match.get("id")
+            # Refuse to create an edge with an empty source_handle — the
+            # router-wiring check keys categories off their UUID, so a
+            # handle-less classifier edge is invisible to it and triggers
+            # false-positive "missing category" loops.
+            if not source_handle:
+                return (
+                    f"Error: classifier '{source_name}' category '{source_category}' is missing "
+                    f"its stable id — this is an internal data corruption. "
+                    f"Recreate the classifier or reset its categories before connecting."
+                )
 
         # Check duplicate — classifier edges must be unique per (source, target, category)
         # so include source_handle in the edge id when present.
@@ -1437,6 +1447,65 @@ class WorkflowBuilder:
             properties["llm_provider"] = resolved_provider
             properties["llm_model"] = resolved_model
 
+        # ClassifierAgent categories: the LLM passes categories as
+        # `[{"name": ..., "description": ...}]` without preserving the
+        # existing UUID, which silently orphans every source_handle on
+        # outgoing edges. Special-case this: match incoming entries to
+        # existing categories by name (case-insensitive) and keep the
+        # original id. Assign a fresh UUID only for genuinely new
+        # categories; cascade-delete edges whose category was removed.
+        category_cascade_note = ""
+        if node.get("type") == "ClassifierAgent" and "categories" in properties:
+            raw_new = properties.get("categories") or []
+            if not isinstance(raw_new, list):
+                return "Error: categories must be a list"
+            old_cats = node.get("data", {}).get("categories", []) or []
+            old_by_name = {
+                (c.get("name") or "").strip().lower(): c
+                for c in old_cats if c.get("name")
+            }
+            rebuilt: List[Dict[str, Any]] = []
+            seen_names: set = set()
+            for i, c in enumerate(raw_new):
+                if not isinstance(c, dict):
+                    continue
+                cname = (c.get("name") or f"Category {i + 1}").strip()
+                base = cname
+                suffix = 2
+                while cname.lower() in seen_names:
+                    cname = f"{base} {suffix}"
+                    suffix += 1
+                seen_names.add(cname.lower())
+                existing = old_by_name.get(cname.lower())
+                # Preserve: existing id if we matched, incoming id if one
+                # was passed AND looks valid, else mint a fresh UUID.
+                cid = (existing or {}).get("id") or c.get("id") or str(uuid.uuid4())
+                rebuilt.append({
+                    "id": cid,
+                    "name": cname,
+                    "description": (c.get("description") or "").strip(),
+                })
+            if len(rebuilt) < 2:
+                return (
+                    f"Error: ClassifierAgent '{node_name}' needs at least 2 categories "
+                    f"(got {len(rebuilt)} after normalization)"
+                )
+            if len(rebuilt) > 10:
+                rebuilt = rebuilt[:10]
+            # Cascade-delete edges whose source_handle references a removed category.
+            kept_ids = {c["id"] for c in rebuilt}
+            orphan_edges = [
+                e for e in self.edges
+                if e.get("source") == node_id
+                and e.get("source_handle")
+                and e.get("source_handle") not in kept_ids
+            ]
+            for e in orphan_edges:
+                self.edges.remove(e)
+            if orphan_edges:
+                category_cascade_note = f" (cascade-deleted {len(orphan_edges)} edge(s) for removed categories)"
+            properties["categories"] = rebuilt
+
         # Merge into node data
         updated_keys = []
         for key, value in properties.items():
@@ -1449,7 +1518,7 @@ class WorkflowBuilder:
             del self.node_name_map[node_name]
             self.node_name_map[new_name] = node_id
 
-        return f"Updated '{node_name}': {', '.join(updated_keys)}"
+        return f"Updated '{node_name}': {', '.join(updated_keys)}{category_cascade_note}"
 
     def _delete_node(self, args: Dict) -> str:
         node_name = args.get("node_name", "")
