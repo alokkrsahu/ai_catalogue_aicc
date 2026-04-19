@@ -64,10 +64,12 @@ python manage.py migrate
 - **users/** — Custom User model (`AUTH_USER_MODEL = 'users.User'`)
 - **api/** — Core REST views, serializers, `UniversalProjectViewSet` (the unified project CRUD interface at `/api/projects/`)
 - **agent_orchestration/** — The main orchestration engine:
-  - `workflow_executor.py` — Executes workflow graphs node-by-node
+  - `workflow_executor.py` / `parallel_executor.py` — Executes workflow graphs node-by-node (sequential + parallel branches)
+  - `classifier_executor.py`, `splitter_executor.py`, `delegate_tool_executor.py` — Specialized node executors (classifier routing, parallel splitter, intelligent delegation)
   - `chat_manager.py` — LLM interaction and message handling
   - `consumers.py` — WebSocket consumers for streaming
   - `deployment_executor.py` — Production deployment execution with session persistence
+  - `metrics_logger.py` — Per-run analytics (tokens, latency, node stats) surfaced via analytics endpoints
   - `docaware/` — DocAware RAG: `service.py` (orchestrator), `search_methods.py` (semantic/hybrid/contextual search against Milvus)
   - `websearch_handler.py` / `websearch/cache_service.py` — External web search with Redis caching
   - `llm_urls.py`, `workflow_urls.py`, `deployment_urls.py` — App-level URL routing
@@ -119,7 +121,7 @@ postgres, redis, etcd, minio, milvus, chromadb, backend, frontend, nginx — all
 - **Embedding model**: SentenceTransformers `all-MiniLM-L6-v2` (384-dim vectors). Configured in `settings.py`.
 - **WebSocket rooms**: `AgentOrchestrationConsumer` uses project-scoped channel groups (`agent_orchestration_{project_id}`). Key message types: `workflow_connected` (handshake), `ping`/`pong` (keep-alive), `human_input_response` (human-in-the-loop), `execution_control` (pause/cancel).
 - **Dynamic template URLs**: The `templates/` app registers project-type-specific URL patterns at runtime via `include_template_urls()`. If a template's URLs fail to load, `core/urls.py` has a hardcoded JSON fallback for AICC-IntelliDoc.
-- **Tests**: No formal test framework configured. Some Django management commands exist for testing specific features (e.g., `test_bulk_upload`, `test_phase1_backend`, `test_milvus_algorithms`).
+- **Tests**: Pytest-style Django `TestCase` suites live under `backend/agent_orchestration/tests/` (metrics logger, analytics endpoints, workflow builder categories) and `backend/agent_orchestration/websearch/tests/` (cache, fetcher, url validation, web-RAG chunking). Run with `cd backend && python manage.py test agent_orchestration` (or a specific dotted path for one test). Additional Django management commands exist for ad-hoc feature testing (e.g., `test_bulk_upload`, `test_phase1_backend`, `test_milvus_algorithms`).
 
 ## Environment Variables
 
