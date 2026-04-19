@@ -350,7 +350,7 @@ WORKFLOW_TOOLS = [
         "type": "function",
         "function": {
             "name": "connect_nodes",
-            "description": "Create a connection between two nodes. Connections define the execution flow. DelegateAgent ↔ GroupChatManager connections are auto-typed as 'delegate'. When source is a ClassifierAgent, source_category IS REQUIRED. When source is a SplitterAgent, DO NOT pass source_category — splitter edges are plain sequential connections (allocation is decided at runtime by the splitter LLM).",
+            "description": "Create a connection between two nodes. Connections define the execution flow. DelegateAgent ↔ GroupChatManager connections are auto-typed as 'delegate'. When source is a ClassifierAgent, source_category IS REQUIRED. When source is a SplitterAgent, DO NOT pass source_category — splitter edges are plain sequential connections (allocation is decided at runtime by the splitter LLM). Use edge_type='reflection' with max_iterations and reflection_prompt to create bounded revision/refinement loops (see REFLECTION LOOPS section of the system prompt).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -365,11 +365,21 @@ WORKFLOW_TOOLS = [
                     "edge_type": {
                         "type": "string",
                         "enum": ["sequential", "reflection"],
-                        "description": "Connection type (default: sequential)"
+                        "description": "Connection type (default: sequential). Use 'reflection' ONLY for bounded iterative-refinement loops (review-and-revise, self-critique). Reflection edges may form self-loops or back-edges; sequential edges MUST form a DAG."
                     },
                     "source_category": {
                         "type": "string",
                         "description": "REQUIRED when source is a ClassifierAgent — the category NAME this edge represents (matching one of the classifier's category names). The edge fires only when the classifier picks this category."
+                    },
+                    "max_iterations": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 10,
+                        "description": "Only used when edge_type='reflection'. Maximum number of times the reflection loop runs (default 2). Match the user's request (e.g. 'up to 2 revisions' → max_iterations=2)."
+                    },
+                    "reflection_prompt": {
+                        "type": "string",
+                        "description": "Only used when edge_type='reflection'. Instructions for the agent receiving the reflection on what to improve or how to incorporate feedback (e.g. 'Revise the draft based on the reviewer's feedback, focusing on accuracy and clarity.')."
                     }
                 },
                 "required": ["source_name", "target_name"]
@@ -528,8 +538,9 @@ STRUCTURAL RULES
 • EndNode accepts exactly ONE incoming connection — EXCEPT when incoming edges all originate from different branches of a ClassifierAgent (because only one branch will reach EndNode at runtime; the others are pruned).
 • If multiple non-classifier agents produce output, funnel them through a single aggregator/synthesis agent before EndNode.
 • StartNode has only outgoing connections. Nothing connects into it.
-• Every agent must be reachable from StartNode and must have a path to EndNode.
-• No orphan nodes. No self-connections.
+• Every agent must be reachable from StartNode and must have a path to EndNode — EXCEPT reflection-only target agents (agents that receive ONLY a reflection edge and have no sequential incoming or outgoing edges). Reflection-only targets are helpers serving their source agent's internal iteration and are not required to reach EndNode.
+• No orphan nodes. No self-connections on SEQUENTIAL edges.
+• No cycles on SEQUENTIAL edges — the executor uses a topological sort that will break. Reflection edges (edge_type="reflection") are the ONLY legal way to create a back-edge or self-loop; they are bounded by max_iterations and excluded from the topological sort at runtime. See "REFLECTION LOOPS" section below.
 
 ═══════════════════════════════════════════════════════════
 AGENT TYPES — WHEN TO USE EACH
@@ -759,6 +770,146 @@ Example C — Classifier routing into a Splitter (combined routers)
       for it there — match the user's topology exactly.
 
 ═══════════════════════════════════════════════════════════
+REFLECTION LOOPS — WHEN THE USER ASKS FOR ITERATION
+═══════════════════════════════════════════════════════════
+
+Reflection edges are the native way to express iterative refinement, revision
+loops, feedback cycles, and self-critique. They are DIFFERENT from sequential
+edges and have STRICT direction semantics.
+
+Direction rule — READ THIS CAREFULLY:
+  A reflection edge always points FROM the content-producing agent (the one
+  whose output is being refined) TO the helper/critic (the one providing
+  feedback). Runtime semantics per `reflection_handler`:
+      Source Agent → Target Agent (reflection)
+                  → Source Agent processes the feedback
+                  → continue forward flow from Source
+  The TARGET of a reflection edge is a side-channel helper. It receives the
+  source's content, emits feedback, and then execution RETURNS to the source.
+  The target is NOT part of the main sequential flow.
+
+Reflection-only target agents:
+  A reflection helper that only gives feedback (never emits downstream
+  output) has NO outgoing edges and NO sequential incoming edges — ONLY a
+  reflection incoming edge from its source. This is legal and correct. The
+  reachability rule ("every agent must have a path to End") does NOT apply
+  to reflection-only targets; they serve their source agent.
+
+How to wire a bounded revision loop (writer refines against a reviewer):
+  1. Build the MAIN forward chain with SEQUENTIAL edges — and SKIP the
+     reviewer/critic. The reviewer is NOT in the main flow:
+       Start → Writer → (next agent after revision, e.g. Fact Checker) → ... → End
+  2. Add ONE reflection edge FROM the Writer TO the Reviewer, with
+     `max_iterations` and a `reflection_prompt`:
+       connect_nodes(source_name="Writer", target_name="Reviewer",
+                     edge_type="reflection", max_iterations=2,
+                     reflection_prompt="Review the draft and suggest specific "
+                                       "improvements on X, Y, and Z so the "
+                                       "writer can revise.")
+  3. The Reviewer has NO outgoing edges. It's a pure reflection sink.
+  4. The Writer has TWO outgoing edges: the reflection edge to the Reviewer
+     (internal iteration) AND the sequential edge forward to the next agent
+     (main flow continues after the Writer's revision budget is exhausted).
+
+Triggers — phrases that mean "use a reflection edge":
+  • "revise until approved / until the reviewer accepts"
+  • "iterate N times", "up to N revisions", "up to N cycles"
+  • "review and revise", "feedback loop", "refinement loop"
+  • "if the critic has issues, send it back to X"
+  • "self-critique", "self-review", "polish iteratively"
+
+Self-reflection (an agent critiquing its own output) — source and target are
+the same agent, no separate helper needed:
+  connect_nodes(source_name="Writer", target_name="Writer",
+                edge_type="reflection", max_iterations=3,
+                reflection_prompt="Review your draft and improve clarity.")
+
+ANTI-PATTERNS — DO NOT DO ANY OF THESE:
+  ❌ Wiring the reflection edge BACKWARDS (Reviewer → Writer). That reverses
+     the semantics: the runtime would send the Reviewer's (empty) output to
+     the Writer for feedback, which deadlocks. The source of a reflection
+     edge must be the agent whose output needs refining.
+  ❌ Putting the Reviewer INSIDE the main sequential chain
+     (Writer → Reviewer → Fact Checker ...). That makes the Reviewer a
+     required hop in forward flow, not a reflection helper. The Reviewer
+     should be OFF the main sequential path, receiving only a reflection
+     edge from the Writer.
+  ❌ Faking a revision loop with a ClassifierAgent "Approved / Needs
+     Revision" branch whose "Needs Revision" edge points back to an earlier
+     agent. That creates a cycle in SEQUENTIAL edges, which the topological-
+     sort executor cannot handle, and has NO iteration cap.
+  ❌ Duplicating the writer/reviewer ("Writer", "Writer 2", "Writer 3") to
+     simulate iteration. Use ONE pair with a reflection edge and
+     `max_iterations` instead.
+  ❌ Placing a reflection edge on a DelegateAgent (Delegate → external agent
+     or external agent → Delegate). DelegateAgents are internal to a
+     GroupChatManager team and can ONLY connect to their manager via
+     `delegate` edges. If the user asks to "re-run the risk assessment with
+     feedback" and Risk Assessor is a delegate, put the reflection on the
+     MANAGER instead: `connect_nodes(source_name=<Manager>, target_name=
+     <external reviewer>, edge_type="reflection", max_iterations=N, ...)`.
+     The manager re-coordinates all delegates each iteration, so the
+     re-assessment happens naturally. Alternatively, if the agent doesn't
+     need to be part of a team, promote it to a standalone AssistantAgent
+     and wire the reflection edge directly.
+
+Example D — Iterative refinement with a bounded revision loop
+  User request: "Draft a blog post, have a reviewer evaluate it, and let the
+                 writer revise up to 2 times based on the feedback. Then a
+                 fact checker verifies with web search and a final editor
+                 polishes the output."
+  Tool calls (in order):
+    1. add_start_node(prompt="Blog topic and requirements")
+    2. add_assistant_agent(name="Draft Writer",
+         system_message="You write a compelling draft on the given topic. "
+                        "When you receive feedback on a reflection pass, "
+                        "revise the draft accordingly before emitting the "
+                        "next version.")
+    3. add_assistant_agent(name="Critical Reviewer",
+         system_message="You are invoked on a reflection edge from the "
+                        "Draft Writer. Evaluate the draft on accuracy, "
+                        "clarity, and engagement and return specific, "
+                        "actionable feedback. You do not emit to downstream "
+                        "agents — your feedback goes back to the Writer.")
+    4. add_assistant_agent(name="Fact Checker", web_search_enabled=true,
+         system_message="You verify every technical claim in the revised "
+                        "draft against web-search results and flag any that "
+                        "are unsupported or incorrect.")
+    5. add_assistant_agent(name="Final Editor",
+         system_message="You polish the fact-checked draft for publication: "
+                        "tighten prose, fix grammar, ensure flow.")
+    6. add_end_node()
+    7. connect_nodes(source_name="Start 1",      target_name="Draft Writer")         # sequential
+    8. connect_nodes(source_name="Draft Writer", target_name="Critical Reviewer",    # reflection
+                     edge_type="reflection", max_iterations=2,
+                     reflection_prompt="Review this draft for accuracy, "
+                                       "clarity, and engagement, then return "
+                                       "specific feedback so the Writer can "
+                                       "revise.")
+    9. connect_nodes(source_name="Draft Writer", target_name="Fact Checker")         # sequential — main flow continues
+   10. connect_nodes(source_name="Fact Checker", target_name="Final Editor")
+   11. connect_nodes(source_name="Final Editor", target_name="End 1")
+  Resulting in/out counts:
+    • Start 1:          out=1, in=0
+    • Draft Writer:     out=2 (reflection to Reviewer + sequential to Fact Checker), in=1 (from Start)
+    • Critical Reviewer: out=0, in=1 (reflection from Writer only — pure helper)
+    • Fact Checker:     out=1, in=1
+    • Final Editor:     out=1, in=1
+    • End 1:            out=0, in=1
+  Key points:
+    • NO ClassifierAgent. The revision loop is one reflection edge with
+      max_iterations=2 — the executor handles the budget, not a classifier.
+    • The Critical Reviewer has ZERO outgoing edges. It is a pure reflection
+      sink. Do NOT wire it forward to Fact Checker or EndNode.
+    • The MAIN sequential flow is Start → Writer → Fact Checker → Editor → End
+      — the Reviewer is off the main path.
+    • The reflection edge is Writer → Reviewer (source=content producer,
+      target=helper). Never the other way.
+    • web_search is on the Fact Checker (the claim-verifier), not elsewhere.
+    • max_iterations should match what the user asked for ("up to 2
+      revisions" → max_iterations=2).
+
+═══════════════════════════════════════════════════════════
 AGENT CAPABILITIES — TOGGLES AND DEPENDENCIES
 ═══════════════════════════════════════════════════════════
 
@@ -813,8 +964,38 @@ MODIFYING EXISTING WORKFLOWS — PRESERVATION IS THE DEFAULT
 ═══════════════════════════════════════════════════════════
 
 PRESERVATION IS THE DEFAULT. Do NOT delete existing agents unless the user
-EXPLICITLY uses words like: "remove", "delete", "rebuild", "replace",
-"start over", "wipe", "clear", "from scratch", "redo", "recreate".
+EXPLICITLY uses one of these HARD-DELETE keywords:
+  "remove", "delete", "rebuild", "replace", "start over", "wipe",
+  "clear", "from scratch", "redo", "recreate", "get rid of",
+  "drop", "take out"
+
+SOFT LANGUAGE IS NOT A DELETE AUTHORIZATION. These phrasings sound like
+preferences but MUST NOT trigger a delete:
+  "rethink …", "reconsider …", "let's try a different approach",
+  "maybe have someone else handle it", "maybe we should …",
+  "I'm not loving how X does Y", "X seems redundant",
+  "X might be worth trimming", "X could be better",
+  "let's improve the …", "this feels off", "not sure about X",
+  "what if X did Y instead", "consider replacing"
+
+When you see soft language targeting an existing agent, the CORRECT response is
+ALWAYS one of:
+  1. `update_node_property` on the named agent — change its system_message,
+     llm_model, temperature, or other properties IN PLACE. Its name, ID, and
+     incoming/outgoing edges stay the same. This is the default.
+  2. `add_assistant_agent` + `connect_nodes` — INSERT a new upstream or
+     sibling agent (e.g. a Content Strategist) that complements the existing
+     one, without removing anything. Use when the user's ask is "I want more
+     of X" or "someone should do Y first".
+  3. Ask a clarifying question in your text response instead of tool-calling
+     — e.g. "Sounds like you want to change the Writer's role. Do you want
+     me to (a) update its system_message to focus on X, or (b) add an
+     upstream strategist agent? I won't remove anyone without a direct ask."
+
+DO NOT delete-and-re-add an agent when the user's intent could be satisfied
+by an update. Renaming an agent via update_node_property (set `name` to the
+new name) preserves the ID and all edges. Deleting "Draft Writer" and adding
+"Refined Writer" breaks edges and requires re-wiring, which is strictly worse.
 
 When a current workflow is shown:
 • ADD or UPDATE in place. New requirements → add new agents and connect them.
@@ -828,11 +1009,43 @@ When a current workflow is shown:
 • If genuinely unsure between modification and rebuild, choose preservation.
   The user can always ask you to "start over" explicitly if they want a fresh build.
 
+Worked example — soft-language edit (from P5):
+  Existing canvas: Start → Writer → Reviewer → Fact Checker → Final Editor → End
+  User says: "I'm not loving how the Writer produces content — let's rethink
+             the approach and maybe have someone else handle it. Also the
+             Fact Checker seems redundant, might be worth trimming."
+  CORRECT response (tool calls, in order):
+    1. update_node_property(node_name="Writer",
+         properties={"system_message": "<improved writer system_message>",
+                     "llm_model": "<better model if needed>"})
+       # Keep the Writer node; refine its role in place.
+    2. add_assistant_agent(name="Content Strategist",
+         system_message="You plan an outline before the Writer drafts...")
+       connect_nodes(source_name="Start 1", target_name="Content Strategist")
+       connect_nodes(source_name="Content Strategist", target_name="Writer")
+       # "Someone else handle it" interpreted as ADD an upstream collaborator,
+       # NOT replace the Writer entirely.
+    3. update_node_property(node_name="Fact Checker",
+         properties={"system_message": "<narrowed scope, only flags major issues>"})
+       # "Seems redundant" is soft language → update scope, don't delete.
+    4. In your text response: "I updated the Writer's role and added a
+       Content Strategist upstream. I narrowed the Fact Checker's scope
+       per your note that it seems redundant — I kept it in the flow since
+       you didn't explicitly ask to remove it. Let me know if you'd like
+       it gone and I'll delete it."
+  WRONG response (what NOT to do):
+    ❌ delete_node("Writer") + add_assistant_agent("Refined Writer")
+    ❌ delete_node("Reviewer")  # User didn't even mention the Reviewer!
+    ❌ delete_node("Fact Checker")  # Soft language is not authorization.
+
 Tools for modifications:
-• update_node_property — change a specific agent's settings
-• delete_node — remove one agent (only when user explicitly asked)
+• update_node_property — change a specific agent's settings (including `name`,
+  which renames the agent while preserving ID and all edges — prefer this over
+  delete+re-add for "rename/replace" soft-language asks)
+• delete_node — remove one agent (only when user used a HARD-DELETE keyword
+  and the target is unambiguous)
 • clear_all_agents — wipe everything except Start/End (only for explicit
-  "start over" requests)
+  "start over" / "from scratch" / "rebuild" requests)
 • add_* + connect_nodes — add new agents to existing workflow
 
 Surgical edits — PREFER these on existing workflows over delete + recreate:
@@ -1071,6 +1284,50 @@ class WorkflowBuilder:
             return list(self.available_documents)
         return docs
 
+    def _expand_and_validate_documents(self, docs: Any) -> tuple:
+        """Expand wildcards, then drop any filenames that aren't in the
+        project's available_documents registry. Returns (valid, dropped).
+
+        When the registry is empty (no docs uploaded yet), we can't validate
+        against anything — pass the expanded list through unchanged so the
+        LLM's choice is preserved rather than silently zeroed-out.
+        """
+        expanded = self._expand_documents(docs)
+        if not expanded:
+            return [], []
+        if not self.available_documents:
+            # Nothing to validate against — can't tell if the files are real
+            # or phantom. Let the runtime surface the issue at execution time.
+            return expanded, []
+        available_set = set(self.available_documents)
+        valid = [d for d in expanded if isinstance(d, str) and d in available_set]
+        dropped = [d for d in expanded if isinstance(d, str) and d not in available_set]
+        return valid, dropped
+
+    def _format_dropped_docs_warning(self, dropped: List[str]) -> str:
+        """Format a warning message the tool-call LLM can act on after
+        phantom filenames are stripped from an agent's document list.
+        Shown in the tool result so the LLM can either retry with real
+        filenames or switch to doc_aware=true for RAG."""
+        if not dropped:
+            return ""
+        if self.available_documents:
+            preview = ", ".join(self.available_documents[:5])
+            more = (
+                f" (+{len(self.available_documents) - 5} more)"
+                if len(self.available_documents) > 5 else ""
+            )
+            avail_text = f"Available documents: {preview}{more}"
+        else:
+            avail_text = "The project has no documents uploaded"
+        return (
+            f" | WARNING: filename(s) not in the project were DROPPED: "
+            f"{dropped}. {avail_text}. Either re-specify with exact filenames "
+            f"from the available list, OR set doc_aware=true for semantic "
+            f"search over all project documents, OR drop the documents "
+            f"binding if this agent doesn't need them."
+        )
+
     # ── Node creators ──
 
     def _add_start_node(self, args: Dict) -> str:
@@ -1100,9 +1357,13 @@ class WorkflowBuilder:
     def _add_assistant_agent(self, args: Dict) -> str:
         node_id = str(uuid.uuid4())
         name = args["name"]
-        # Expand wildcard "*"/"all" to full document list before resolving toggles
+        # Expand wildcard "*"/"all" and validate against project registry.
+        # Phantom filenames are dropped with a WARNING in the tool result so
+        # the LLM can correct course (retry with real names or use doc_aware).
+        dropped_docs: List[str] = []
         if "documents" in args:
-            args["documents"] = self._expand_documents(args.get("documents"))
+            valid_docs, dropped_docs = self._expand_and_validate_documents(args.get("documents"))
+            args["documents"] = valid_docs
         toggles = self._resolve_toggle_dependencies(args)
         provider, model = self._resolve_provider_and_model(
             args.get("llm_provider", "openai"),
@@ -1127,7 +1388,7 @@ class WorkflowBuilder:
             }
         })
         self.node_name_map[name] = node_id
-        return f"Added AssistantAgent '{name}'"
+        return f"Added AssistantAgent '{name}'" + self._format_dropped_docs_warning(dropped_docs)
 
     def _add_user_proxy_agent(self, args: Dict) -> str:
         node_id = str(uuid.uuid4())
@@ -1180,9 +1441,11 @@ class WorkflowBuilder:
     def _add_delegate_agent(self, args: Dict) -> str:
         node_id = str(uuid.uuid4())
         name = args["name"]
-        # Expand wildcard "*"/"all" to full document list before resolving toggles
+        # Expand wildcard "*"/"all" and validate against project registry.
+        dropped_docs: List[str] = []
         if "documents" in args:
-            args["documents"] = self._expand_documents(args.get("documents"))
+            valid_docs, dropped_docs = self._expand_and_validate_documents(args.get("documents"))
+            args["documents"] = valid_docs
         toggles = self._resolve_toggle_dependencies(args)
         provider, model = self._resolve_provider_and_model(
             args.get("llm_provider", "openai"),
@@ -1220,7 +1483,11 @@ class WorkflowBuilder:
                 "label": "", "description": "", "condition": "",
                 "priority": 1, "retryCount": 0, "timeout": 30,
             })
-        return f"Added DelegateAgent '{name}'" + (f" (connected to {manager_name})" if manager_name else "")
+        return (
+            f"Added DelegateAgent '{name}'"
+            + (f" (connected to {manager_name})" if manager_name else "")
+            + self._format_dropped_docs_warning(dropped_docs)
+        )
 
     def _add_classifier_agent(self, args: Dict) -> str:
         node_id = str(uuid.uuid4())
@@ -1326,6 +1593,8 @@ class WorkflowBuilder:
         target_name = args["target_name"]
         edge_type = args.get("edge_type", "sequential")
         source_category = (args.get("source_category") or "").strip()
+        max_iterations = args.get("max_iterations")
+        reflection_prompt = (args.get("reflection_prompt") or "").strip()
 
         source_id = self.node_name_map.get(source_name)
         target_id = self.node_name_map.get(target_name)
@@ -1334,8 +1603,13 @@ class WorkflowBuilder:
             return f"Error: source node '{source_name}' not found"
         if not target_id:
             return f"Error: target node '{target_name}' not found"
-        if source_id == target_id:
-            return f"Error: cannot connect a node to itself ('{source_name}')"
+        # Self-connections are legal ONLY for reflection edges (self-critique).
+        if source_id == target_id and edge_type != "reflection":
+            return (
+                f"Error: cannot connect a node to itself ('{source_name}') with "
+                f"edge_type='{edge_type}'. Self-loops are only legal for "
+                f"edge_type='reflection' (self-critique)."
+            )
 
         # Auto-detect delegate type
         source_node = next((n for n in self.nodes if n["id"] == source_id), None)
@@ -1345,6 +1619,37 @@ class WorkflowBuilder:
         if (source_type == "GroupChatManager" and target_type == "DelegateAgent") or \
            (source_type == "DelegateAgent" and target_type == "GroupChatManager"):
             edge_type = "delegate"
+
+        # DelegateAgent isolation: delegates can ONLY connect to their
+        # GroupChatManager (and delegate edges are auto-typed above). Any
+        # edge where exactly one endpoint is a DelegateAgent and the other
+        # is NOT a GroupChatManager is an invariant violation — delegates
+        # are internal to their team and must not have external sequential
+        # or reflection edges. Return an error so the verifier/build LLM
+        # has to pick a valid pattern (reflect on the Manager instead, or
+        # promote the delegate to a standalone AssistantAgent).
+        if source_type == "DelegateAgent" and target_type != "GroupChatManager":
+            tgt_display = f"'{target_name}' ({target_type})" if target_type else f"'{target_name}'"
+            return (
+                f"Error: DelegateAgent '{source_name}' cannot connect to "
+                f"{tgt_display}. Delegates are internal to their GroupChatManager "
+                f"team and can ONLY have edges to/from their manager. If you "
+                f"need an iterative-refinement loop that involves this delegate's "
+                f"output, put the reflection edge on the MANAGER (source = "
+                f"GroupChatManager, target = external reviewer) instead. The "
+                f"manager will re-coordinate its delegates on each iteration. "
+                f"Alternatively, promote '{source_name}' to a standalone "
+                f"AssistantAgent if it doesn't belong to a team."
+            )
+        if target_type == "DelegateAgent" and source_type != "GroupChatManager":
+            src_display = f"'{source_name}' ({source_type})" if source_type else f"'{source_name}'"
+            return (
+                f"Error: DelegateAgent '{target_name}' cannot be the target of "
+                f"an edge from {src_display}. Delegates can ONLY receive edges "
+                f"from their GroupChatManager. Wire the edge to/from the "
+                f"manager instead, or promote '{target_name}' to a standalone "
+                f"AssistantAgent if it doesn't belong to a team."
+            )
 
         # Classifier edges carry a source_handle = the chosen category's UUID.
         # Each category gets its own outgoing edge; the executor prunes branches
@@ -1395,8 +1700,27 @@ class WorkflowBuilder:
         }
         if source_handle:
             edge_obj["source_handle"] = source_handle
+        # Reflection edges carry iteration budget + prompt. `reflection_handler`
+        # reads these via `connection.get("data", {}).get("max_iterations")`.
+        # Mirror them on the top level too for log/diff visibility.
+        if edge_type == "reflection":
+            try:
+                iters = int(max_iterations) if max_iterations is not None else 2
+            except (TypeError, ValueError):
+                iters = 2
+            iters = max(1, min(10, iters))
+            edge_obj["max_iterations"] = iters
+            edge_obj.setdefault("data", {})["max_iterations"] = iters
+            if reflection_prompt:
+                edge_obj["reflection_prompt"] = reflection_prompt
+                edge_obj["data"]["reflection_prompt"] = reflection_prompt
         self.edges.append(edge_obj)
-        suffix = f" [category: {source_category}]" if source_category else ""
+        suffix_parts = []
+        if source_category:
+            suffix_parts.append(f"category: {source_category}")
+        if edge_type == "reflection":
+            suffix_parts.append(f"max_iterations: {edge_obj.get('max_iterations', 2)}")
+        suffix = f" [{', '.join(suffix_parts)}]" if suffix_parts else ""
         return f"Connected '{source_name}' → '{target_name}' ({edge_type}){suffix}"
 
     # ── Update / Delete ──
@@ -1421,12 +1745,15 @@ class WorkflowBuilder:
         if not node:
             return f"Error: node '{node_name}' not found in nodes list"
 
-        # Handle 'documents' shortcut → sets doc_tool_calling_documents + auto-enables
-        # Also expand wildcard "*"/"all" to the full available-documents list.
+        # Handle 'documents' shortcut → sets doc_tool_calling_documents + auto-enables.
+        # Expand wildcard "*"/"all" then VALIDATE — phantom filenames are dropped
+        # with a warning (returned at the end of the tool result) so the LLM can
+        # retry with real filenames or switch to doc_aware for RAG.
+        dropped_docs: List[str] = []
         if "documents" in properties:
-            docs = self._expand_documents(properties.pop("documents"))
-            properties["doc_tool_calling_documents"] = docs
-            if docs:
+            valid_docs, dropped_docs = self._expand_and_validate_documents(properties.pop("documents"))
+            properties["doc_tool_calling_documents"] = valid_docs
+            if valid_docs:
                 properties["doc_tool_calling"] = True
 
         # Apply toggle dependencies if any toggle-related props are updated
@@ -1518,7 +1845,11 @@ class WorkflowBuilder:
             del self.node_name_map[node_name]
             self.node_name_map[new_name] = node_id
 
-        return f"Updated '{node_name}': {', '.join(updated_keys)}{category_cascade_note}"
+        return (
+            f"Updated '{node_name}': {', '.join(updated_keys)}"
+            f"{category_cascade_note}"
+            + self._format_dropped_docs_warning(dropped_docs)
+        )
 
     def _delete_node(self, args: Dict) -> str:
         node_name = args.get("node_name", "")
@@ -1875,6 +2206,141 @@ class WorkflowBuilder:
         }
 
 
+def _edge_meta_suffix(edge: Dict[str, Any]) -> str:
+    """Format reflection metadata for edge-summary lines shown to LLMs.
+
+    The builder stores `max_iterations` and `reflection_prompt` both at the
+    top level and under `edge.data` (to match `reflection_handler`'s reader).
+    Surface them in the summary so the verifier and critique LLMs don't think
+    they're missing and delete-and-recreate the edge to "fix" it.
+    """
+    if (edge.get("type") or "sequential") != "reflection":
+        return ""
+    data = edge.get("data") or {}
+    iters = edge.get("max_iterations")
+    if iters is None:
+        iters = data.get("max_iterations")
+    rp = edge.get("reflection_prompt") or data.get("reflection_prompt") or ""
+    parts: List[str] = []
+    if iters is not None:
+        parts.append(f"max_iterations={iters}")
+    if rp:
+        snippet = rp[:100] + ("…" if len(rp) > 100 else "")
+        parts.append(f'reflection_prompt="{snippet}"')
+    return f" [{', '.join(parts)}]" if parts else ""
+
+
+def _has_unwired_classifier_categories(builder: WorkflowBuilder) -> bool:
+    """True if any ClassifierAgent has a declared category without an outgoing
+    edge wired to it (by source_handle UUID).
+
+    When a classifier's branches are not yet wired, auto-repair can't tell
+    which branch any given orphan agent belongs to — running aggressive
+    orphan-rescue heuristics in that state produces criss-cross wiring
+    (every orphan gets routed through the first Splitter / last agent / etc.,
+    regardless of which classifier branch owns it). The caller uses this
+    guard to skip the dangerous fixes until after the verifier LLM has
+    wired the classifier's categories.
+    """
+    for node in builder.nodes:
+        if node.get("type") != "ClassifierAgent":
+            continue
+        cats = (node.get("data", {}) or {}).get("categories", []) or []
+        cat_ids = {c.get("id") for c in cats if c.get("id")}
+        if not cat_ids:
+            continue
+        wired_handles = {
+            e.get("source_handle")
+            for e in builder.edges
+            if e.get("source") == node["id"] and e.get("source_handle")
+        }
+        if cat_ids - wired_handles:
+            return True
+    return False
+
+
+def _detect_sequential_cycles(builder: WorkflowBuilder) -> List[str]:
+    """Run Kahn's algorithm on sequential edges only and report cycles.
+
+    Sequential edges must form a DAG — the runtime executor topological-sorts
+    them. Reflection edges are legal back-edges (bounded by max_iterations,
+    excluded from the topological sort); delegate edges are also excluded.
+
+    Returns human-readable issue strings that name the offending back-edge so
+    the verifier LLM can either convert it to `edge_type="reflection"` (with
+    `max_iterations` / `reflection_prompt`) or delete it.
+    """
+    nodes = builder.nodes
+    edges = builder.edges
+    if not nodes:
+        return []
+
+    name_by_id = {n["id"]: (n.get("data", {}) or {}).get("name", n["id"][:8]) for n in nodes}
+
+    # Build adjacency on sequential edges only. Treat missing/empty type as
+    # sequential (that's the default when edges come from older payloads).
+    seq_edges = [
+        e for e in edges
+        if (e.get("type") or "sequential") == "sequential"
+    ]
+
+    adjacency: Dict[str, List[str]] = {n["id"]: [] for n in nodes}
+    in_degree: Dict[str, int] = {n["id"]: 0 for n in nodes}
+    for e in seq_edges:
+        src, tgt = e.get("source"), e.get("target")
+        if src in adjacency and tgt in in_degree:
+            adjacency[src].append(tgt)
+            in_degree[tgt] += 1
+
+    # Kahn's: repeatedly remove zero-in-degree nodes. Anything left over sits
+    # in a cycle (or is downstream of one).
+    queue = [nid for nid, d in in_degree.items() if d == 0]
+    processed = 0
+    while queue:
+        nid = queue.pop(0)
+        processed += 1
+        for tgt in adjacency.get(nid, []):
+            in_degree[tgt] -= 1
+            if in_degree[tgt] == 0:
+                queue.append(tgt)
+
+    if processed == len(nodes):
+        return []  # Pure DAG on sequential edges.
+
+    # Gather the nodes stuck in / downstream of the cycle and surface the
+    # specific sequential edges that form or feed the cycle so the verifier
+    # LLM can delete or retype the right ones.
+    stuck_ids = {nid for nid, d in in_degree.items() if d > 0}
+    cycle_names = sorted({name_by_id.get(nid, nid[:8]) for nid in stuck_ids})
+    back_edges = [
+        f"'{name_by_id.get(e['source'], e['source'][:8])}' → "
+        f"'{name_by_id.get(e['target'], e['target'][:8])}'"
+        for e in seq_edges
+        if e.get("source") in stuck_ids and e.get("target") in stuck_ids
+    ]
+    if not back_edges:
+        back_edges = ["(could not isolate the specific back-edge)"]
+
+    return [
+        (
+            f"Cycle detected in SEQUENTIAL edges among agents: {cycle_names}. "
+            f"Sequential edges involved: {back_edges}. Sequential edges must "
+            f"form a DAG — the topological-sort executor will break on a "
+            f"cycle. Fix options, in order of preference: "
+            f"(1) If this is an iterative-refinement loop (e.g. reviewer "
+            f"sending draft back to writer), convert ONE back-edge to "
+            f"`edge_type='reflection'` with `max_iterations` and "
+            f"`reflection_prompt` — use `delete_edge` on the cycling edge "
+            f"and recreate it via `connect_nodes(..., edge_type='reflection', "
+            f"max_iterations=<N>, reflection_prompt='...')`. "
+            f"(2) Otherwise `delete_edge` the back-edge entirely. "
+            f"Do NOT fake a revision loop with a ClassifierAgent branch that "
+            f"points back to an earlier agent — that is the same cycle under a "
+            f"different name."
+        )
+    ]
+
+
 def _check_router_wiring(builder: WorkflowBuilder) -> List[str]:
     """Deterministic pre-flight invariant check on Classifier/Splitter wiring.
 
@@ -1886,12 +2352,81 @@ def _check_router_wiring(builder: WorkflowBuilder) -> List[str]:
       * ClassifierAgent: outgoing_with_handle count >= number_of_categories,
         and each category name has at least one outgoing edge keyed by its UUID
       * SplitterAgent: outgoing edges count >= 2 to non-Start/End targets
+      * Global: no cycles in SEQUENTIAL edges (reflection/delegate excluded)
     """
     issues: List[str] = []
+    # Cycle detection runs first — if the graph has a cycle the classifier/
+    # splitter-wiring messages below may reference nodes that the LLM then
+    # reshapes while closing the cycle. Surfacing the cycle early gives the
+    # verifier LLM the top-priority fix.
+    issues.extend(_detect_sequential_cycles(builder))
     nodes = builder.nodes
     edges = builder.edges
     name_by_id = {n["id"]: (n.get("data", {}) or {}).get("name", n["id"][:8]) for n in nodes}
     type_by_id = {n["id"]: n.get("type") for n in nodes}
+
+    # Start-node-has-no-outgoing invariant: if the auto-repair Fix 1 deferred
+    # because multiple rootless agents exist, make sure the verifier LLM gets
+    # told about it so it can pick the right entry point.
+    start_node = next((n for n in nodes if n.get("type") == "StartNode"), None)
+    if start_node:
+        start_has_outgoing = any(e.get("source") == start_node["id"] for e in edges)
+        if not start_has_outgoing:
+            targets_set = {e.get("target") for e in edges}
+            rootless = [
+                (n.get("data", {}) or {}).get("name", n["id"][:8])
+                for n in nodes
+                if n.get("type") not in ("StartNode", "EndNode", "DelegateAgent")
+                and n["id"] not in targets_set
+            ]
+            issues.append(
+                f"StartNode has NO outgoing edges. Agents with no incoming "
+                f"edges (candidate entry points): {rootless}. Pick the ONE "
+                f"agent that should be the workflow's entry point and add "
+                f"`connect_nodes(source_name='Start 1', target_name='<that "
+                f"agent>')`. Then wire the rest of the main sequential flow "
+                f"forward from there."
+            )
+
+    # Dead-end invariant: non-End, non-reflection-target, non-Classifier,
+    # non-Splitter agents must have at least one outgoing edge. Delegates
+    # are excluded (their outgoing is via the `delegate` edge to their
+    # manager, which is atypical). Reflection-only targets are legal helpers
+    # with no outgoing. Everything else that has no outgoing is a dead-end
+    # that drops its output on the floor — the critique/verifier should
+    # wire it forward (typically to a branch aggregator or EndNode).
+    def _is_reflection_only_target_check(agent_id: str) -> bool:
+        incoming = [e for e in edges if e.get("target") == agent_id]
+        outgoing = [e for e in edges if e.get("source") == agent_id]
+        if outgoing or not incoming:
+            return False
+        return all((e.get("type") or "sequential") == "reflection" for e in incoming)
+
+    dead_ends: List[str] = []
+    for node in nodes:
+        ntype = node.get("type")
+        if ntype in ("EndNode", "StartNode", "ClassifierAgent", "SplitterAgent", "DelegateAgent"):
+            continue
+        nid = node["id"]
+        has_outgoing = any(e.get("source") == nid for e in edges)
+        if has_outgoing:
+            continue
+        if _is_reflection_only_target_check(nid):
+            continue
+        dead_ends.append((node.get("data", {}) or {}).get("name", nid[:8]))
+
+    if dead_ends:
+        issues.append(
+            f"Dead-end agent(s) detected (no outgoing edge, not a reflection "
+            f"helper): {dead_ends}. Each must either (a) feed into a branch "
+            f"aggregator/synthesizer that reaches EndNode, or (b) be the "
+            f"terminal of its classifier branch that connects directly to "
+            f"EndNode. Look at what the agent's role is and wire accordingly: "
+            f"if it's one of N parallel specialists in a classifier branch, "
+            f"route it to the branch's aggregator (e.g. `connect_nodes(source_name="
+            f"'<dead-end>', target_name='<aggregator-in-same-branch>')`); if it's "
+            f"the last step of its branch, connect to End 1."
+        )
 
     for node in nodes:
         t = node.get("type")
@@ -2003,14 +2538,23 @@ def _check_router_wiring(builder: WorkflowBuilder) -> List[str]:
     return issues
 
 
-def _auto_repair_connections(builder: WorkflowBuilder):
+def _auto_repair_connections(
+    builder: WorkflowBuilder,
+    recently_deleted: Optional[set] = None,
+):
     """
     Fix common connection issues the LLM misses:
     0. Unconnected DelegateAgents → connect to their manager
     1. EndNode has no incoming → connect the last non-End non-Start agent
     2. Agents with no outgoing → connect to the next agent or EndNode
     3. Agents with no incoming → connect from StartNode or previous agent
+
+    `recently_deleted` (optional): set of (source_id, target_id) tuples that
+    were just deleted by self-critique. Auto-repair will refuse to recreate
+    any edge in this set — critique's surgical decisions should not be
+    silently reverted on the next pass.
     """
+    recently_deleted = recently_deleted or set()
     if not builder.nodes or len(builder.nodes) < 2:
         return
 
@@ -2024,6 +2568,18 @@ def _auto_repair_connections(builder: WorkflowBuilder):
 
     if not start:
         return
+
+    # If any ClassifierAgent still has unwired categories, the main routing
+    # skeleton isn't in place yet — we can't safely tell which branch each
+    # orphan agent belongs to. Skip the aggressive orphan-rescue fixes
+    # (2, 3, 4, 7b) and let the verifier LLM wire the classifier first.
+    # The post-verifier auto-repair pass will run with full branch context.
+    classifier_incomplete = _has_unwired_classifier_categories(builder)
+    if classifier_incomplete:
+        logger.info(
+            "🔧 AUTO-REPAIR: ClassifierAgent(s) have unwired categories — "
+            "deferring orphan-rescue passes (Fix 2/3/4/7b) to post-verifier sweep."
+        )
 
     # Auto-create missing EndNode
     if not end:
@@ -2059,6 +2615,19 @@ def _auto_repair_connections(builder: WorkflowBuilder):
                 logger.info(f"🔧 AUTO-REPAIR: Connected DelegateAgent '{d['data']['name']}' to GroupChatManager")
 
     def _add_edge(src_id, tgt_id, etype="sequential"):
+        # Respect self-critique's deletions: if this (source, target) pair was
+        # just deleted by the critique LLM, don't recreate it. Prevents the
+        # delete/re-add ping-pong that kept undoing legitimate semantic fixes
+        # (P2 / P3: critique deleted Start→Competitor Analyst; auto-repair
+        # immediately re-added it; critique deleted it again next iteration…).
+        if (src_id, tgt_id) in recently_deleted:
+            src_name = next((n.get("data", {}).get("name") for n in builder.nodes if n["id"] == src_id), src_id[:8])
+            tgt_name = next((n.get("data", {}).get("name") for n in builder.nodes if n["id"] == tgt_id), tgt_id[:8])
+            logger.info(
+                f"🔧 AUTO-REPAIR: skipped adding {src_name}→{tgt_name} "
+                f"— recently deleted by self-critique."
+            )
+            return False
         edge_id = f"{src_id}-{tgt_id}"
         if not any(e["id"] == edge_id for e in builder.edges):
             builder.edges.append({
@@ -2091,11 +2660,38 @@ def _auto_repair_connections(builder: WorkflowBuilder):
         incoming_count = sum(1 for e in builder.edges if e["target"] == node_id)
         return incoming_count >= 2
 
+    def _count_wired_classifier_branches() -> int:
+        """Total count of ClassifierAgent categories that have at least one
+        outgoing edge wired (across all classifiers in the graph)."""
+        count = 0
+        for n in builder.nodes:
+            if n.get("type") != "ClassifierAgent":
+                continue
+            wired = {
+                e.get("source_handle")
+                for e in builder.edges
+                if e.get("source") == n["id"] and e.get("source_handle")
+            }
+            count += len(wired)
+        return count
+
     def _find_splitter_parent_for_orphan(orphan_id: str):
         """If the orphan's direct outputs flow into a Synthesizer-style node
         or EndNode AND a Splitter exists, return the Splitter's ID. The orphan
-        is almost certainly meant to be a Splitter specialist."""
+        is almost certainly meant to be a Splitter specialist.
+
+        DISABLED in multi-branch classifier topologies: when a ClassifierAgent
+        has 2+ wired branches, the Splitter is owned by just ONE branch, and
+        routing orphans from other branches through it produces criss-cross
+        wiring (P3 regression: Market Sizer / Industry Comparator from the
+        Industry branch got wrongly wired from the Academic Splitter)."""
         if not splitter_nodes:
+            return None
+        if _count_wired_classifier_branches() >= 2:
+            # Multi-branch classifier topology — the Splitter belongs to only
+            # one branch, so we cannot safely route cross-branch orphans
+            # through it. Let the orphan fall through to sibling-source or
+            # stay unwired for the verifier/critique to handle explicitly.
             return None
         # Synthesizers themselves aren't specialists — they're the target the
         # specialists feed into. Without this guard, a temporarily-orphan
@@ -2129,11 +2725,23 @@ def _auto_repair_connections(builder: WorkflowBuilder):
                 return n["id"]
         return None
 
-    # Fix 1: StartNode has no outgoing → connect to agents with no incoming
+    # Fix 1: StartNode has no outgoing → connect to the SOLE agent with no
+    # incoming. We used to fan-connect Start to every rootless agent, but that
+    # produces a Frankenstein Start→N fan-out whenever the LLM forgets to wire
+    # the main flow (common with multi-subsystem prompts: manager + HITL +
+    # classifier). When multiple rootless agents exist, the entry point is
+    # ambiguous — defer to the verifier LLM instead of guessing.
     if start["id"] not in sources and agents:
-        for a in agents:
-            if a["id"] not in targets:
-                _add_edge(start["id"], a["id"])
+        entry_candidates = [a for a in agents if a["id"] not in targets]
+        if len(entry_candidates) == 1:
+            _add_edge(start["id"], entry_candidates[0]["id"])
+        elif len(entry_candidates) > 1:
+            logger.warning(
+                f"🔧 AUTO-REPAIR: Start has no outgoing and "
+                f"{len(entry_candidates)} agents have no incoming — ambiguous "
+                f"entry point, deferring to verifier LLM. Candidates: "
+                f"{[(a.get('data', {}) or {}).get('name', a['id'][:8]) for a in entry_candidates]}"
+            )
 
     # Refresh
     sources = {e["source"] for e in builder.edges}
@@ -2155,38 +2763,65 @@ def _auto_repair_connections(builder: WorkflowBuilder):
             for e in builder.edges
         )
 
+    def _is_reflection_only_target(agent_id):
+        """True if the agent only receives reflection edges and has no
+        outgoing edges at all. Reflection-only targets are intentional
+        helpers — they take content from their source, emit feedback, and
+        execution RETURNS to the source. Adding a sequential rescue edge
+        to or from them breaks the reflection pattern."""
+        incoming = [e for e in builder.edges if e.get("target") == agent_id]
+        outgoing = [e for e in builder.edges if e.get("source") == agent_id]
+        if outgoing or not incoming:
+            return False
+        return all((e.get("type") or "sequential") == "reflection" for e in incoming)
+
     last_agent = agents[-1] if agents else None
-    for a in agents:
-        if a["type"] == "ClassifierAgent":
-            continue
-        if a["id"] not in sources:
-            if _is_classifier_branch(a["id"]):
-                # Classifier branch terminal → goes directly to End
-                _add_edge(a["id"], end["id"])
-            elif _is_splitter_specialist(a["id"]):
-                # Splitter specialist with no outgoing → route to Synthesizer
-                # if one exists (NOT last_agent, which in combined graphs is
-                # often an unrelated agent like a Classifier branch target).
-                synth = _find_synthesizer_for_splitter_specialist()
-                if synth and synth != a["id"]:
-                    _add_edge(a["id"], synth)
-                    logger.info(
-                        f"🔧 AUTO-REPAIR: Routed Splitter specialist "
-                        f"'{_name_of(a['id'])}' → Synthesizer '{_name_of(synth)}'"
-                    )
-                else:
+    # In multi-branch classifier topologies, `last_agent` is arbitrary —
+    # it's just whichever agent happened to be created last, which may
+    # belong to a totally different branch from the orphan. Routing an
+    # orphan there chains unrelated branches together (P3 regression:
+    # Market Sizer [Industry branch] → News Fact Checker [News branch]
+    # because NFC was added last). Only fall back to `last_agent` when
+    # the topology is single-branch.
+    multi_branch = _count_wired_classifier_branches() >= 2
+    if not classifier_incomplete:
+        for a in agents:
+            if a["type"] == "ClassifierAgent":
+                continue
+            # Reflection-only helpers stay terminal by design — no rescue edge.
+            if _is_reflection_only_target(a["id"]):
+                continue
+            if a["id"] not in sources:
+                if _is_classifier_branch(a["id"]):
+                    # Classifier branch terminal → goes directly to End
                     _add_edge(a["id"], end["id"])
-            elif a == last_agent:
-                # Last agent connects to EndNode
-                _add_edge(a["id"], end["id"])
-            else:
-                # Earlier agents with no outgoing → connect to last agent
-                _add_edge(a["id"], last_agent["id"])
+                elif _is_splitter_specialist(a["id"]):
+                    # Splitter specialist with no outgoing → route to Synthesizer
+                    # if one exists (NOT last_agent, which in combined graphs is
+                    # often an unrelated agent like a Classifier branch target).
+                    synth = _find_synthesizer_for_splitter_specialist()
+                    if synth and synth != a["id"]:
+                        _add_edge(a["id"], synth)
+                        logger.info(
+                            f"🔧 AUTO-REPAIR: Routed Splitter specialist "
+                            f"'{_name_of(a['id'])}' → Synthesizer '{_name_of(synth)}'"
+                        )
+                    else:
+                        _add_edge(a["id"], end["id"])
+                elif a == last_agent or multi_branch:
+                    # Last agent connects to EndNode; in multi-branch
+                    # topologies, all sinkless agents go to End directly
+                    # (classifier-branch multi-incoming is allowed by the
+                    # End-incoming rule and safer than chaining cross-branch).
+                    _add_edge(a["id"], end["id"])
+                else:
+                    # Earlier agents with no outgoing → connect to last agent
+                    _add_edge(a["id"], last_agent["id"])
 
     # Fix 3: Agents with outgoing but NO incoming (unreachable) → connect from sibling's source or StartNode
     sources = {e["source"] for e in builder.edges}
     targets = {e["target"] for e in builder.edges}
-    for a in agents:
+    for a in (agents if not classifier_incomplete else []):
         a_id = a["id"]
         has_incoming = a_id in targets
         if not has_incoming and a_id != start["id"]:
@@ -2232,19 +2867,35 @@ def _auto_repair_connections(builder: WorkflowBuilder):
                     f"'{_name_of(splitter_parent)}' (router-aware)"
                 )
                 continue
-            # Find where this agent's output goes (its target)
-            a_targets = [e["target"] for e in builder.edges if e["source"] == a_id]
-            # Find siblings: other agents that also connect to the same target
+            # Find where this agent's output goes (its target). EXCLUDE EndNode
+            # as an anchor — many agents converge at End (especially in multi-
+            # branch topologies where Fix 2 routes all sinkless agents to End),
+            # so "sibling sharing End as target" is not a reliable signal of
+            # branch kinship. Using End as an anchor causes cross-branch
+            # mis-wiring (P3 regression: Literature Searcher [Academic] became
+            # parent of Citation Verifier, Competitor Analyst [Industry],
+            # Market Sizer [Industry] because they all pointed at End).
+            a_targets = [
+                e["target"] for e in builder.edges
+                if e["source"] == a_id and e["target"] != end["id"]
+            ]
+            # Find siblings: other agents that also connect to the same target.
+            # Skip candidates that would require a source_handle to connect
+            # from (ClassifierAgent) — auto-repair's `_add_edge` can't supply
+            # that. Same for DelegateAgent (isolation rule).
+            def _valid_parent(node_id: str) -> bool:
+                t = next((n.get("type") for n in builder.nodes if n["id"] == node_id), None)
+                return t not in ("ClassifierAgent", "DelegateAgent")
             sibling_source = None
             for t in a_targets:
                 for e in builder.edges:
                     if e["target"] == t and e["source"] != a_id:
                         # This is a sibling — find who feeds that sibling
                         for e2 in builder.edges:
-                            if e2["target"] == e["source"] and e2["source"] != a_id:
+                            if e2["target"] == e["source"] and e2["source"] != a_id and _valid_parent(e2["source"]):
                                 sibling_source = e2["source"]
                                 break
-                        if not sibling_source:
+                        if not sibling_source and _valid_parent(e["source"]):
                             sibling_source = e["source"]
                     if sibling_source:
                         break
@@ -2253,49 +2904,186 @@ def _auto_repair_connections(builder: WorkflowBuilder):
             if sibling_source:
                 _add_edge(sibling_source, a_id)
                 logger.info(f"🔧 AUTO-REPAIR: Connected unreachable '{a['data'].get('name', '?')}' from sibling's source")
+            elif multi_branch:
+                # In multi-branch topologies, Start→orphan is semantically
+                # wrong (the orphan belongs to a classifier branch, not as a
+                # Start-direct child). Leave it unwired and let the verifier/
+                # critique handle it on the next pass.
+                logger.warning(
+                    f"🔧 AUTO-REPAIR: '{a['data'].get('name', '?')}' is orphan in a "
+                    f"multi-branch graph — leaving unwired (verifier/critique "
+                    f"should place it in a classifier branch)."
+                )
             else:
                 _add_edge(start["id"], a_id)
                 logger.info(f"🔧 AUTO-REPAIR: Connected unreachable '{a['data'].get('name', '?')}' from StartNode")
 
     # Fix 4: EndNode still has no incoming → connect from last agent
+    # Gated: when classifier branches are unwired, "last agent" is arbitrary
+    # (often a branch-specific terminator that shouldn't be a global End feeder).
     end_incoming = [e for e in builder.edges if e["target"] == end["id"]]
-    if len(end_incoming) == 0 and last_agent:
+    if not classifier_incomplete and len(end_incoming) == 0 and last_agent:
         _add_edge(last_agent["id"], end["id"])
 
-    # Fix 5: EndNode has multiple incoming (>1) → keep only the last one
-    # EXCEPTION: if every incoming edge traces back to a ClassifierAgent branch,
-    # this is a legitimate routing pattern (only one branch fires at runtime).
-    end_incoming = [e for e in builder.edges if e["target"] == end["id"]]
-    if len(end_incoming) > 1:
+    # Fix 5: EndNode has multiple incoming (>1) → enforce "one terminal per
+    # classifier branch" rule.
+    # Rule: EndNode may have multiple incoming only when each edge originates
+    # from a DIFFERENT ClassifierAgent branch (identified by classifier node
+    # + source_handle). Two agents in the SAME branch both terminating at End
+    # is a violation — they must funnel through a single synthesizer/terminal.
+    # Implemented as a local helper so we can invoke it TWICE: once here to
+    # consolidate edges added by Fix 2, and once at the very end (after Fix
+    # 7b's final sweep) to consolidate any edges Fix 7b re-added.
+    def _consolidate_end_incoming():
+        end_incoming = [e for e in builder.edges if e["target"] == end["id"]]
+        if len(end_incoming) <= 1:
+            return
         node_type_by_id = {n["id"]: n["type"] for n in builder.nodes}
 
-        def _traces_back_to_classifier(src_id: str, _path: frozenset = frozenset()) -> bool:
-            """True iff every path leading into src_id originates from a classifier branch.
-            Uses a per-path frozenset guard so sibling branches that share an ancestor
-            (e.g. specialists all upstream of the same Splitter) each get to visit the
-            shared ancestor independently — a mutable shared ``seen`` set would
-            incorrectly short-circuit the second sibling's traversal."""
+        def _trace_classifier_branches(src_id: str, _path: frozenset = frozenset()) -> list:
+            """Return the set of (classifier_id, source_handle) branch keys
+            that src_id descends from. A node can descend from multiple
+            branches if it's a fan-in synthesizer — we collect all of them.
+            Empty list means src_id doesn't trace to any classifier branch.
+            """
             if src_id in _path:
-                return False
-            if node_type_by_id.get(src_id) == "ClassifierAgent":
-                return True
-            upstream = [e for e in builder.edges if e["target"] == src_id]
-            if not upstream:
-                return False
+                return []
             new_path = _path | {src_id}
-            return all(_traces_back_to_classifier(e["source"], new_path) for e in upstream)
+            upstream = [e for e in builder.edges if e["target"] == src_id
+                        and (e.get("type") or "sequential") != "reflection"]
+            if not upstream:
+                return []
+            branches: list = []
+            for e in upstream:
+                src = e["source"]
+                if node_type_by_id.get(src) == "ClassifierAgent":
+                    # Direct branch edge — key is (classifier_id, source_handle)
+                    branches.append((src, e.get("source_handle")))
+                else:
+                    branches.extend(_trace_classifier_branches(src, new_path))
+            # dedup
+            return list({b for b in branches})
 
-        if all(_traces_back_to_classifier(e["source"]) for e in end_incoming):
-            logger.info(
-                f"🔧 AUTO-REPAIR: Keeping all {len(end_incoming)} EndNode incoming edges "
-                "(all originate from classifier branches)"
+        def _chain_depth(src_id: str, _path: frozenset = frozenset(), _depth: int = 0) -> int:
+            """Depth of the longest upstream chain back to a classifier or
+            unreached root. Used to pick the 'most downstream' terminal for a
+            given branch (preferring synthesizers over early specialists)."""
+            if src_id in _path or _depth > 50:
+                return _depth
+            upstream = [e for e in builder.edges if e["target"] == src_id
+                        and (e.get("type") or "sequential") != "reflection"]
+            if not upstream:
+                return _depth
+            new_path = _path | {src_id}
+            return max(
+                _chain_depth(e["source"], new_path, _depth + 1)
+                for e in upstream
             )
-        else:
-            keep_source = last_agent["id"] if last_agent else end_incoming[-1]["source"]
-            edges_to_remove = [e for e in end_incoming if e["source"] != keep_source]
-            for e in edges_to_remove:
-                builder.edges.remove(e)
-                logger.info(f"🔧 AUTO-REPAIR: Removed extra EndNode edge {e['id']}")
+
+        # Group End-incomings by the (classifier, handle) pair they trace to.
+        # Edges tracing to multiple branches (a fan-in synthesizer) get a
+        # special "multi-branch" bucket we keep as-is (one edge per synth).
+        branch_to_edges: dict = {}
+        no_branch_edges = []
+        for e in end_incoming:
+            branches = _trace_classifier_branches(e["source"])
+            if not branches:
+                no_branch_edges.append(e)
+            elif len(branches) == 1:
+                branch_to_edges.setdefault(branches[0], []).append(e)
+            else:
+                # multi-branch fan-in (e.g. a synthesizer merging two branches) —
+                # keep it in its own bucket, indexed by the frozenset of branches
+                key = frozenset(branches)
+                branch_to_edges.setdefault(key, []).append(e)
+
+        any_removed = False
+        for key, candidates in branch_to_edges.items():
+            if len(candidates) <= 1:
+                continue
+            # Keep the End-incoming whose source has the LONGEST upstream chain
+            # back to the classifier (the most downstream / aggregator-like).
+            candidates_with_depth = [(c, _chain_depth(c["source"])) for c in candidates]
+            candidates_with_depth.sort(key=lambda x: x[1], reverse=True)
+            keep = candidates_with_depth[0][0]
+            for c, _ in candidates_with_depth[1:]:
+                if c in builder.edges:
+                    builder.edges.remove(c)
+                    any_removed = True
+                    # Rather than leaving c["source"] as a dead-end (0 outgoing),
+                    # reroute it to the kept branch terminal so its output
+                    # feeds into the branch's aggregator. This is semantically
+                    # correct for parallel specialists in a classifier branch
+                    # (e.g. Competitor Analyst AND Market Sizer both feeding
+                    # Industry Selector, which picks the better one).
+                    # Only reroute if c["source"] doesn't already reach keep
+                    # (avoid redundant edges), and the reroute wouldn't close
+                    # a cycle (check: is keep["source"] upstream of c["source"]?).
+                    c_src = c["source"]
+                    keep_src = keep["source"]
+                    c_src_has_keep_downstream = any(
+                        e["source"] == c_src and e["target"] == keep_src
+                        for e in builder.edges
+                    )
+                    # Cycle-safety: keep's source must not already be an
+                    # ancestor of c's source in sequential edges.
+                    def _is_ancestor(maybe_ancestor, descendant, _seen=None):
+                        _seen = _seen or set()
+                        if maybe_ancestor in _seen:
+                            return False
+                        _seen.add(maybe_ancestor)
+                        for e in builder.edges:
+                            if e["source"] != maybe_ancestor:
+                                continue
+                            if (e.get("type") or "sequential") == "reflection":
+                                continue
+                            if e["target"] == descendant:
+                                return True
+                            if _is_ancestor(e["target"], descendant, _seen):
+                                return True
+                        return False
+                    creates_cycle = _is_ancestor(keep_src, c_src)
+                    if c_src != keep_src and not c_src_has_keep_downstream and not creates_cycle:
+                        _add_edge(c_src, keep_src)
+                        logger.info(
+                            f"🔧 AUTO-REPAIR: consolidated End-incoming — rerouted "
+                            f"{_name_of(c_src)} → '{_name_of(keep_src)}' "
+                            f"(instead of leaving it as a dead-end after removing its "
+                            f"direct edge to End; branch agents should funnel through "
+                            f"a single terminal per branch)."
+                        )
+                    else:
+                        logger.info(
+                            f"🔧 AUTO-REPAIR: consolidated End-incoming — removed "
+                            f"{_name_of(c_src)} → End (same classifier branch "
+                            f"as kept '{_name_of(keep_src)}'). Branch agents "
+                            f"should funnel through a single terminal per branch."
+                        )
+
+        # Handle non-classifier-tracing edges (plain DAG terminators). Standard
+        # rule: keep only one (prefer last_agent, else last-added).
+        if len(no_branch_edges) > 1:
+            preferred = None
+            if last_agent:
+                preferred = next((e for e in no_branch_edges if e["source"] == last_agent["id"]), None)
+            if not preferred:
+                preferred = no_branch_edges[-1]
+            for e in no_branch_edges:
+                if e is not preferred and e in builder.edges:
+                    builder.edges.remove(e)
+                    any_removed = True
+                    logger.info(f"🔧 AUTO-REPAIR: Removed extra EndNode edge {e['id']}")
+
+        if not any_removed:
+            logger.info(
+                f"🔧 AUTO-REPAIR: Keeping all {len(end_incoming)} EndNode incoming "
+                f"edges (each originates from a distinct classifier branch)"
+            )
+
+    # First consolidation pass — cleans up duplicate branch terminals added by
+    # Fix 2. A second pass runs after Fix 7b (final sweep) so any edges Fix 7b
+    # re-adds on sinkless agents get consolidated on the way out.
+    _consolidate_end_incoming()
 
     # ── Fix 6: Router-aware cleanup (runs last, after all other fixes) ──
     # 6a: Specialist chain cleanup. If Splitter → A AND Splitter → B AND there's
@@ -2398,26 +3186,87 @@ def _auto_repair_connections(builder: WorkflowBuilder):
     # non-Classifier agent has a forward path.
     # Router-aware: Splitter specialists prefer the Synthesizer over End so the
     # fan-in aggregation is preserved; everyone else goes straight to End.
+    # EXCEPTION: reflection-only target agents (helpers that only receive a
+    # reflection edge from a source content-producer and have no outgoing
+    # edges) are intentionally terminal. Their feedback goes back to the
+    # source via the reflection handler — they do NOT belong on the main
+    # sequential path and must NOT be rescued with a forward edge.
     sources = {e["source"] for e in builder.edges}
-    for a in agents:
-        if a["type"] == "ClassifierAgent":
-            continue
-        if a["id"] in sources:
-            continue
-        if _is_splitter_specialist(a["id"]) and not _looks_like_synthesizer(a["id"]):
-            synth = _find_synthesizer_for_splitter_specialist()
-            if synth and synth != a["id"]:
-                _add_edge(a["id"], synth)
-                logger.info(
-                    f"🔧 AUTO-REPAIR: final sweep — connected Splitter specialist "
-                    f"'{_name_of(a['id'])}' → Synthesizer '{_name_of(synth)}'"
-                )
+    # When classifier branches are still unwired, we don't know which branch
+    # each sinkless agent belongs to — defer this sweep to the post-verifier pass.
+    if not classifier_incomplete:
+        for a in agents:
+            if a["type"] == "ClassifierAgent":
                 continue
-        _add_edge(a["id"], end["id"])
-        logger.info(
-            f"🔧 AUTO-REPAIR: final sweep — connected '{_name_of(a['id'])}' → End "
-            f"(no outgoing edges after earlier fixes)"
-        )
+            if a["id"] in sources:
+                continue
+            if _is_reflection_only_target(a["id"]):
+                continue
+            if _is_splitter_specialist(a["id"]) and not _looks_like_synthesizer(a["id"]):
+                synth = _find_synthesizer_for_splitter_specialist()
+                if synth and synth != a["id"]:
+                    _add_edge(a["id"], synth)
+                    logger.info(
+                        f"🔧 AUTO-REPAIR: final sweep — connected Splitter specialist "
+                        f"'{_name_of(a['id'])}' → Synthesizer '{_name_of(synth)}'"
+                    )
+                    continue
+            _add_edge(a["id"], end["id"])
+            logger.info(
+                f"🔧 AUTO-REPAIR: final sweep — connected '{_name_of(a['id'])}' → End "
+                f"(no outgoing edges after earlier fixes)"
+            )
+
+    # Second End-incoming consolidation pass. Fix 7b above may have re-added
+    # edges to End that the earlier Fix-5 pass tried to remove (classic cat-
+    # and-mouse: 7b sees an agent with no outgoing and wires it to End; but if
+    # that agent's branch already had a terminal, it's now a duplicate). This
+    # second pass is final — it runs after all other fixes so whatever ends
+    # up at End is our authoritative answer.
+    _consolidate_end_incoming()
+
+    # Fix 8: final cycle safety check. The sibling-source heuristic (Fix 3)
+    # and other rescues can inadvertently close a cycle on sequential edges
+    # (e.g. Fix 3 added A → B while B → A already existed, producing a
+    # 2-node cycle). Since cycle detection only runs inside
+    # `_check_router_wiring` BEFORE the post-critique auto-repair, cycles
+    # introduced here would otherwise escape into the final graph.
+    # Strategy: detect a sequential cycle and remove the most-recently-appended
+    # sequential edge that participates in it, until the cycle is broken.
+    # Reflection and delegate edges are excluded (they're legal back-edges).
+    max_removals = 10  # Safety cap — should never need this many in practice.
+    while max_removals > 0 and _detect_sequential_cycles(builder):
+        max_removals -= 1
+        removed_one = False
+        for edge in list(reversed(builder.edges)):
+            if (edge.get("type") or "sequential") != "sequential":
+                continue
+            # Protect mission-critical edges we just added: Start → entry, and
+            # classifier-branch edges (source_handle present) which the verifier
+            # LLM specifically wired.
+            if edge.get("source") == start["id"]:
+                continue
+            if edge.get("source_handle"):
+                continue
+            builder.edges.remove(edge)
+            if not _detect_sequential_cycles(builder):
+                logger.warning(
+                    f"🔧 AUTO-REPAIR: removed cycle-closing sequential edge "
+                    f"{_name_of(edge['source'])} → {_name_of(edge['target'])} "
+                    f"(introduced during repair)"
+                )
+                removed_one = True
+                break
+            # Undo the try — put the edge back at its original tail position.
+            builder.edges.append(edge)
+        if not removed_one:
+            # Couldn't break the cycle with safe removals — log and give up
+            # so the verifier LLM (which runs after) can fix it.
+            logger.error(
+                "🔧 AUTO-REPAIR: could not break sequential cycle via safe "
+                "edge removal; leaving for the verifier LLM to resolve."
+            )
+            break
 
 
 # ── Diff helper (Pillar 4) ─────────────────────────────────────────────
@@ -2735,7 +3584,7 @@ async def generate_workflow(
                 cat_name = cw_classifier_cat_names[e["source"]].get(e["source_handle"])
                 if cat_name:
                     handle_suffix = f" [category: {cat_name}]"
-            cw_lines.append(f"  - {src} → {tgt} ({e.get('type', 'sequential')}){handle_suffix}")
+            cw_lines.append(f"  - {src} → {tgt} ({e.get('type', 'sequential')}){handle_suffix}{_edge_meta_suffix(e)}")
         cw_lines.append("")
         cw_lines.append(
             "The user wants to MODIFY this existing workflow. PRESERVE all "
@@ -2868,19 +3717,41 @@ async def generate_workflow(
                 "content": result,
             })
 
-    # If nodes exist but no edges, explicitly ask the LLM to create connections
-    if builder.nodes and not builder.edges:
+    # If nodes exist but no SEQUENTIAL edges, explicitly ask the LLM to create
+    # connections. We only count sequential edges because `add_delegate_agent`
+    # auto-creates a delegate edge to its manager, which would otherwise mask
+    # a fully-unwired main flow (observed in the P2 manager+HITL+classifier
+    # prompt: 3 delegate edges existed, zero sequential, retry silently
+    # skipped, auto-repair produced a Frankenstein graph).
+    sequential_edge_count = sum(
+        1 for e in builder.edges
+        if (e.get("type") or "sequential") == "sequential"
+    )
+    if builder.nodes and sequential_edge_count == 0:
         node_names = [n["data"]["name"] for n in builder.nodes]
-        logger.info(f"⚠️ WORKFLOW GEN: {len(builder.nodes)} nodes but 0 edges — requesting connections")
+        delegate_edge_count = sum(1 for e in builder.edges if e.get("type") == "delegate")
+        delegate_note = (
+            f"Your {delegate_edge_count} delegate edge(s) to the GroupChatManager are "
+            f"already in place — do NOT recreate them. "
+        ) if delegate_edge_count else ""
+        logger.info(
+            f"⚠️ WORKFLOW GEN: {len(builder.nodes)} nodes but 0 sequential edges "
+            f"({delegate_edge_count} delegate edges present) — requesting connections"
+        )
         messages.append({
             "role": "user",
             "content": (
-                f"You created these nodes but forgot to connect them: {', '.join(node_names)}. "
-                "Now call connect_nodes for EVERY connection. Remember:\n"
-                "- Start 1 must connect to the first agent(s)\n"
-                "- Every agent must connect to the next agent(s)\n"
-                "- The last agent before the end must connect to End 1\n"
-                "- EndNode receives exactly ONE incoming connection\n"
+                f"You created these nodes but forgot to wire the main sequential "
+                f"flow: {', '.join(node_names)}. {delegate_note}"
+                "Now call connect_nodes for EVERY sequential connection that forms the "
+                "main flow. Remember:\n"
+                "- Start 1 must connect to exactly ONE first agent (the entry point)\n"
+                "- Every non-reflection agent must have a forward path toward End 1\n"
+                "- A GroupChatManager needs a sequential outgoing edge to the next "
+                "agent in the main flow (its delegate edges are INTERNAL to the team)\n"
+                "- A ClassifierAgent must wire EVERY category with source_category\n"
+                "- EndNode receives exactly ONE incoming connection (classifier "
+                "branches are the only exception)\n"
                 "Make ALL connect_nodes calls now."
             ),
         })
@@ -2986,7 +3857,7 @@ async def generate_workflow(
                     cat_name = v_classifier_cat_names[e["source"]].get(e["source_handle"])
                     if cat_name:
                         handle_suffix = f" [category: {cat_name}]"
-                graph_desc_lines.append(f"  {src} → {tgt} ({e.get('type', 'sequential')}){handle_suffix}")
+                graph_desc_lines.append(f"  {src} → {tgt} ({e.get('type', 'sequential')}){handle_suffix}{_edge_meta_suffix(e)}")
             graph_desc = "\n".join(graph_desc_lines)
 
             _plan_block = f"Original plan from the planning phase:\n{plan_text}\n\n" if plan_text else ""
@@ -3010,7 +3881,14 @@ async def generate_workflow(
                 "1. Does the orchestration make sense for the user's request? Are the right agents created with the right roles?\n"
                 "2. Are all connections valid? Does information flow logically from source to destination?\n"
                 "3. Is every agent reachable from StartNode? Does exactly one agent connect to EndNode "
-                "(exception: multiple branches from a ClassifierAgent MAY each terminate at EndNode)?\n"
+                "(exception: multiple branches from a ClassifierAgent MAY each terminate at EndNode; "
+                "reflection-only target agents — agents receiving only a reflection edge and having "
+                "no outgoing edges — are side-channel helpers and do NOT need a path to EndNode)?\n"
+                "3b. For every reflection edge, verify the DIRECTION is correct: source = the "
+                "content-producing agent being refined; target = the helper/critic providing feedback. "
+                "If an edge is reversed (e.g. Reviewer → Writer reflection), delete and recreate it "
+                "the correct way (Writer → Reviewer reflection). The reflection target should have "
+                "NO outgoing edges and should NOT appear on the main sequential flow.\n"
                 "4. Are web_search / doc_tool_calling / documents / doc_aware assigned correctly per each agent's role?\n"
                 "5. Are system_messages detailed enough for each agent to do its job?\n"
                 "6. Are LLM models and temperatures appropriate for each agent's task?\n"
@@ -3026,9 +3904,16 @@ async def generate_workflow(
                 "should have a descriptive system_message so the splitter can route work by role. "
                 "If the splitter has 0 or 1 outgoing edges, ADD the missing connections now.\n"
                 "9. Did you remove existing agents? If yes, did the user EXPLICITLY request "
-                "removal (words like remove/delete/rebuild/replace/start over)? If you removed "
-                "agents WITHOUT explicit user request, that is a regression — RESTORE them via "
-                "add_assistant_agent (or the appropriate add_*) + connect_nodes.\n"
+                "removal using a HARD-DELETE keyword (remove, delete, rebuild, replace, "
+                "start over, wipe, clear, from scratch, get rid of, drop, take out)? "
+                "Soft language — 'rethink', 'reconsider', 'maybe have someone else', "
+                "'not loving X', 'X seems redundant', 'X might be worth trimming', "
+                "'let's improve', 'consider replacing' — is NOT authorization to delete. "
+                "If you removed agents on soft language, that is a regression — RESTORE "
+                "them via add_assistant_agent (or the appropriate add_*) + connect_nodes, "
+                "and instead use update_node_property to update their system_message/name "
+                "in place. Renaming via update_node_property(name=...) preserves the ID "
+                "and all edges — always prefer that to delete+re-add.\n"
                 + ("10. Did the build follow the plan above? Note any drift and fix it.\n\n" if plan_text else "\n")
                 + "If everything looks correct, respond with 'Verification passed — workflow is valid.'\n"
                 "If there are issues, use update_node_property, delete_node, connect_nodes, or add_* tools to fix them.\n"
@@ -3174,7 +4059,7 @@ async def generate_workflow(
                     cat_name = c_classifier_cat_names[e["source"]].get(e["source_handle"])
                     if cat_name:
                         handle_suffix = f" [category: {cat_name}]"
-                crit_desc_lines.append(f"  {src} → {tgt} ({e.get('type', 'sequential')}){handle_suffix}")
+                crit_desc_lines.append(f"  {src} → {tgt} ({e.get('type', 'sequential')}){handle_suffix}{_edge_meta_suffix(e)}")
             crit_desc = "\n".join(crit_desc_lines)
 
             critique_prompt = (
@@ -3226,6 +4111,10 @@ async def generate_workflow(
             # fixes or it passes immediately. Early-exit on no tool calls.
             sc_iterations = 0
             sc_final_text = ""
+            # Track (source_id, target_id) pairs that the critique LLM deletes
+            # across all iterations. Passed to the post-critique auto-repair
+            # sweep so it doesn't resurrect edges the critique just removed.
+            critique_deleted_edges: set = set()
             for sc_iter in range(4):
                 sc_iterations = sc_iter + 1
                 sc_response = await llm_provider.generate_response(
@@ -3269,10 +4158,18 @@ async def generate_workflow(
                         if isinstance(tc["function"]["arguments"], str)
                         else tc["function"]["arguments"]
                     )
+                    # Snapshot edge IDs before execution so we can detect what
+                    # got removed (for critique-deleted tracking below).
+                    edges_before = {(e["source"], e["target"]) for e in builder.edges}
                     result = builder.execute_tool_call(tc["function"]["name"], fn_args)
                     logger.info(
                         f"🔧 WORKFLOW GEN (self-critique): {tc['function']['name']} → {result}"
                     )
+                    # Any (source, target) pair that disappeared after this
+                    # tool call was deleted (directly via delete_edge, or
+                    # indirectly via rewire_edge / delete_node / etc.).
+                    edges_after = {(e["source"], e["target"]) for e in builder.edges}
+                    critique_deleted_edges.update(edges_before - edges_after)
                     critique_messages.append({
                         "role": "tool",
                         "tool_call_id": tc["id"],
@@ -3292,7 +4189,7 @@ async def generate_workflow(
                     f"🔧 WORKFLOW GEN: self-critique made {sc_tool_calls_made} tool "
                     "call(s) — running post-critique auto-repair sweep"
                 )
-                _auto_repair_connections(builder)
+                _auto_repair_connections(builder, recently_deleted=critique_deleted_edges)
                 explanation += f"\n\n**Self-critique:** {sc_final_text or f'applied {sc_tool_calls_made} fix(es)'}"
             else:
                 logger.info(

@@ -21,6 +21,26 @@
   let fileInputEl: HTMLInputElement;
   const MAX_FILES = 5;
   const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB — matches DocumentProcessor
+
+  // Textarea auto-grow: starts at 2 lines, expands up to ~12 lines as the
+  // user types, then scrolls internally. Reset to min after send.
+  let inputTextareaEl: HTMLTextAreaElement;
+  const TEXTAREA_MIN_HEIGHT = 44;   // ~2 lines + padding
+  const TEXTAREA_MAX_HEIGHT = 240;  // ~12 lines + padding
+  function autoresizeTextarea() {
+    if (!inputTextareaEl) return;
+    // Collapse to measure the real scrollHeight, then cap between min/max.
+    inputTextareaEl.style.height = 'auto';
+    const desired = Math.max(
+      TEXTAREA_MIN_HEIGHT,
+      Math.min(inputTextareaEl.scrollHeight, TEXTAREA_MAX_HEIGHT),
+    );
+    inputTextareaEl.style.height = `${desired}px`;
+  }
+  function resetTextareaSize() {
+    if (!inputTextareaEl) return;
+    inputTextareaEl.style.height = `${TEXTAREA_MIN_HEIGHT}px`;
+  }
   // Minimized is `export let` with `bind:` support so the parent can shrink
   // the outer fixed-position container and the pill can float freely.
   export let minimized: boolean = false;
@@ -74,6 +94,7 @@
     }
     messages = [...messages, userMsg];
     inputText = '';
+    resetTextareaSize();
     loading = true;
     scrollToBottom();
 
@@ -385,14 +406,6 @@
                     <div class="destruction-list">{msg.diff.removed_nodes.join(', ')}</div>
                   </div>
                 </div>
-                <label class="destruction-confirm">
-                  <input
-                    type="checkbox"
-                    checked={!!msg.destructionConfirmed}
-                    on:change={() => toggleDestructionConfirm(msgIdx)}
-                  />
-                  <span>I understand {msg.diff.removed_nodes.length} agent(s) will be permanently deleted</span>
-                </label>
               {/if}
               {#if msg.plan}
                 <button class="plan-toggle" on:click={() => togglePlan(msgIdx)}>
@@ -423,11 +436,22 @@
                   <div class="diff-line diff-rm">– edge {e.source} → {e.target}{e.category ? ` [${e.category}]` : ''}</div>
                 {/each}
               </div>
+              {#if isDestructive(msg.diff)}
+                <label class="destruction-confirm">
+                  <input
+                    type="checkbox"
+                    checked={!!msg.destructionConfirmed}
+                    on:change={() => toggleDestructionConfirm(msgIdx)}
+                  />
+                  <span>I understand {msg.diff.removed_nodes.length} agent(s) will be permanently deleted</span>
+                </label>
+              {/if}
               <div class="preview-actions">
                 <button class="preview-discard" on:click={() => discardPreview(msgIdx)}>Discard</button>
                 <button
                   class="preview-apply"
                   disabled={isDestructive(msg.diff) && !msg.destructionConfirmed}
+                  title={isDestructive(msg.diff) && !msg.destructionConfirmed ? 'Tick the confirmation checkbox above to enable Apply' : ''}
                   on:click={() => applyPreview(msgIdx)}
                 >Apply</button>
               </div>
@@ -481,8 +505,10 @@
         <i class="fas fa-paperclip"></i>
       </button>
       <textarea
+        bind:this={inputTextareaEl}
         bind:value={inputText}
         on:keydown={handleKeydown}
+        on:input={autoresizeTextarea}
         placeholder={attachedFiles.length > 0 ? 'Add an instruction for these file(s)…' : 'Describe the workflow you need...'}
         rows="2"
         disabled={loading}
@@ -642,9 +668,16 @@
     border-radius: 8px;
     padding: 8px 10px;
     font-size: 13px;
+    line-height: 1.4;
     resize: none;
     outline: none;
     font-family: inherit;
+    /* Min ≈ 2 lines, max ≈ 12 lines; beyond that the textarea scrolls
+       internally. JS auto-grow (autoresizeTextarea) keeps the height in
+       sync with the content within these bounds. */
+    min-height: 44px;
+    max-height: 240px;
+    overflow-y: auto;
   }
   .wf-chatbot-input textarea:focus { border-color: #002147; }
 

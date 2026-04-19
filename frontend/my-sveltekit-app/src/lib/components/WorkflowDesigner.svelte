@@ -1017,6 +1017,11 @@
       // Preserve source_handle for ClassifierAgent branches — it carries the
       // category UUID that tells the executor which branch this edge represents.
       ...(edge.source_handle ? { source_handle: edge.source_handle } : {}),
+      // Reflection edges carry iteration budget + prompt both on the top
+      // level (for diff/logs) and inside data (where reflection_handler reads).
+      ...(edge.max_iterations != null ? { max_iterations: edge.max_iterations } : {}),
+      ...(edge.reflection_prompt ? { reflection_prompt: edge.reflection_prompt } : {}),
+      ...(edge.data ? { data: { ...edge.data } } : {}),
     }));
 
     selectedNode = null;
