@@ -201,22 +201,6 @@ class GeminiProvider(LLMProvider):
                     if allowed_names:
                         fc_config["allowed_function_names"] = allowed_names
                     body["toolConfig"] = {"functionCallingConfig": fc_config}
-            # Sampling parameters — Gemini nests them inside generationConfig.
-            # Fallback order: explicit kwarg → self.temperature (set by
-            # llm_provider_manager from agent_config) → omit (API default).
-            # Prevents cross-language token drift at the model-default temperature.
-            generation_config: Dict[str, Any] = {}
-            temperature = kwargs.get("temperature", getattr(self, "temperature", None))
-            if temperature is not None:
-                generation_config["temperature"] = float(temperature)
-            top_p = kwargs.get("top_p")
-            if top_p is not None:
-                generation_config["topP"] = float(top_p)
-            max_tokens = kwargs.get("max_tokens")
-            if max_tokens is not None:
-                generation_config["maxOutputTokens"] = int(max_tokens)
-            if generation_config:
-                body["generationConfig"] = generation_config
             return body
         elif prompt:
             # Fallback to prompt string (backward compatibility)
