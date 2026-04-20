@@ -17,7 +17,8 @@ SECTION_HEADER = "\n\n=== IntelliDoc platform guidance ===\n"
 # Always included for every agent type.
 INTELLIDOC_CORE = """You are operating inside AICC IntelliDoc. Obey the user and node instructions above first.
 - Prioritize accuracy over completeness; if context is insufficient, say so clearly.
-- Do not invent quotes, page numbers, section labels, or citations that are not supported by supplied content."""
+- Do not invent quotes, page numbers, section labels, or citations that are not supported by supplied content.
+- LANGUAGE: Respond in English only. Every word of your response must be in English. Do NOT emit non-English words (e.g. Hindi, Chinese, Arabic, Cyrillic, or any other script) even when equivalent phrasing exists in another language — always pick the English equivalent. This applies to every part of the response including headings, bullets, tables, summaries, and citation titles. If a source document is in another language, translate relevant excerpts to English when quoting rather than copying the original script."""
 
 # Appended only when the agent will receive at least one source (docs, web, files).
 INTELLIDOC_SOURCES_ADDENDUM = (

@@ -195,6 +195,20 @@ class OpenAIProvider(LLMProvider):
                 tool_choice = kwargs.get("tool_choice")
                 if tool_choice:
                     body["tool_choice"] = tool_choice
+            # Sampling parameters — must be passed explicitly or OpenAI defaults
+            # to temperature=1.0 which causes cross-language token drift (e.g.
+            # a single Hindi word sampled in the middle of an English response).
+            # Fallback order: explicit kwarg → self.temperature (set by
+            # llm_provider_manager from agent_config) → omit (API default).
+            temperature = kwargs.get("temperature", getattr(self, "temperature", None))
+            if temperature is not None:
+                body["temperature"] = float(temperature)
+            top_p = kwargs.get("top_p")
+            if top_p is not None:
+                body["top_p"] = float(top_p)
+            max_tokens = kwargs.get("max_tokens")
+            if max_tokens is not None:
+                body["max_tokens"] = int(max_tokens)
             return body
         elif prompt:
             # Fallback to prompt string (backward compatibility)
@@ -351,6 +365,12 @@ class OpenAIProvider(LLMProvider):
                     body["max_output_tokens"] = int(self.max_tokens)
                 if instructions:
                     body["instructions"] = instructions
+                # Respect per-agent temperature on the Responses API path too
+                # (file-attachment requests). Without this the API defaults
+                # to 1.0 and cross-language drift can appear in doc summaries.
+                responses_temperature = kwargs.get("temperature", getattr(self, "temperature", None))
+                if responses_temperature is not None:
+                    body["temperature"] = float(responses_temperature)
                 # Include tools in Responses API format when present
                 if has_tools:
                     tools_list = kwargs.get("tools", [])

@@ -80,27 +80,38 @@ class LLMProviderManager:
             logger.error(f"❌ LLM PROVIDER: {error_msg}")
             return None
         
+        # Per-agent sampling temperature (default 0.7 to match node-creation
+        # defaults). Stashed on the provider instance so every generate_response
+        # call automatically respects it — without this, the providers omit
+        # temperature entirely and the OpenAI/Claude/Gemini APIs default to
+        # 1.0 (maximum randomness), which causes cross-language token drift.
+        temperature = agent_config.get('temperature', 0.7)
         try:
             if provider_type == 'openai':
-                logger.info(f"✅ LLM PROVIDER: Creating OpenAI provider with project key, model {model}")
+                logger.info(f"✅ LLM PROVIDER: Creating OpenAI provider with project key, model {model}, temp={temperature}")
                 try:
                     max_tokens = agent_config.get('max_tokens', 4000)
                     provider = OpenAIProvider(api_key=api_key, model=model, max_tokens=max_tokens)
+                    provider.temperature = temperature
                     logger.info(f"✅ LLM PROVIDER: Successfully created OpenAI provider with project API key")
                     return provider
                 except Exception as openai_error:
                     logger.error(f"❌ LLM PROVIDER: Failed to create OpenAI provider: {openai_error}")
                     return None
-                
+
             elif provider_type in ['anthropic', 'claude']:
                 # Claude requires max_tokens, use a reasonable default
                 max_tokens = agent_config.get('max_tokens', 4096)
-                logger.info(f"✅ LLM PROVIDER: Creating Anthropic provider with project key, model {model}, max_tokens: {max_tokens}")
-                return ClaudeProvider(api_key=api_key, model=model, max_tokens=max_tokens)
-                
+                logger.info(f"✅ LLM PROVIDER: Creating Anthropic provider with project key, model {model}, max_tokens: {max_tokens}, temp={temperature}")
+                provider = ClaudeProvider(api_key=api_key, model=model, max_tokens=max_tokens)
+                provider.temperature = temperature
+                return provider
+
             elif provider_type in ['google', 'gemini']:
-                logger.info(f"✅ LLM PROVIDER: Creating Google provider with project key, model {model}")
-                return GeminiProvider(api_key=api_key, model=model)
+                logger.info(f"✅ LLM PROVIDER: Creating Google provider with project key, model {model}, temp={temperature}")
+                provider = GeminiProvider(api_key=api_key, model=model)
+                provider.temperature = temperature
+                return provider
                 
             else:
                 logger.error(f"❌ LLM PROVIDER: Unknown provider type: {provider_type}")

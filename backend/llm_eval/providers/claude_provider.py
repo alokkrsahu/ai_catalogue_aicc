@@ -89,6 +89,17 @@ class ClaudeProvider(LLMProvider):
                 tool_choice = kwargs.get("tool_choice")
                 if tool_choice:
                     body["tool_choice"] = tool_choice
+            # Sampling parameters — pass through when supplied by the caller.
+            # Claude defaults to temperature=1.0 when omitted; propagate the
+            # caller-configured value to prevent cross-language token drift.
+            # Fallback order: explicit kwarg → self.temperature (set by
+            # llm_provider_manager from agent_config) → omit (API default).
+            temperature = kwargs.get("temperature", getattr(self, "temperature", None))
+            if temperature is not None:
+                body["temperature"] = float(temperature)
+            top_p = kwargs.get("top_p")
+            if top_p is not None:
+                body["top_p"] = float(top_p)
             return body
         elif prompt:
             # Fallback to prompt string (backward compatibility)

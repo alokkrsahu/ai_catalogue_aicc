@@ -519,7 +519,17 @@ def _generate_llm_response(message: str, context_results: List[Dict], conversati
         messages = []
         
         # Build system message with knowledge base
-        system_parts = [config.system_prompt]
+        # Language guardrail: always English, never mix scripts. Appended
+        # after the admin-configured system_prompt so it takes precedence
+        # over any implicit multilingual sampling from the base model.
+        _LANGUAGE_RULE = (
+            "LANGUAGE: Respond in English only. Every word of your response must be in English. "
+            "Do NOT emit non-English words (e.g. Hindi, Chinese, Arabic, Cyrillic, or any other "
+            "script) even when equivalent phrasing exists in another language — always pick the "
+            "English equivalent. If a source document is in another language, translate relevant "
+            "excerpts to English when quoting rather than copying the original script."
+        )
+        system_parts = [config.system_prompt, _LANGUAGE_RULE]
         if chromadb_content:
             system_parts.append("\n=== KNOWLEDGE BASE ===")
             system_parts.append(chromadb_content)
@@ -986,7 +996,17 @@ def _generate_streaming_llm_response(message: str, context_results: list, conver
         messages = []
         
         # Build system message with knowledge base
-        system_parts = [config.system_prompt]
+        # Language guardrail: always English, never mix scripts. Appended
+        # after the admin-configured system_prompt so it takes precedence
+        # over any implicit multilingual sampling from the base model.
+        _LANGUAGE_RULE = (
+            "LANGUAGE: Respond in English only. Every word of your response must be in English. "
+            "Do NOT emit non-English words (e.g. Hindi, Chinese, Arabic, Cyrillic, or any other "
+            "script) even when equivalent phrasing exists in another language — always pick the "
+            "English equivalent. If a source document is in another language, translate relevant "
+            "excerpts to English when quoting rather than copying the original script."
+        )
+        system_parts = [config.system_prompt, _LANGUAGE_RULE]
         if chromadb_content:
             system_parts.append("\n=== KNOWLEDGE BASE ===")
             system_parts.append(chromadb_content)
