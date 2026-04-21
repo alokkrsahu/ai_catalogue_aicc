@@ -2243,9 +2243,13 @@ def public_chat_endpoint_stream(request, project_id):
 
             # Strip ---CITATIONS--- block from the response before streaming.
             # Citations are sent as a separate SSE event after the content stream.
+            # Tolerant opener: the LLM occasionally drops the leading `---` on
+            # the opener (emitting bare `CITATIONS`) — accept both forms but
+            # still require the full `---END_CITATIONS---` closer, so we don't
+            # over-match when the body legitimately contains the word.
             import re as _re
             _citations_match = _re.search(
-                r'---CITATIONS---\s*([\s\S]*?)\s*---END_?CITATIONS---',
+                r'(?:---)?CITATIONS(?:---)?\s*([\s\S]*?)\s*---END_?CITATIONS---',
                 assistant_response,
             )
             parsed_citations_json = None
@@ -4042,7 +4046,11 @@ def embed_chatbot_html(request, project_id):
   let _activeCiteTooltip = null;
 
   function parseCitations(text) {{
-    const pattern = /---CITATIONS---\\s*([\\s\\S]*?)\\s*---END_CITATIONS---/;
+    // Tolerant opener: the LLM occasionally drops the leading `---` on the
+    // opener (emitting bare `CITATIONS`) — accept both forms but still require
+    // the full `---END_CITATIONS---` closer so we don't over-match when the
+    // body legitimately contains the word.
+    const pattern = /(?:---)?CITATIONS(?:---)?\\s*([\\s\\S]*?)\\s*---END_CITATIONS---/;
     const m = text.match(pattern);
     if (!m) return {{ cleanText: text, citations: [] }};
     var cleanText = text.slice(0, m.index).trim();
