@@ -180,24 +180,85 @@ def _request_origin_is_allowed(request, deployment) -> bool:
     ).exists()
 
 
+def _is_trusted_admin_app_request(request) -> bool:
+    """True when the request originated from the admin app itself — i.e.
+    from a page on one of settings.CORS_ALLOWED_ORIGINS. Used to bypass
+    public-chat auth for the in-app admin chatbot iframe, which is a
+    different surface from the external public chat page.
+
+    Signals (any one is sufficient):
+      - Origin header matches a trusted app origin (set by browsers for
+        cross-origin XHR and some iframe loads).
+      - Referer header's origin matches a trusted app origin (always set
+        for iframe document navigations initiated by an admin-app page).
+    Browsers reliably set these; neither can be spoofed cross-site."""
+    from django.conf import settings
+    from urllib.parse import urlparse
+
+    trusted = {
+        (o or '').strip().rstrip('/').lower()
+        for o in getattr(settings, 'CORS_ALLOWED_ORIGINS', [])
+        if o
+    }
+    trusted.discard('')
+    if not trusted:
+        return False
+
+    origin = (request.META.get('HTTP_ORIGIN') or '').strip().rstrip('/').lower()
+    if origin and origin in trusted:
+        return True
+
+    referer = (request.META.get('HTTP_REFERER') or '').strip()
+    if referer:
+        parsed = urlparse(referer)
+        if parsed.scheme and parsed.netloc:
+            ref_origin = f"{parsed.scheme}://{parsed.netloc}".rstrip('/').lower()
+            if ref_origin in trusted:
+                return True
+
+    return False
+
+
 def _enforce_public_chat_auth(request, deployment):
     """Composed guard for public-facing endpoints.
 
-    Rules:
-      1. If the request carries a pchat cookie AND public_url_enabled=False
-         → reject (the /chat/<id> pathway has been closed by the admin;
-         live sessions must die immediately regardless of auth setting).
-      2. If public_url_auth_enabled=False → allow (legacy surfaces
-         — admin in-app chatbot, allowed-origin iframes — work unchanged).
-      3. Otherwise require one of:
+    Rules (evaluated in this order — order matters):
+      1. If the request came from the admin app itself (Referer/Origin in
+         settings.CORS_ALLOWED_ORIGINS) → allow. The in-app chatbot iframe
+         is a different surface from the external public chat page; the
+         admin is already authenticated to the main app, and a stale pchat
+         cookie from a prior /chat/<id> session should not block them.
+      2. If public_url_auth_enabled=False → allow. External embeds on
+         allowed origins and deployments that haven't opted into password
+         auth live here. Stale pchat cookies are harmless when auth isn't
+         enforced.
+      3. If the request carries a pchat cookie AND public_url_enabled=False
+         → reject (kill-switch: when the admin flips the public URL off
+         while auth is still required, active /chat/<id> sessions must die
+         immediately). Only reachable when rules 1 and 2 did NOT short-
+         circuit — i.e. the request is an external one with auth required.
+      4. Otherwise require one of:
            (a) valid public-chat cookie for this deployment, or
-           (b) request Origin is in the allowed-origin list.
+           (b) request Origin is in the per-deployment allowed-origin list.
 
     Returns None when allowed, or a JsonResponse with 401 when blocked.
     """
+    # Rule 1 — in-app admin iframe. The admin app's own origin sits in
+    # CORS_ALLOWED_ORIGINS; any request whose Referer/Origin matches is
+    # definitionally an admin session (browsers don't let cross-site pages
+    # forge these). This bypasses both the kill-switch and the auth gate.
+    if _is_trusted_admin_app_request(request):
+        return None
+
+    # Rule 2 — public-chat auth not required. External allowed-origin
+    # iframes and opt-out deployments go through here.
+    if not getattr(deployment, 'public_url_auth_enabled', False):
+        return None
+
     has_pchat_cookie = bool(request.COOKIES.get(_public_chat_cookie_name(deployment)))
 
-    # Rule 1 — public URL flipped off with a still-circulating cookie.
+    # Rule 3 — public URL flipped off with a still-circulating cookie
+    # (kill-switch for live auth-gated external sessions).
     if has_pchat_cookie and not getattr(deployment, 'public_url_enabled', False):
         response = JsonResponse(
             {'error': 'This chat is no longer available', 'authRequired': True},
@@ -208,11 +269,7 @@ def _enforce_public_chat_auth(request, deployment):
         _clear_public_chat_cookie(response, deployment)
         return response
 
-    # Rule 2 — auth not required, nothing else to check.
-    if not getattr(deployment, 'public_url_auth_enabled', False):
-        return None
-
-    # Rule 3 — auth required.
+    # Rule 4 — external auth required, validate.
     if _verify_public_chat_cookie(request, deployment):
         return None
     if _request_origin_is_allowed(request, deployment):
