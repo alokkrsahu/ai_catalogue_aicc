@@ -65,9 +65,26 @@ export const load: LayoutLoad = async ({ url }) => {
     const finalIsAdmin = currentUserData?.role === 'ADMIN'; // Check role from potentially updated user data
     const path = url.pathname || '/';
 
+    // Routes a visitor can reach without being signed into the MAIN system.
+    // `/chat/<project_id>` is the public chat URL — end-users visiting this
+    // link are NOT supposed to see the main-system login page. The page
+    // itself handles its own public-chat auth (password form inside the
+    // page when auth_required=true), so we MUST NOT redirect them to
+    // `/login`. The root layout also hides the main nav on `/chat/*` so
+    // no main-system chrome leaks to these users.
+    //
+    // Security: this only prevents the auth-redirect for the /chat path —
+    // any attempt to navigate to other protected routes (/features/*,
+    // /admin/*, etc.) still triggers the redirect to /login, and the
+    // backend still requires a valid JWT for main-system APIs. The
+    // public-chat user cannot escalate into the main app from this bypass.
     const publicRoutes = ['/login', '/reset-password'];
-    const isPublicRoute = publicRoutes.some(r => path === r || path.startsWith('/reset-password/'));
+    const isPublicRoute =
+        publicRoutes.some(r => path === r) ||
+        path.startsWith('/reset-password/') ||
+        path.startsWith('/chat/');
     const isAdminRoute = path.startsWith('/admin');
+    const isPublicChatRoute = path.startsWith('/chat/');
 
     console.log(`+layout.ts: Redirect check - Path=${path}, Auth=${finalIsAuthenticated}, Admin=${finalIsAdmin}, PublicRoute=${isPublicRoute}, AdminRoute=${isAdminRoute}`);
 
@@ -75,7 +92,11 @@ export const load: LayoutLoad = async ({ url }) => {
         console.log('+layout.ts: Redirecting unauthenticated user to login.');
         // Use { replaceState: true } to avoid polluting browser history with redirects
         goto('/login', { replaceState: true });
-    } else if (finalIsAuthenticated && isPublicRoute) {
+    } else if (finalIsAuthenticated && isPublicRoute && !isPublicChatRoute) {
+        // Authenticated admins landing on /login or /reset-password bounce
+        // to dashboard. But /chat/<id> is legitimately viewable by
+        // authenticated admins too (same page, same iframe), so don't
+        // bounce them away from their own deployment's public URL.
         console.log('+layout.ts: Redirecting authenticated user from public route to dashboard.');
         goto('/', { replaceState: true });
     } else if (finalIsAuthenticated && isAdminRoute && !finalIsAdmin) {
