@@ -3028,7 +3028,7 @@ def embed_chatbot_html(request, project_id):
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>{chatbot_title}</title>
   <style>
     :root {{
@@ -3909,6 +3909,76 @@ def embed_chatbot_html(request, project_id):
     @keyframes actItemIn {{
       from {{ opacity: 0; transform: translateX(-6px); }}
       to {{ opacity: 1; transform: translateX(0); }}
+    }}
+
+    /* ──────────────────────────────────────────────────────────────────
+       Mobile (≤640px) — touch-friendly UX
+       Uses dynamic viewport units (`dvh`) so the chat fits cleanly when
+       mobile browser chrome shows/hides and when the soft keyboard opens.
+       Bumps tap targets to 44px (WCAG), 16px input font (prevents iOS
+       auto-zoom), and lets citation tooltips fit narrow viewports.
+       ────────────────────────────────────────────────────────────── */
+    @media (max-width: 640px) {{
+      html, body {{
+        height: 100dvh;
+        min-height: -webkit-fill-available; /* iOS Safari fallback */
+      }}
+      .chat-container {{
+        height: 100dvh;
+        max-height: 100dvh;
+      }}
+      .chat-header {{
+        padding-top: max(16px, env(safe-area-inset-top));
+      }}
+      .chat-messages {{
+        padding-left: 12px;
+        padding-right: 12px;
+      }}
+      .bubble {{
+        max-width: 92% !important;  /* override desktop's 85% — was clipping on 320px */
+        font-size: 14px;
+      }}
+      .chat-input-container {{
+        padding: 12px 12px max(12px, env(safe-area-inset-bottom));
+      }}
+      .chat-input textarea {{
+        font-size: 16px;            /* iOS auto-zoom threshold — must be ≥16px */
+        max-height: 30dvh;          /* never let the input dominate the screen */
+      }}
+      /* Bump every interactive button to a 44×44px tap target. Visual
+         padding stays comfortable; min-* enforces the WCAG floor. */
+      .chat-input button,
+      .file-attach-btn,
+      .copy-btn,
+      .icon-btn,
+      .send-btn {{
+        min-width: 44px;
+        min-height: 44px;
+      }}
+      /* Citation chips: keep visual size compact but expand the hit area. */
+      .cite-chip,
+      .cite-chip-secondary {{
+        position: relative;
+        min-height: 22px;
+        padding: 2px 8px;
+      }}
+      .cite-chip::after,
+      .cite-chip-secondary::after {{
+        content: '';
+        position: absolute;
+        inset: -10px;               /* invisible 10px expansion of tap area */
+      }}
+      /* Citation tooltips: span the viewport instead of being a 340px box
+         that overflows on phones. Anchored above the safe-area-bottom. */
+      .cite-tooltip {{
+        position: fixed !important;
+        left: 12px !important;
+        right: 12px !important;
+        bottom: calc(12px + env(safe-area-inset-bottom)) !important;
+        top: auto !important;
+        max-width: unset !important;
+        width: auto !important;
+      }}
     }}
   </style>
 </head>

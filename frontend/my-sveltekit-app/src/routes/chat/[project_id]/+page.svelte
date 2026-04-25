@@ -121,7 +121,7 @@
   <title>{config?.chatbot_title || 'Chat'}</title>
 </svelte:head>
 
-<div class="min-h-screen flex flex-col bg-neutral-50">
+<div class="public-chat-shell flex flex-col bg-neutral-50">
   {#if !available}
     <!-- State 1: Not available -->
     <div class="flex-1 flex items-center justify-center p-6">
@@ -165,7 +165,7 @@
               type="text"
               bind:value={username}
               autocomplete="username"
-              class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-[#002147] focus:border-[#002147]"
+              class="w-full rounded-lg border border-gray-300 px-3 py-3 min-h-[44px] text-base sm:text-sm focus:ring-[#002147] focus:border-[#002147]"
               required
             />
           </div>
@@ -176,7 +176,7 @@
               type="password"
               bind:value={password}
               autocomplete="current-password"
-              class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:ring-[#002147] focus:border-[#002147]"
+              class="w-full rounded-lg border border-gray-300 px-3 py-3 min-h-[44px] text-base sm:text-sm focus:ring-[#002147] focus:border-[#002147]"
               required
             />
           </div>
@@ -188,7 +188,7 @@
           <button
             type="submit"
             disabled={submitting}
-            class="w-full rounded-lg bg-[#002147] text-white text-sm font-medium py-2 hover:bg-blue-900 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            class="w-full rounded-lg bg-[#002147] text-white text-sm font-medium py-3 min-h-[44px] hover:bg-blue-900 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {submitting ? 'Signing in…' : 'Sign in'}
           </button>
@@ -222,7 +222,7 @@
         <button
           type="button"
           on:click={logout}
-          class="text-xs text-gray-500 hover:text-[#002147] px-3 py-1.5 rounded-md hover:bg-gray-100 transition-colors inline-flex items-center"
+          class="text-xs text-gray-500 hover:text-[#002147] px-3 py-2 min-h-[44px] rounded-md hover:bg-gray-100 transition-colors inline-flex items-center"
         >
           <i class="fas fa-sign-out-alt mr-1.5"></i>Sign out
         </button>
@@ -232,9 +232,28 @@
       <iframe
         title="Chat"
         src="/api/workflow-deploy/{projectId}/embed/?hide_header=1"
-        class="w-full h-full block border-0"
-        style="height: calc(100vh - 49px);"
+        class="public-chat-iframe w-full h-full block border-0"
       ></iframe>
     </main>
   {/if}
 </div>
+
+<style>
+  /* Use dynamic viewport units so the layout shrinks correctly when the
+     mobile browser chrome shows/hides and when the soft keyboard opens.
+     Falls back to vh on older browsers; min-height: -webkit-fill-available
+     covers iOS Safari versions before dvh support landed. */
+  .public-chat-shell {
+    min-height: 100vh;
+    min-height: 100dvh;
+    min-height: -webkit-fill-available;
+    /* Keep the header's top padding clear of the iOS notch when the page
+       is in viewport-fit=cover mode (set via the iframe's viewport meta;
+       this layer sits above the iframe and benefits too). */
+    padding-top: env(safe-area-inset-top);
+  }
+  .public-chat-iframe {
+    height: calc(100vh - 49px);
+    height: calc(100dvh - 49px);
+  }
+</style>

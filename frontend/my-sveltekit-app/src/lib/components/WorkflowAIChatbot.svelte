@@ -909,7 +909,8 @@
   .wf-chatbot-pill {
     position: fixed;
     right: 20px;
-    bottom: 20px;
+    /* Clear iOS home-indicator on devices with safe-area-bottom. */
+    bottom: max(20px, env(safe-area-inset-bottom));
     display: flex;
     align-items: center;
     gap: 8px;
@@ -923,9 +924,23 @@
     cursor: pointer;
     box-shadow: 0 6px 16px rgba(15, 23, 42, 0.12);
     transition: transform 0.15s ease, box-shadow 0.15s ease;
+    /* WCAG-friendly tap target on touch devices. */
+    min-height: 44px;
   }
   .wf-chatbot-pill:hover {
     transform: translateY(-1px);
     box-shadow: 0 10px 20px rgba(15, 23, 42, 0.18);
+  }
+
+  /* Tablet/phone: when expanded, take the full viewport instead of the
+     fixed right-side rail (the workflow canvas itself isn't usable on
+     touch, but the chat panel should at least be readable if opened). */
+  @media (max-width: 767px) {
+    .wf-chatbot {
+      width: 100vw !important;
+      max-width: 100vw !important;
+      right: 0 !important;
+      left: 0 !important;
+    }
   }
 </style>

@@ -265,6 +265,10 @@
   let lastChatbotStorageKey = '';
   /** Collapse project header on chatbot page for more vertical space */
   let chatbotHeaderExpanded = false;
+  /** Mobile drawer toggle for the conversation list — hidden by default on
+   *  phones, opens via the hamburger button. Desktop layout (≥md) ignores
+   *  this state entirely (the aside is always visible). */
+  let mobileChatbotNavOpen = false;
   
   const featureKeyToLabel: Record<string, string> = {
     document_management: 'Manage documents',
@@ -2651,19 +2655,28 @@
 
           <!-- Shared body: conversation rail + iframe (ALWAYS MOUNTED, never destroyed by toggle) -->
           <div class="{chatbotFullscreen
-            ? 'flex-1 min-h-0 flex flex-row w-full'
-            : 'flex flex-col md:flex-row gap-4 min-h-[600px] md:min-h-[700px] xl:min-h-[780px]'}">
+            ? 'flex-1 min-h-0 flex flex-row w-full relative'
+            : 'flex flex-col md:flex-row gap-4 min-h-[600px] md:min-h-[700px] xl:min-h-[780px] relative'}">
+            <!-- Mobile-only backdrop, visible while the drawer is open. Tap to dismiss. -->
+            {#if mobileChatbotNavOpen}
+              <button
+                type="button"
+                class="md:hidden fixed inset-0 z-30 bg-black/40 backdrop-blur-[1px]"
+                aria-label="Close conversations"
+                on:click={() => (mobileChatbotNavOpen = false)}
+              ></button>
+            {/if}
             <aside
-              class="{chatbotFullscreen
-                ? 'w-64 shrink-0 border-r border-slate-200 bg-white flex flex-col min-h-0'
-                : 'w-full md:w-56 shrink-0 bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col min-h-[200px] md:min-h-0 md:max-h-[780px] overflow-hidden'}"
+              class="chatbot-conv-rail {mobileChatbotNavOpen ? 'mobile-open' : ''} {chatbotFullscreen
+                ? 'md:w-64 md:shrink-0 md:border-r md:border-slate-200 md:bg-white md:flex md:flex-col md:min-h-0 md:relative md:translate-x-0'
+                : 'md:w-56 md:shrink-0 md:bg-white md:rounded-2xl md:border md:border-slate-200 md:shadow-sm md:flex md:flex-col md:min-h-0 md:max-h-[780px] md:overflow-hidden md:relative md:translate-x-0'} bg-white flex flex-col"
               aria-label="Conversations"
             >
               <div class="p-3 border-b border-slate-200 shrink-0">
                 <button
                   type="button"
-                  class="w-full inline-flex items-center justify-center px-3 py-2 text-sm font-medium bg-[#002147] text-white rounded-lg hover:bg-blue-900 transition-colors shadow-sm"
-                  on:click={handleNewChatbotConversation}
+                  class="w-full inline-flex items-center justify-center px-3 py-3 min-h-[44px] text-sm font-medium bg-[#002147] text-white rounded-lg hover:bg-blue-900 transition-colors shadow-sm"
+                  on:click={() => { handleNewChatbotConversation(); mobileChatbotNavOpen = false; }}
                   title="Start a new conversation"
                 >
                   <i class="fas fa-plus mr-2"></i>
@@ -2687,11 +2700,11 @@
                     <div class="relative group">
                       <button
                         type="button"
-                        class="w-full text-left rounded-lg px-3 py-2 pr-8 text-sm transition-colors
+                        class="w-full text-left rounded-lg px-3 py-3 pr-8 text-sm transition-colors min-h-[44px]
                           {activeChatbotSessionId === session.id
                           ? 'bg-slate-100 text-[#002147] font-medium'
                           : 'text-gray-700 hover:bg-slate-50'}"
-                        on:click={() => selectChatbotSession(session.id)}
+                        on:click={() => { selectChatbotSession(session.id); mobileChatbotNavOpen = false; }}
                       >
                         <span class="block truncate">{session.label}</span>
                         {#if session.preview}
@@ -2721,9 +2734,19 @@
             </aside>
             <div
               class="{chatbotFullscreen
-                ? 'flex-1 min-h-0 min-w-0 flex flex-col bg-white'
-                : 'flex-1 min-w-0 bg-white rounded-2xl shadow-md border border-slate-200 min-h-[400px] md:min-h-0 h-[480px] md:h-[700px] xl:h-[780px] flex flex-col overflow-hidden'}"
+                ? 'flex-1 min-h-0 min-w-0 flex flex-col bg-white relative'
+                : 'flex-1 min-w-0 bg-white rounded-2xl shadow-md border border-slate-200 min-h-[400px] md:min-h-0 h-[480px] md:h-[700px] xl:h-[780px] flex flex-col overflow-hidden relative'}"
             >
+              <!-- Mobile-only hamburger to open the conversation drawer.
+                   Hidden on ≥md where the rail is always visible. -->
+              <button
+                type="button"
+                class="md:hidden absolute top-2 left-2 z-20 inline-flex items-center justify-center w-11 h-11 rounded-lg bg-white/90 border border-slate-200 shadow-sm text-[#002147] hover:bg-white"
+                aria-label="Open conversations"
+                on:click={() => (mobileChatbotNavOpen = true)}
+              >
+                <i class="fas fa-bars text-base"></i>
+              </button>
               {#key activeChatbotSessionId}
                 <iframe
                   title="In-App Chatbot"
@@ -2820,6 +2843,30 @@
   }
   .chatbot-fullscreen-active {
     animation: chatbotFullscreenEnter 0.25s ease-out;
+  }
+
+  /* Mobile drawer for the conversation rail. On ≥md the rail is part of
+     the normal flex layout (set inline via Tailwind classes). On phones
+     it becomes a fixed slide-in panel from the left, dismissed by tapping
+     the backdrop. */
+  @media (max-width: 767px) {
+    :global(.chatbot-conv-rail) {
+      position: fixed;
+      top: 0;
+      bottom: 0;
+      left: 0;
+      width: min(86vw, 320px);
+      max-width: 320px;
+      z-index: 40;
+      transform: translateX(-100%);
+      transition: transform 0.25s ease;
+      box-shadow: 4px 0 24px rgba(0, 0, 0, 0.15);
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+    :global(.chatbot-conv-rail.mobile-open) {
+      transform: translateX(0);
+    }
   }
 
   @keyframes chatbotFullscreenEnter {
