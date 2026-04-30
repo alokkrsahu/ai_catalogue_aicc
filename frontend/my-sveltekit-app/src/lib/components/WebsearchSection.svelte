@@ -34,7 +34,7 @@
   export let onChange: () => void = () => {};
 
   // Must stay in lock-step with backend WEBSEARCH_CONFIG.MAX_URLS_PER_AGENT.
-  const MAX_URLS_PER_AGENT = 50;
+  const MAX_URLS_PER_AGENT = 100;
 
   // ---- URL indexing state ------------------------------------------------
   let syncingWebIndex = false;

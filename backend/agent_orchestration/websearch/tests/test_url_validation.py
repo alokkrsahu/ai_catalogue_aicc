@@ -75,7 +75,7 @@ class CleanUrlListTests(TestCase):
 
     @override_settings(WEBSEARCH_CONFIG={'MAX_URLS_PER_AGENT': 'not-a-number'})
     def test_bad_config_falls_back_to_default(self):
-        self.assertEqual(get_max_urls_per_agent(), 50)
+        self.assertEqual(get_max_urls_per_agent(), 100)
 
     def test_http_and_https_both_accepted(self):
         urls, _, _ = clean_url_list([

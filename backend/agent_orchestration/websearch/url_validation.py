@@ -12,12 +12,12 @@ from django.conf import settings
 
 
 def get_max_urls_per_agent() -> int:
-    """Return the configured per-agent URL cap. Defaults to 50."""
+    """Return the configured per-agent URL cap. Defaults to 100."""
     websearch_config = getattr(settings, 'WEBSEARCH_CONFIG', {})
     try:
-        value = int(websearch_config.get('MAX_URLS_PER_AGENT', 50))
+        value = int(websearch_config.get('MAX_URLS_PER_AGENT', 100))
     except (TypeError, ValueError):
-        value = 50
+        value = 100
     return max(1, value)
 
 

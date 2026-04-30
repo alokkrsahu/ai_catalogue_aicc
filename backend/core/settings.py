@@ -296,7 +296,7 @@ WEBSEARCH_CONFIG = {
     'MAX_HTML_BYTES': 2_000_000,  # ~2 MB
     # Maximum number of URLs a single agent can configure for URL mode.
     # Protects against runaway parallel fetches and embed batches.
-    'MAX_URLS_PER_AGENT': 50,
+    'MAX_URLS_PER_AGENT': 100,
 }
 
 # Vector Search Settings
