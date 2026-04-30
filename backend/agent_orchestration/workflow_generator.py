@@ -1242,13 +1242,24 @@ class WorkflowBuilder:
         web_search = args.get("web_search_enabled", False)
         doc_aware = args.get("doc_aware", False)
 
-        # web_search and doc_aware force-enable doc_tool_calling
-        if web_search or doc_aware:
+        # Resolve the websearch mode now so the rest of the cascade can see it.
+        # URL mode delivers content via system-prompt injection — it does NOT need
+        # the tool-calling loop. General/domains modes do.
+        ws_mode = (args.get("web_search_mode") or "").lower()
+        if web_search and not ws_mode:
+            ws_mode = "general"
+        ws_needs_tools = web_search and ws_mode != "urls"
+
+        # Tool-calling-mode websearch and doc_aware force-enable doc_tool_calling
+        if ws_needs_tools or doc_aware:
             doc_tool_calling = True
 
-        # If doc_tool_calling is off, cascade-disable dependents
+        # If doc_tool_calling is off, cascade-disable dependents — except URL-mode
+        # websearch, which works independently (excerpts go straight into the
+        # system prompt; no tool loop required).
         if not doc_tool_calling:
-            web_search = False
+            if not (web_search and ws_mode == "urls"):
+                web_search = False
             doc_aware = False
 
         return {
@@ -1259,7 +1270,7 @@ class WorkflowBuilder:
             "search_method": "hybrid_search" if doc_aware else "",
             "vector_collections": ["project_documents"] if doc_aware else [],
             "web_search_enabled": web_search,
-            "web_search_mode": "general" if web_search else "",
+            "web_search_mode": (ws_mode if ws_mode else "general") if web_search else "",
             "web_search_cache_ttl": 2592000 if web_search else 0,
             "web_search_max_results": min(max(args.get("web_search_max_results", 5), 1), 20) if web_search else 0,
             "web_search_top_k": min(max(args.get("web_search_top_k", 5), 1), 20) if web_search else 0,

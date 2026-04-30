@@ -2781,9 +2781,18 @@
                   nodeConfig.doc_tool_calling_documents = [];
                   nodeConfig.doc_aware = false;
                   nodeConfig.search_method = '';
-                  nodeConfig.web_search_enabled = false;
-                  nodeConfig.web_search_urls = [];
-                  nodeConfig.web_search_domains = [];
+                  // URL-mode websearch is independent of doc_tool_calling —
+                  // its excerpts go straight into the system prompt, no tool
+                  // loop required. Preserve it so the user's saved URLs and
+                  // their summaries don't get wiped (and orphan-cleanup
+                  // deleted) just because they toggled doc_tool_calling off.
+                  // General/domains websearch DOES need the tool loop, so
+                  // those modes still cascade-disable.
+                  if (nodeConfig.web_search_mode !== 'urls') {
+                    nodeConfig.web_search_enabled = false;
+                    nodeConfig.web_search_urls = [];
+                    nodeConfig.web_search_domains = [];
+                  }
                 }
                 nodeConfig = { ...nodeConfig };
                 updateNodeData();

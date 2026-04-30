@@ -740,7 +740,31 @@ class WorkflowExecutor:
                                     f"chat text attachment(s) already in context"
                                 )
 
-                            if (node_data.get('doc_tool_calling') or _ws_needs_tool_loop or _da_enabled) and not _skip_doc_tool_for_chat_upload:
+                            # URL-only websearch agents (web_search_mode='urls', no docs,
+                            # no DocAware) get doc_tool_calling=True forced by the legacy
+                            # toggle resolver, but they have nothing to call — the URL
+                            # excerpts already sit in the system prompt. Routing them
+                            # through _execute_doc_tool_calling adds info tools and a
+                            # "MUST use document tools" instruction that makes the LLM
+                            # answer "no documents found" while ignoring the URL block.
+                            _url_only_websearch = (
+                                _ws_enabled
+                                and not _ws_needs_tool_loop  # URL mode
+                                and _no_project_docs
+                                and not _da_enabled
+                            )
+                            if _url_only_websearch:
+                                logger.info(
+                                    f"⏭️ URL-ONLY BYPASS: Skipping tool loop for {node_name} — "
+                                    f"URL-mode websearch with no docs / no DocAware; "
+                                    f"excerpts are already in the system prompt"
+                                )
+
+                            if (
+                                (node_data.get('doc_tool_calling') or _ws_needs_tool_loop or _da_enabled)
+                                and not _skip_doc_tool_for_chat_upload
+                                and not _url_only_websearch
+                            ):
                                 agent_response_text, _synthesis_citations = await self._execute_doc_tool_calling(
                                     node=node,
                                     node_name=node_name,
@@ -2429,7 +2453,13 @@ class WorkflowExecutor:
             tools, tool_map, title_map = await document_tool_service.build_document_tools(
                 project_id, selected_filenames=doc_tool_selected
             )
-            tools.extend(document_tool_service.build_document_info_tools())
+            # Info tools (list_files / count_files / get_summaries / find_relevant)
+            # only make sense when there is at least one real read_doc_* tool to
+            # introspect. Otherwise they collapse to "0 documents" calls that make
+            # the LLM answer "no documents found" while ignoring URL-mode excerpts
+            # already in the system prompt.
+            if tool_map:
+                tools.extend(document_tool_service.build_document_info_tools())
 
         # ---- Pre-warm: upload all tool documents to LLM provider in parallel ----
         if tool_map:
@@ -3843,7 +3873,26 @@ class WorkflowExecutor:
                 _ws_needs_tool_p = _ws_enabled_p and _ws_handler_p.get_websearch_mode(node) != 'urls'
                 _da_handler_p = getattr(self.chat_manager, 'docaware_handler', None)
                 _da_enabled_p = _da_handler_p and _da_handler_p.is_docaware_enabled(node)
-                _needs_tool_calling = node_data.get('doc_tool_calling') or _ws_needs_tool_p or _da_enabled_p
+                # URL-only websearch agents skip the tool loop — see sequential path
+                # for the rationale (avoid the "MUST use document tools" instruction
+                # making the LLM ignore URL excerpts already in the system prompt).
+                _doc_selected_p = node_data.get('doc_tool_calling_documents')
+                _no_project_docs_p = isinstance(_doc_selected_p, list) and len(_doc_selected_p) == 0
+                _url_only_websearch_p = (
+                    _ws_enabled_p
+                    and not _ws_needs_tool_p  # URL mode
+                    and _no_project_docs_p
+                    and not _da_enabled_p
+                )
+                if _url_only_websearch_p:
+                    logger.info(
+                        f"⏭️ URL-ONLY BYPASS (parallel): Skipping tool loop for {node_name} — "
+                        f"URL-mode websearch with no docs / no DocAware"
+                    )
+                _needs_tool_calling = (
+                    (node_data.get('doc_tool_calling') or _ws_needs_tool_p or _da_enabled_p)
+                    and not _url_only_websearch_p
+                )
 
                 _local_messages = []
                 _local_citations = []
