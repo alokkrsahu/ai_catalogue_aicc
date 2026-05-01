@@ -131,6 +131,10 @@ def _build_system_prompt(downstream_agents: List[Dict[str, Any]], overlap_allowe
         "Rules:",
         "- You MUST call exactly ONE tool: `allocate_subtasks`. Do not answer in prose.",
         "- Each allocation's `agent_name` MUST match one of the agents listed below.",
+        "- LANGUAGE: All subtask descriptions and reasoning strings MUST be written in "
+        "English only. Do NOT emit non-English words (Hindi, Arabic, Chinese, Cyrillic, "
+        "or any other non-Latin script) even when the input contains non-English text — "
+        "translate any relevant content to English when writing the subtask.",
     ]
     if overlap_allowed:
         lines.append(

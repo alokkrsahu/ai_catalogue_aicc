@@ -144,6 +144,8 @@ Example usage:
 docs = retrieve_documents("financial projections", limit=3)
 for doc in docs:
     print(f"From {doc['metadata']['source']}: {doc['content']}")
+
+LANGUAGE: You MUST respond in English only. Every word of your response must be in English. Do NOT emit non-English words (Hindi, Arabic, Chinese, Cyrillic, or any other non-Latin script) even when source documents contain non-English text — translate relevant excerpts to English when quoting rather than copying the original script.
 """
         
         # Create enhanced configuration

@@ -141,6 +141,8 @@ def build_classifier_system_prompt(categories: List[Dict[str, Any]]) -> str:
         "- You MUST call exactly one tool. Do not answer in prose.",
         "- Do not call more than one tool, and do not call none.",
         "- Pick the single best match even if the fit is imperfect.",
+        "- LANGUAGE: Your reasoning string MUST be in English only. Do NOT emit "
+        "non-English words regardless of the input language.",
         "",
         "Categories:",
     ]
