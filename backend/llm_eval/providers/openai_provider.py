@@ -78,12 +78,14 @@ class OpenAIProvider(LLMProvider):
                 # Assistant message — may have tool_calls or plain text
                 tool_calls = msg.get("tool_calls")
                 if tool_calls:
-                    # Convert Chat Completions tool_calls format to Responses API function_call items
+                    # Convert Chat Completions tool_calls format to Responses API function_call items.
+                    # The Responses API requires "call_id" (not "id") on function_call input items —
+                    # it must match the call_id from the original function_call output item.
                     for tc in tool_calls:
                         fn = tc.get("function", {})
                         input_items.append({
                             "type": "function_call",
-                            "id": tc.get("id", ""),
+                            "call_id": tc.get("id", ""),
                             "name": fn.get("name", ""),
                             "arguments": fn.get("arguments", "{}"),
                         })
@@ -133,14 +135,19 @@ class OpenAIProvider(LLMProvider):
                         if t is not None:
                             text_parts.append(str(t))
             elif item.get("type") == "function_call":
-                # Convert Responses API function_call to Chat Completions tool_calls format
+                # Normalize to the same flat format as the Chat Completions path so
+                # _run_single_tool can access tc["name"] and tc["arguments"] uniformly.
+                # Prioritise call_id over id: call_id is the pairing key that must be
+                # echoed back in function_call_output; id is just the output-item UUID.
+                raw_args = item.get("arguments", "{}")
+                try:
+                    parsed_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                except (json.JSONDecodeError, TypeError):
+                    parsed_args = {"raw": raw_args}
                 tool_calls.append({
-                    "id": item.get("id", item.get("call_id", "")),
-                    "type": "function",
-                    "function": {
-                        "name": item.get("name", ""),
-                        "arguments": item.get("arguments", "{}"),
-                    }
+                    "id": item.get("call_id", item.get("id", "")),
+                    "name": item.get("name", ""),
+                    "arguments": parsed_args,
                 })
         text = "".join(text_parts)
         if tool_calls:

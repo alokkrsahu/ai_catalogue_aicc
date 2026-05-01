@@ -2217,8 +2217,12 @@ def public_chat_endpoint_stream(request, project_id):
                 return
 
             execution_result = result_holder[0]
+            if execution_result is None:
+                err = result_holder[1] or 'Workflow execution did not complete'
+                yield f"data: {json.dumps({'type': 'error', 'error': str(err), 'request_id': request_id})}\n\n"
+                return
             execution_time_ms = int((timezone.now() - start_time).total_seconds() * 1000)
-            
+
             # Handle different execution results (persist session on each path so user message is not lost)
             if execution_result.get('status') == 'awaiting_human_input':
                 threading.Thread(

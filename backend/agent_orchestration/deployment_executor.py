@@ -120,18 +120,33 @@ class WorkflowDeploymentExecutor:
                     # Return the awaiting_human_input status directly - deployment views will handle it
                     return execution_result
                 
+                execution_time_ms = int((time.time() - start_time) * 1000)
+                result_execution_id = execution_result.get('execution_id')
+
+                # Propagate workflow-level failures instead of silently returning an
+                # empty success — otherwise deployment_views yields "No response generated"
+                # instead of the real error (e.g. missing LLM config on a SplitterAgent).
+                if execution_result.get('status') == 'failed':
+                    error_msg = (
+                        execution_result.get('error_message')
+                        or execution_result.get('error')
+                        or 'Workflow execution failed'
+                    )
+                    logger.error(f"❌ DEPLOYMENT: Propagating workflow failure: {error_msg}")
+                    return {
+                        'status': 'error',
+                        'error': error_msg,
+                        'execution_time_ms': execution_time_ms,
+                        'execution_id': result_execution_id,
+                    }
+
                 # Extract End node messages as response (and optional synthesis citations)
                 end_node_output, response_citations = self._extract_end_node_output(
                     execution_result, graph_json
                 )
-                
-                execution_time_ms = int((time.time() - start_time) * 1000)
-                
+
                 logger.info(f"✅ DEPLOYMENT: Workflow execution completed in {execution_time_ms}ms")
-                
-                # Get execution_id from execution_result or use provided one
-                result_execution_id = execution_result.get('execution_id')
-                
+
                 # Ensure we have a valid response
                 if not end_node_output and execution_result.get('status') == 'success':
                     logger.warning(f"⚠️ DEPLOYMENT: No response extracted, but execution status is success - using fallback")
@@ -141,7 +156,7 @@ class WorkflowDeploymentExecutor:
                         # Extract last assistant response from conversation history
                         end_node_output = self._extract_last_assistant_from_history(conv_history)
                         response_citations = []
-                
+
                 return {
                     'status': 'success',
                     'response': end_node_output or '',
