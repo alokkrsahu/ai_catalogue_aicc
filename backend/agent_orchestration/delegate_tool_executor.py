@@ -344,7 +344,12 @@ async def run_delegate_doc_tool_loop(
         })
         plan_resp = await delegate_llm.generate_response(messages=planning_messages)
         if plan_resp.error:
-            return f"[Error from {delegate_name} planning: {plan_resp.error}]"
+            # Raise so the manager surfaces the planning failure as a real error
+            # instead of silently treating the placeholder string as the
+            # delegate's actual answer (would propagate into final synthesis).
+            raise RuntimeError(
+                f"Delegate {delegate_name} planning error: {plan_resp.error}"
+            )
         plan_text = plan_resp.text.strip()
         logger.info(
             f"📋 DELEGATE TOOL EXEC [{delegate_name}]: Plan created ({len(plan_text)} chars)"
@@ -716,6 +721,14 @@ async def execute_tool_based_delegation(
                 f"Available delegate tools:\n{tool_names_listing}\n\n"
                 "After receiving all delegate results, provide a comprehensive "
                 "final answer that synthesizes their outputs.\n\n"
+                "Failure handling: if a delegate's tool result starts with "
+                "`[DELEGATE_ERROR:` it means that delegate's execution failed "
+                "and produced no usable output. Treat the failed delegate as "
+                "unavailable: do NOT include its (empty) content in your "
+                "synthesis, do NOT quote the error string back to the user, "
+                "and do NOT mention the failure unless the entire answer cannot "
+                "be produced without it. If most delegates succeeded, build the "
+                "answer from the successful ones.\n\n"
                 "IMPORTANT — Citation requirements:\n"
                 "- Preserve ALL inline citations [1], [2], etc. from delegate responses.\n"
                 "- Each citation number must reference a SPECIFIC PASSAGE, not an entire document.\n"
@@ -730,6 +743,7 @@ async def execute_tool_based_delegation(
 
     conversation_log: List[str] = []
     delegate_results: Dict[str, List[str]] = {}
+    errored_delegates: Dict[str, str] = {}  # delegate_name → short reason
     total_tool_calls = 0
 
     for iteration in range(MAX_DELEGATION_ITERATIONS):
@@ -797,10 +811,17 @@ async def execute_tool_based_delegation(
                         docaware_handler=docaware_handler,
                         execution_id=execution_id,
                     )
+                    errored = False
                 except Exception as exc:
                     logger.error(f"Delegate {delegate_name} execution failed: {exc}")
-                    result = f"[Delegate {delegate_name} execution error: {exc}]"
-                return tc, result
+                    # Short, recognisable sentinel — the manager's system
+                    # prompt (built above) tells the LLM to skip these. The
+                    # full reason is captured in errored_delegates for
+                    # logging + the forced-synthesis path. Keep the sentinel
+                    # short so it doesn't pollute the manager's context.
+                    result = f"[DELEGATE_ERROR: {delegate_name}]"
+                    errored = True
+                return tc, result, errored
 
             # #region agent log
             _tc_names = [tc.get("name","?") for tc in pending]; _tc_ids = [tc.get("id","?") for tc in pending]
@@ -811,7 +832,7 @@ async def execute_tool_based_delegation(
             )
 
             calls_with_results = []
-            for tc, result_text in gather:
+            for tc, result_text, errored in gather:
                 delegate_node = tool_map.get(tc["name"])
                 delegate_name = (
                     delegate_node.get("data", {}).get("name", tc["name"])
@@ -824,7 +845,13 @@ async def execute_tool_based_delegation(
                 conversation_log.append(
                     f"{delegate_name}: {result_text[:500]}"
                 )
-                delegate_results.setdefault(delegate_name, []).append(result_text)
+                if errored:
+                    # Record the most recent failure reason — the result_text
+                    # is the short sentinel, so we keep a slightly fuller
+                    # marker for the forced-synthesis path / logging only.
+                    errored_delegates[delegate_name] = "execution failed during delegation"
+                else:
+                    delegate_results.setdefault(delegate_name, []).append(result_text)
 
             # #region agent log
             _cwr = [{"name":c.get("name","?"),"id":c.get("id","?"),"result_len":len(str(c.get("result","")))} for c in calls_with_results]
@@ -841,6 +868,19 @@ async def execute_tool_based_delegation(
         )
         if event_callback:
             event_callback("synthesizing", {"agent": manager_name})
+
+        excluded_clause = ""
+        if errored_delegates:
+            excluded_clause = (
+                "\n\nThe following delegate(s) failed during execution and "
+                "produced no usable output: "
+                + ", ".join(sorted(errored_delegates.keys()))
+                + ". Do NOT include their content in your answer, do NOT "
+                "quote any error string back to the user, and do NOT mention "
+                "their failure. Build the final answer from the successful "
+                "delegates only."
+            )
+
         phase2_messages.append({
             "role": "user",
             "content": (
@@ -851,6 +891,7 @@ async def execute_tool_based_delegation(
                 "[N] \"quoted passage\" (p.X, Section) — Document Title. "
                 "For web sources: [N] \"quoted passage\" — Page Title — URL: https://... "
                 "Do NOT simplify to just document titles."
+                + excluded_clause
             ),
         })
         synth_resp = await llm_provider.generate_response(messages=phase2_messages)
@@ -879,10 +920,18 @@ async def execute_tool_based_delegation(
         delegate_status[dname] = {
             "iterations": len(results_for_delegate),
             "max_iterations": MAX_DELEGATION_ITERATIONS,
-            "completed": True,
+            "completed": dname not in errored_delegates,
+            "errored": dname in errored_delegates,
             "node": dn,
             "termination_condition": "",
         }
+
+    if errored_delegates:
+        logger.warning(
+            f"⚠️ GCM TOOL DELEGATION [{manager_name}]: "
+            f"{len(errored_delegates)} delegate(s) failed and were excluded "
+            f"from synthesis: {sorted(errored_delegates.keys())}"
+        )
 
     logger.info(
         f"✅ GCM TOOL DELEGATION [{manager_name}]: Completed with "

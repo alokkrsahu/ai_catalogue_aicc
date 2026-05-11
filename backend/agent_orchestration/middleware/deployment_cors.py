@@ -115,59 +115,83 @@ class WorkflowDeploymentCORSMiddleware(MiddlewareMixin):
         
         return response
     
+    # Cache TTL for the per-deployment origin allowlist lookup. Short enough
+    # that admin edits in the Deploy tab take effect within the minute,
+    # long enough to absorb message-burst traffic without one DB hit per
+    # request.
+    _ORIGIN_CACHE_TTL = 60
+
     def _check_origin_allowed(self, project_id: str, origin: str) -> Tuple[bool, Optional[WorkflowDeployment]]:
         """
-        Check if origin is allowed for the deployment
-        
+        Check if origin is allowed for the deployment.
+
+        Caches the (project_id, normalized_origin) → (is_allowed, deployment_id)
+        result for ``_ORIGIN_CACHE_TTL`` seconds via the Django cache framework
+        (Redis-backed in prod). The deployment object itself is fetched fresh
+        on cache miss; on hit we re-fetch by id so the caller gets a live
+        ORM object (its fields may have been updated since the lookup).
+
         Args:
             project_id: Project ID (UUID string)
             origin: Request origin
-            
+
         Returns:
             Tuple of (is_allowed, deployment)
         """
         try:
             # Get active deployment for this project
             from users.models import IntelliDocProject
-            from django.core.exceptions import ObjectDoesNotExist
-            
+            from django.core.cache import cache
+
             try:
                 project = IntelliDocProject.objects.get(project_id=project_id)
             except IntelliDocProject.DoesNotExist:
                 logger.warning(f"🚫 CORS: Project {project_id} not found")
                 return False, None
-            
+
             deployment = WorkflowDeployment.objects.filter(
                 project=project,
                 is_active=True
             ).first()
-            
+
             if not deployment:
                 logger.warning(f"🚫 CORS: No active deployment for project {project_id}")
                 return False, None
-            
+
             # Allow requests with no origin header (e.g., from iframes, same-origin, or null origin)
             if not origin:
                 logger.debug(f"✅ CORS: No origin header — allowing (likely iframe or same-origin)")
                 return True, deployment
-            
+
             # Normalize origin (remove trailing slash, lowercase)
             normalized_origin = origin.rstrip('/').lower()
-            
+
+            # Try the per-(project, origin) cache first. On hit, skip the DB.
+            cache_key = f'workflow_deploy_cors:{project_id}:{normalized_origin}'
+            cached_allowed = cache.get(cache_key)
+            if cached_allowed is True:
+                logger.debug(f"✅ CORS: cache hit — {origin} allowed for deployment {deployment.id}")
+                return True, deployment
+            if cached_allowed is False:
+                logger.debug(f"🚫 CORS: cache hit — {origin} denied for deployment {deployment.id}")
+                return False, deployment
+
             # Check against allowed origins
             allowed_origin = WorkflowAllowedOrigin.objects.filter(
                 deployment=deployment,
                 origin__iexact=normalized_origin,
                 is_active=True
             ).first()
-            
+
             if allowed_origin:
                 logger.debug(f"✅ CORS: Origin {origin} is allowed for deployment {deployment.id}")
+                cache.set(cache_key, True, timeout=self._ORIGIN_CACHE_TTL)
                 return True, deployment
             else:
                 logger.warning(f"🚫 CORS: Origin {origin} is not allowed for deployment {deployment.id}")
+                cache.set(cache_key, False, timeout=self._ORIGIN_CACHE_TTL)
                 return False, deployment
-                
+
         except Exception as e:
             logger.error(f"❌ CORS: Error checking origin: {e}", exc_info=True)
             return False, None

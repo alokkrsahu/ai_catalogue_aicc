@@ -1607,7 +1607,11 @@ def public_auth_endpoint(request, project_id):
             cache.set(rl_key, attempts + 1, timeout=PUBLIC_CHAT_LOGIN_RL_WINDOW)
             return JsonResponse({'error': 'Invalid credentials'}, status=401)
 
-        # Success — attach the signed cookie.
+        # Success — clear the per-IP failure counter so a user who fails a
+        # few times then logs in correctly is not stuck behind their own
+        # earlier failures for the rest of the 15-minute window.
+        cache.delete(rl_key)
+        # Attach the signed cookie.
         response = JsonResponse({'ok': True})
         _set_public_chat_cookie(response, deployment)
         return response
@@ -1899,10 +1903,36 @@ def public_chat_endpoint(request, project_id):
             }, status=500)
         
         execution_time_ms = int((timezone.now() - start_time).total_seconds() * 1000)
-        
+
         # Extract assistant response
         assistant_response = execution_result.get('response', '') if execution_result.get('status') == 'success' else ''
-        
+
+        # Strip ---CITATIONS--- block and orphan trailing CITATIONS heading from
+        # the assistant text, matching the SSE streaming path so API consumers
+        # see the same clean response shape. Citation data is exposed separately
+        # via execution_result['citations']; the inline block is only used to
+        # transport JSON to the client.
+        import re as _re_nonstream
+        parsed_block_citations = None
+        if assistant_response:
+            _m = _re_nonstream.search(
+                r'(?:---)?CITATIONS(?:---)?\s*([\s\S]*?)\s*---END_?CITATIONS---',
+                assistant_response,
+            )
+            if _m:
+                try:
+                    parsed_block_citations = json.loads(_m.group(1))
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                assistant_response = assistant_response[:_m.start()].rstrip()
+            # Strip orphan trailing CITATIONS heading (markdown variations too).
+            assistant_response = _re_nonstream.sub(
+                r'[\n\r]+(?:#{1,6}\s*)?(?:\*{1,2})?CITATIONS(?:\*{1,2})?\s*$',
+                '',
+                assistant_response,
+                flags=_re_nonstream.IGNORECASE,
+            ).rstrip()
+
         # Add assistant response to conversation history for background save
         if assistant_response:
             conversation_history.append({
@@ -1937,9 +1967,16 @@ def public_chat_endpoint(request, project_id):
         
         # Return response immediately (don't wait for database writes)
         if execution_result.get('status') == 'success':
+            # Prefer citations parsed out of the response text block (matches the
+            # streaming endpoint's behavior) over execution_result.citations,
+            # since the text-block form carries the LLM-emitted format the UI
+            # expects. Fall back to execution_result.citations when no inline
+            # block was present.
+            response_citations = parsed_block_citations or execution_result.get('citations', [])
             return JsonResponse({
                 'status': 'success',
                 'response': assistant_response,
+                'citations': response_citations,
                 'metadata': {
                     'request_id': request_id,
                     'execution_time_ms': execution_time_ms,
@@ -2320,8 +2357,20 @@ def public_chat_endpoint_stream(request, project_id):
                 except (json.JSONDecodeError, ValueError):
                     pass
                 assistant_response = assistant_response[:_citations_match.start()].rstrip()
-            # Strip trailing "CITATIONS" header some models leave
-            assistant_response = _re.sub(r'\n*CITATIONS\s*$', '', assistant_response).rstrip()
+            # Strip trailing "CITATIONS" header some models leave. Match the
+            # same shapes the client-side regex handles so we don't leave an
+            # orphan `##` / `**` after stripping the literal word:
+            #   - "\nCITATIONS"          → bare
+            #   - "\n## CITATIONS"       → markdown heading (any level 1-6)
+            #   - "\n**CITATIONS**"      → bold markdown
+            #   - "\n*CITATIONS*"        → italic markdown
+            #   - any combination of the above prefixes + whitespace
+            assistant_response = _re.sub(
+                r'[\n\r]+(?:#{1,6}\s*)?(?:\*{1,2})?CITATIONS(?:\*{1,2})?\s*$',
+                '',
+                assistant_response,
+                flags=_re.IGNORECASE,
+            ).rstrip()
 
             # Stream the cleaned response word by word for smooth appearance
             words = assistant_response.split(' ')
@@ -4913,6 +4962,12 @@ def embed_chatbot_html(request, project_id):
         # Remove restrictive headers that block fetch from cross-origin iframes
         response['Cross-Origin-Opener-Policy'] = 'unsafe-none'
         response['Cross-Origin-Embedder-Policy'] = 'unsafe-none'
+        # Make the no-cache posture explicit: this HTML can contain preloaded
+        # per-session conversation_history (when ?session_id= is present), so
+        # caching across users or even across reloads would surface stale or
+        # leaked history. private + no-store is the safest contract.
+        response['Cache-Control'] = 'private, no-store, no-cache, must-revalidate'
+        response['Pragma'] = 'no-cache'
         # Rolling 4h TTL — refresh the cookie on every /embed/ load so keeping
         # the chat window open during activity extends the session.
         _maybe_refresh_public_chat_cookie(request, response, deployment)

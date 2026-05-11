@@ -34,6 +34,33 @@ class AgentOrchestrationConfig(AppConfig):
     name = 'agent_orchestration'
 
     def ready(self) -> None:
+        # Register signal handlers for cache invalidation. Each WorkflowAllowedOrigin
+        # save / delete clears the per-deployment CORS cache so admin edits in
+        # the Deploy tab take effect immediately rather than waiting up to 60s
+        # for the cache TTL.
+        try:
+            from django.db.models.signals import post_save, post_delete
+            from django.core.cache import cache
+            from .models import WorkflowAllowedOrigin
+
+            def _invalidate_cors_cache(sender, instance, **kwargs):
+                try:
+                    project_id = str(instance.deployment.project.project_id)
+                    normalized = (instance.origin or '').rstrip('/').lower()
+                    cache.delete(f'workflow_deploy_cors:{project_id}:{normalized}')
+                    logger.debug(
+                        f"🔄 CORS cache invalidated for project {project_id} origin {normalized}"
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ CORS cache invalidation failed: {e}")
+
+            post_save.connect(_invalidate_cors_cache, sender=WorkflowAllowedOrigin,
+                              dispatch_uid='cors_cache_invalidate_save')
+            post_delete.connect(_invalidate_cors_cache, sender=WorkflowAllowedOrigin,
+                                dispatch_uid='cors_cache_invalidate_delete')
+        except Exception as e:
+            logger.warning(f"⚠️ Could not register CORS cache invalidation: {e}")
+
         # Skip warm-up for short-lived processes — management commands,
         # migrations, tests, and the autoreload parent process don't benefit.
         if os.environ.get('WEBSEARCH_PREWARM', '1') != '1':

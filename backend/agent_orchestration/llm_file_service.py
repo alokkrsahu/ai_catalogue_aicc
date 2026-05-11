@@ -34,10 +34,27 @@ FILE_SIZE_LIMITS = {
     'google': 2 * 1024 * 1024 * 1024, # 2 GB
 }
 
-# Supported file types for each provider
+# Supported file types for each provider.
+# Note on .doc / .rtf: python-docx (used by _convert_docx_to_pdf) only reads
+# OOXML (.docx). Legacy binary .doc and .rtf are not supported until a
+# subprocess-based converter (libreoffice / pandoc) is added. They are
+# excluded here so users get a clear "unsupported type" error at upload time
+# instead of a confusing "DOCX→PDF conversion failed" later.
+# .docx is supported on all three providers via the _convert_docx_to_pdf
+# helper (Anthropic and Google accept the resulting PDF).
 SUPPORTED_FILE_TYPES = {
-    'openai': ['.pdf', '.txt', '.doc', '.docx', '.md', '.rtf'],
-    'anthropic': ['.pdf', '.txt', '.png', '.jpg', '.jpeg', '.gif', '.webp'],
+    # OpenAI: .doc and .rtf removed because the Responses API only accepts
+    # PDF, and our DOCX→PDF helper (python-docx) cannot read legacy .doc /
+    # .rtf — pre-fix, those uploads silently failed at conversion time. Now
+    # they're rejected upfront with a clear message.
+    'openai': ['.pdf', '.txt', '.docx', '.md'],
+    # Anthropic gains .docx via the on-the-fly DOCX→PDF converter; the rest
+    # of the list is unchanged from the pre-fix value (Anthropic Files API
+    # native support is image + .pdf + .txt; .md / .doc / .rtf are NOT in
+    # their accepted MIME list at time of writing).
+    'anthropic': ['.pdf', '.txt', '.docx', '.png', '.jpg', '.jpeg', '.gif', '.webp'],
+    # Google Files API natively accepts .doc / .rtf / .md without conversion;
+    # preserved from the pre-fix list.
     'google': ['.pdf', '.txt', '.doc', '.docx', '.md', '.rtf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.mp3', '.wav', '.mp4'],
 }
 
@@ -209,16 +226,26 @@ class LLMFileUploadService:
         Returns:
             Dict with 'file_id' or 'error'
         """
-        # Deduplication: skip upload if document already has a file_id for this provider
-        # Exception: DOCX files uploaded to OpenAI need re-upload as PDF (Responses API only accepts PDF)
+        # Deduplication: skip upload if document already has a file_id for this provider.
+        # Exception: legacy OpenAI DOCX file_ids may pre-date the on-the-fly
+        # DOCX→PDF conversion path; force a re-upload there so the cached id
+        # is replaced with a PDF id that the Responses API can accept.
+        # Anthropic and Google previously rejected DOCX outright, so any
+        # cached id for them was already created via the converter and is fine.
         existing_id = getattr(document, f'llm_file_id_{provider}', None)
         ext = os.path.splitext(document.original_filename)[1].lower()
-        needs_reupload = (provider == 'openai' and ext in ('.docx', '.doc', '.rtf') and existing_id)
+        needs_reupload = (provider == 'openai' and ext == '.docx' and existing_id)
         if existing_id and not needs_reupload:
             logger.info(f"✅ LLM FILE SERVICE: Document {document.original_filename} already uploaded to {provider}: {existing_id[:30]}...")
             return {'file_id': existing_id, 'status': 'already_uploaded', 'reason': 'already_uploaded'}
         if needs_reupload:
             logger.info(f"🔄 LLM FILE SERVICE: Re-uploading {document.original_filename} as PDF for OpenAI Responses API")
+            # Best-effort cleanup: delete the now-orphaned previous file from
+            # the provider so it doesn't accumulate storage cost. Failure to
+            # delete is non-fatal — proceed with the re-upload regardless.
+            api_key_for_cleanup = await self._get_api_key(provider)
+            if api_key_for_cleanup:
+                await self._delete_provider_file(provider, api_key_for_cleanup, existing_id)
         
         # Validate file size
         file_size_limit = FILE_SIZE_LIMITS.get(provider)
@@ -310,7 +337,10 @@ class LLMFileUploadService:
 
             upload_filename = document.original_filename
             ext = os.path.splitext(upload_filename)[1].lower()
-            if ext in ('.docx', '.doc', '.rtf'):
+            # OpenAI Responses API only accepts PDF, so DOCX must be converted.
+            # Only .docx is supported by _convert_docx_to_pdf (python-docx);
+            # .doc / .rtf are filtered out earlier at SUPPORTED_FILE_TYPES.
+            if ext == '.docx':
                 try:
                     file_bytes = await sync_to_async(_convert_docx_to_pdf)(file_bytes)
                     upload_filename = os.path.splitext(upload_filename)[0] + '.pdf'
@@ -338,44 +368,65 @@ class LLMFileUploadService:
             return {'error': str(e), 'reason': 'provider_error'}
     
     async def _upload_to_anthropic(
-        self, 
-        document: ProjectDocument, 
+        self,
+        document: ProjectDocument,
         api_key: str
     ) -> Dict[str, str]:
         """
         Upload file to Anthropic Files API (beta).
-        
+
         Uses: POST /v1/files with beta header
         Docs: https://platform.claude.com/docs/en/build-with-claude/files
+
+        DOCX is converted to PDF transparently before upload because Anthropic's
+        Files API doesn't accept DOCX directly. Same conversion path used for
+        OpenAI; .doc / .rtf are filtered upstream at SUPPORTED_FILE_TYPES.
         """
         try:
             import anthropic
+            import io
             from django.core.files.storage import default_storage
-            
+
             client = anthropic.Anthropic(api_key=api_key)
-            
+
             # Read file from storage
             file_path = document.file_path
             if not default_storage.exists(file_path):
                 return {'error': 'File not found in storage', 'reason': 'file_not_found'}
-            
-            # Determine MIME type
-            mime_type = document.file_type or mimetypes.guess_type(document.original_filename)[0] or 'application/octet-stream'
-            
-            # Open file and upload using beta API
+
             with default_storage.open(file_path, 'rb') as f:
-                response = await sync_to_async(client.beta.files.upload)(
-                    file=(document.original_filename, f, mime_type)
-                )
-            
+                file_bytes = f.read()
+
+            upload_filename = document.original_filename
+            mime_type = document.file_type or mimetypes.guess_type(upload_filename)[0] or 'application/octet-stream'
+            ext = os.path.splitext(upload_filename)[1].lower()
+
+            if ext == '.docx':
+                try:
+                    file_bytes = await sync_to_async(_convert_docx_to_pdf)(file_bytes)
+                    upload_filename = os.path.splitext(upload_filename)[0] + '.pdf'
+                    mime_type = 'application/pdf'
+                    logger.info(
+                        f"📄 LLM FILE SERVICE: Converted {document.original_filename} → PDF for Anthropic ({len(file_bytes)} bytes)"
+                    )
+                except Exception as conv_err:
+                    logger.error(
+                        f"❌ LLM FILE SERVICE: DOCX→PDF conversion failed for {document.original_filename}: {conv_err}"
+                    )
+                    return {'error': f'DOCX→PDF conversion failed: {conv_err}', 'reason': 'conversion_failed'}
+
+            response = await sync_to_async(client.beta.files.upload)(
+                file=(upload_filename, io.BytesIO(file_bytes), mime_type)
+            )
+
             file_id = response.id
             logger.info(f"✅ LLM FILE SERVICE: Uploaded to Anthropic: {file_id}")
-            
+
             # Update document model
             await self._update_document_file_id(document, 'anthropic', file_id)
-            
+
             return {'file_id': file_id}
-            
+
         except Exception as e:
             logger.error(f"❌ LLM FILE SERVICE: Anthropic upload failed: {e}")
             return {'error': str(e), 'reason': 'provider_error'}
@@ -453,10 +504,43 @@ class LLMFileUploadService:
             logger.error(f"❌ LLM FILE SERVICE: Google upload failed: {e}")
             return {'error': str(e), 'reason': 'provider_error'}
     
+    async def _delete_provider_file(self, provider: str, api_key: str, file_id: str) -> None:
+        """
+        Best-effort cleanup of a now-orphaned provider-side file.
+
+        Called when a document is being re-uploaded (e.g., DOCX→PDF rebuild)
+        and the previous file_id is about to be replaced. Any provider-side
+        failure is logged but not raised — the caller proceeds with the new
+        upload regardless.
+        """
+        if not file_id:
+            return
+        try:
+            if provider == 'openai':
+                from openai import OpenAI
+                client = OpenAI(api_key=api_key)
+                await sync_to_async(client.files.delete)(file_id)
+                logger.info(f"🗑️ LLM FILE SERVICE: Deleted orphaned OpenAI file {file_id[:30]}…")
+            elif provider == 'anthropic':
+                import anthropic
+                client = anthropic.Anthropic(api_key=api_key)
+                await sync_to_async(client.beta.files.delete)(file_id)
+                logger.info(f"🗑️ LLM FILE SERVICE: Deleted orphaned Anthropic file {file_id[:30]}…")
+            elif provider == 'google':
+                from google import genai
+                client = genai.Client(api_key=api_key)
+                # Google file ids stored as 'files/<name>' or just '<name>'.
+                name = file_id.split('/')[-1] if '/' in file_id else file_id
+                await sync_to_async(client.files.delete)(name=f'files/{name}')
+                logger.info(f"🗑️ LLM FILE SERVICE: Deleted orphaned Google file {file_id[:30]}…")
+        except Exception as e:
+            # Non-fatal — log and move on.
+            logger.warning(f"⚠️ LLM FILE SERVICE: orphan-cleanup failed for {provider} file {file_id[:30]}…: {e}")
+
     async def _update_document_file_id(
-        self, 
-        document: ProjectDocument, 
-        provider: str, 
+        self,
+        document: ProjectDocument,
+        provider: str,
         file_id: str
     ):
         """Update the document model with the file_id from the provider."""
