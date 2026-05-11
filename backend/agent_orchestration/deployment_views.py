@@ -1715,6 +1715,10 @@ def public_chat_endpoint(request, project_id):
         if not user_query:
             user_query = data.get('message', '').strip()
         session_id = data.get('session_id', '').strip()
+        # provider_file_ids tied to THIS turn (subset of session files); used to
+        # persist attachment filenames on the user message so the file chip
+        # re-renders when the conversation is reopened later.
+        turn_file_ids = data.get('file_ids') or []
         
         if not user_query:
             return JsonResponse({
@@ -1792,13 +1796,24 @@ def public_chat_endpoint(request, project_id):
             except Exception as e:
                 logger.warning(f"⚠️ CHAT FILES: Failed to load session files: {e}")
 
+            # Attachments scoped to THIS turn (filenames only — file_ids are
+            # provider-side and shouldn't leak to the client).
+            turn_attachments = [
+                {'filename': sf.filename}
+                for sf in session_files
+                if turn_file_ids and sf.provider_file_id in turn_file_ids
+            ] if turn_file_ids else []
+
             # Add user query to conversation history
-            conversation_history.append({
+            user_turn = {
                 'role': 'user',
                 'content': user_query,
                 'timestamp': timezone.now().isoformat(),
-            })
-            
+            }
+            if turn_attachments:
+                user_turn['attachments'] = turn_attachments
+            conversation_history.append(user_turn)
+
             # Build full conversation history string for workflow execution
             # Format: "Assistant: greeting\nUser: query1\nAssistant: response1\nUser: query2..."
             conversation_text_parts = []
@@ -2096,7 +2111,10 @@ def public_chat_endpoint_stream(request, project_id):
             if not user_query:
                 user_query = data.get('message', '').strip()
             session_id = data.get('session_id', '').strip()
-            
+            # provider_file_ids tied to THIS turn — used to persist attachment
+            # filenames on the user message so the chip re-renders on reload.
+            turn_file_ids = data.get('file_ids') or []
+
             if not user_query or not session_id:
                 yield f"data: {json.dumps({'type': 'error', 'error': 'User query and session ID are required', 'request_id': request_id})}\n\n"
                 return
@@ -2126,6 +2144,7 @@ def public_chat_endpoint_stream(request, project_id):
                 # Build file references and text attachments from ALL session files
                 chat_file_references = []
                 chat_text_attachments = []
+                turn_attachments = []
                 try:
                     session_files = list(DeploymentSessionFile.objects.filter(session=deployment_session))
                     for sf in session_files:
@@ -2146,15 +2165,24 @@ def public_chat_endpoint_stream(request, project_id):
                         logger.info(f"📎 CHAT FILES (stream): {len(chat_file_references)} file refs for {session_id[:8]}")
                     if chat_text_attachments:
                         logger.info(f"📎 CHAT TEXT (stream): {len(chat_text_attachments)} text attachments for {session_id[:8]}")
+                    if turn_file_ids:
+                        turn_attachments = [
+                            {'filename': sf.filename}
+                            for sf in session_files
+                            if sf.provider_file_id in turn_file_ids
+                        ]
                 except Exception as file_err:
                     logger.warning(f"⚠️ CHAT FILES: Failed to load session files: {file_err}")
 
                 # Add user query to conversation history
-                conversation_history.append({
+                user_turn = {
                     'role': 'user',
                     'content': user_query,
                     'timestamp': timezone.now().isoformat()
-                })
+                }
+                if turn_attachments:
+                    user_turn['attachments'] = turn_attachments
+                conversation_history.append(user_turn)
 
                 # Build conversation history string
                 conversation_text_parts = []
@@ -4960,6 +4988,22 @@ def embed_chatbot_html(request, project_id):
     const msgCitations = Array.isArray(msg.citations) ? msg.citations : undefined;
     appendMessage(msg.role === 'user' ? 'user' : 'assistant', msg.content, false, msgCitations);
     messages.push({{ role: msg.role, content: msg.content }});
+    // Re-render the file attachment indicator on user turns that were sent
+    // with files. Mirrors the chip created in sendMessage() so the bubble
+    // looks identical to its original send-time appearance.
+    if (msg.role === 'user' && Array.isArray(msg.attachments) && msg.attachments.length > 0) {{
+      var fileNames = msg.attachments.map(function(a) {{ return a && a.filename ? a.filename : ''; }}).filter(Boolean);
+      if (fileNames.length > 0) {{
+        var lastBubble = messagesEl.querySelector('.msg.user:last-child .bubble');
+        if (lastBubble) {{
+          var ind = document.createElement('div');
+          ind.className = 'msg-file-indicator';
+          ind.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>' +
+            fileNames.map(function(n) {{ return '<span>' + String(n).replace(/</g,'&lt;') + '</span>'; }}).join(', ');
+          lastBubble.appendChild(ind);
+        }}
+      }}
+    }}
   }}
 
   // Show default greeting if no preloaded history
