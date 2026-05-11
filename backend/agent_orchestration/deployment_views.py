@@ -1533,6 +1533,7 @@ def public_config_endpoint(request, project_id):
             'public_url_enabled': deployment.public_url_enabled,
             'auth_required': deployment.public_url_auth_enabled,
             'is_logged_in': _verify_public_chat_cookie(request, deployment),
+            'deployment_id': deployment.id,
             'chatbot_title': deployment.chatbot_title or 'AI Assistant',
             'chatbot_subtitle': deployment.chatbot_subtitle or '',
             'primary_color': deployment.primary_color or '#002147',
@@ -4785,6 +4786,18 @@ def embed_chatbot_html(request, project_id):
       }}
     }}
     messages.push({{ role: 'user', content: text }});
+
+    // Notify the embedding parent (public /chat page, in-app project page) that
+    // this session just received a user message, so the parent can update its
+    // conversation-list sidebar preview. Same try/'*' pattern as chatbot_escape.
+    try {{
+      parent.postMessage({{
+        type: 'session_message_sent',
+        sessionId: sessionId,
+        userText: text,
+        timestamp: new Date().toISOString()
+      }}, '*');
+    }} catch(_) {{}}
 
     // Collect file IDs and clear pending
     var fileIds = pendingFiles.filter(function(f) {{ return f.attachment_id; }}).map(function(f) {{ return f.attachment_id; }});

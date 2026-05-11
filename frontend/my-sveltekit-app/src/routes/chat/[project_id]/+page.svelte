@@ -5,6 +5,11 @@
     2. Login required — auth_required=true AND is_logged_in=false.
     3. Chat view      — shared embed iframe (same URL used by every chatbot surface).
 
+  When auth_required=true the chat view also renders a per-browser conversation
+  sidebar (localStorage-backed) so end users can keep multiple parallel threads
+  the same way admins do in-app. Anonymous deployments keep the single-thread
+  behaviour to avoid an unfamiliar UI on landing-page chatbots.
+
   The iframe is always-same-origin with the SvelteKit host, so the path-scoped
   `pchat_<deployment.id>` cookie set by /public-auth/ flows automatically with
   every request it makes. No token plumbing inside the iframe.
@@ -29,6 +34,26 @@
   $: isLoggedIn = !!config?.is_logged_in;
   $: showChat = available && (!authRequired || isLoggedIn);
   $: showLogin = available && authRequired && !isLoggedIn;
+  // Sidebar only when password auth is active. Anonymous public deployments
+  // keep the single-thread iframe — adding a sidebar there would be a
+  // surprising UI on a landing-page chatbot.
+  $: showSidebar = showChat && authRequired && isLoggedIn;
+
+  // Conversation list state (mirrors the in-app Chatbot tab pattern, but with
+  // a distinct localStorage key so the admin's in-app sessions never leak in).
+  type ChatbotSessionMeta = {
+    id: string;
+    label: string;
+    createdAt: string;
+    preview?: string;
+    updatedAt?: string;
+  };
+  let chatbotSessions: ChatbotSessionMeta[] = [];
+  let activeChatbotSessionId: string | null = null;
+  let lastChatbotStorageKey = '';
+  let mobileChatbotNavOpen = false;
+  let renamingSessionId: string | null = null;
+  let renameInputValue = '';
 
   // A short fingerprint of the config values that affect session validity.
   // Whenever the admin flips public_url_enabled or public_url_auth_enabled
@@ -107,13 +132,166 @@
     await refreshConfig();
   }
 
+  // ─── Conversation list management ────────────────────────────────────
+  // Per-browser localStorage. Distinct key from the in-app sidebar so the
+  // two surfaces never share state.
+  function makeChatbotStorageKey(): string {
+    const deploymentKey = config?.deployment_id || 'default';
+    return `pchat_sessions_${projectId}_${deploymentKey}`;
+  }
+
+  function initializeChatbotSessionsForStorageKey(storageKey: string) {
+    if (typeof window === 'undefined') return;
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (raw) {
+        const parsed = JSON.parse(raw) as ChatbotSessionMeta[];
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          chatbotSessions = parsed;
+          const current = activeChatbotSessionId;
+          const stillValid =
+            current !== null && parsed.some((s) => s.id === current);
+          if (!stillValid) {
+            activeChatbotSessionId = parsed[0].id;
+          }
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('PCHAT: Failed to parse stored sessions', e);
+    }
+
+    const id = `sess_${Math.random().toString(36).slice(2)}`;
+    const createdAt = new Date().toISOString();
+    chatbotSessions = [{ id, label: 'Conversation 1', createdAt }];
+    activeChatbotSessionId = id;
+    persistChatbotSessions();
+  }
+
+  function persistChatbotSessions() {
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(
+        makeChatbotStorageKey(),
+        JSON.stringify(chatbotSessions),
+      );
+    } catch (e) {
+      console.warn('PCHAT: Failed to persist sessions', e);
+    }
+  }
+
+  function handleNewChatbotConversation() {
+    const index = chatbotSessions.length + 1;
+    const id = `sess_${Math.random().toString(36).slice(2)}`;
+    const createdAt = new Date().toISOString();
+    chatbotSessions = [
+      { id, label: `Conversation ${index}`, createdAt },
+      ...chatbotSessions,
+    ];
+    activeChatbotSessionId = id;
+    mobileChatbotNavOpen = false;
+    persistChatbotSessions();
+  }
+
+  function selectChatbotSession(sessionId: string) {
+    activeChatbotSessionId = sessionId;
+    mobileChatbotNavOpen = false;
+  }
+
+  function startRenameSession(sessionId: string) {
+    const s = chatbotSessions.find((x) => x.id === sessionId);
+    if (!s) return;
+    renamingSessionId = sessionId;
+    renameInputValue = s.label;
+  }
+
+  function commitRenameSession() {
+    if (!renamingSessionId) return;
+    const trimmed = renameInputValue.trim();
+    if (!trimmed) {
+      renamingSessionId = null;
+      return;
+    }
+    const s = chatbotSessions.find((x) => x.id === renamingSessionId);
+    if (s) {
+      s.label = trimmed;
+      chatbotSessions = [...chatbotSessions];
+      persistChatbotSessions();
+    }
+    renamingSessionId = null;
+  }
+
+  function cancelRenameSession() {
+    renamingSessionId = null;
+  }
+
+  function deleteChatbotSession(sessionId: string) {
+    chatbotSessions = chatbotSessions.filter((s) => s.id !== sessionId);
+    if (activeChatbotSessionId === sessionId) {
+      activeChatbotSessionId =
+        chatbotSessions.length > 0 ? chatbotSessions[0].id : null;
+      if (!activeChatbotSessionId) {
+        handleNewChatbotConversation();
+        return;
+      }
+    }
+    persistChatbotSessions();
+  }
+
+  function formatChatbotSessionDate(iso: string): string {
+    try {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return '';
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    } catch {
+      return '';
+    }
+  }
+
+  // Listen for the iframe's session_message_sent event so we can update the
+  // sidebar preview as soon as the user sends a message. Reject cross-origin
+  // messages — the embed is same-origin so spoofed messages from elsewhere
+  // would otherwise be able to mutate localStorage.
+  function handleIframeMessage(event: MessageEvent) {
+    if (event.origin !== window.location.origin) return;
+    const data: any = event.data;
+    if (!data || typeof data !== 'object') return;
+    if (data.type !== 'session_message_sent') return;
+    const sid = data.sessionId;
+    const userText = (data.userText || '').toString();
+    if (!sid) return;
+    const idx = chatbotSessions.findIndex((s) => s.id === sid);
+    if (idx === -1) return;
+    chatbotSessions[idx] = {
+      ...chatbotSessions[idx],
+      preview: userText.slice(0, 80),
+      updatedAt: data.timestamp || new Date().toISOString(),
+    };
+    chatbotSessions = [...chatbotSessions];
+    persistChatbotSessions();
+  }
+
+  // Initialize sessions whenever the (projectId, deployment) tuple changes
+  // and we're in a state that shows the sidebar.
+  $: if (showSidebar && typeof window !== 'undefined') {
+    const storageKey = makeChatbotStorageKey();
+    if (storageKey !== lastChatbotStorageKey) {
+      lastChatbotStorageKey = storageKey;
+      initializeChatbotSessionsForStorageKey(storageKey);
+    }
+  }
+
   // If the user lands here after the cookie expires mid-session (4 h rolling
   // has elapsed), the iframe's own XHR will 401. We pick that up via a simple
   // periodic config refresh so the login screen reappears without a manual
   // page reload.
   onMount(() => {
     const interval = setInterval(refreshConfig, 60 * 1000);
-    return () => clearInterval(interval);
+    window.addEventListener('message', handleIframeMessage);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('message', handleIframeMessage);
+    };
   });
 </script>
 
@@ -199,6 +377,17 @@
     <!-- State 3: Chat view — iframed /embed/ is the shared chatbot code. -->
     <header class="flex items-center justify-between px-4 py-2 border-b border-gray-200 bg-white shrink-0">
       <div class="flex items-center gap-3 min-w-0">
+        {#if showSidebar}
+          <!-- Mobile-only hamburger to open the conversation drawer. -->
+          <button
+            type="button"
+            class="md:hidden inline-flex items-center justify-center w-11 h-11 rounded-lg text-[#002147] hover:bg-gray-100"
+            aria-label="Open conversations"
+            on:click={() => (mobileChatbotNavOpen = true)}
+          >
+            <i class="fas fa-bars text-base"></i>
+          </button>
+        {/if}
         {#if config?.logo_url}
           <img src={config.logo_url} alt="" class="h-8 w-8 object-contain rounded" />
         {:else}
@@ -228,12 +417,102 @@
         </button>
       {/if}
     </header>
-    <main class="flex-1 min-h-0">
-      <iframe
-        title="Chat"
-        src="/api/workflow-deploy/{projectId}/embed/?hide_header=1"
-        class="public-chat-iframe w-full h-full block border-0"
-      ></iframe>
+    <main class="flex-1 min-h-0 flex">
+      {#if showSidebar}
+        {#if mobileChatbotNavOpen}
+          <button
+            type="button"
+            aria-label="Close conversations"
+            class="md:hidden fixed inset-0 z-30 bg-black/40"
+            on:click={() => (mobileChatbotNavOpen = false)}
+          ></button>
+        {/if}
+        <aside
+          class="pchat-conv-rail {mobileChatbotNavOpen ? 'mobile-open' : ''} bg-white border-r border-slate-200 flex flex-col md:w-64 md:shrink-0 md:translate-x-0"
+          aria-label="Conversations"
+        >
+          <div class="p-3 border-b border-slate-200 shrink-0">
+            <button
+              type="button"
+              class="w-full inline-flex items-center justify-center px-3 py-3 min-h-[44px] text-sm font-medium bg-[#002147] text-white rounded-lg hover:bg-blue-900 transition-colors shadow-sm"
+              on:click={handleNewChatbotConversation}
+              title="Start a new conversation"
+            >
+              <i class="fas fa-plus mr-2"></i>
+              New conversation
+            </button>
+          </div>
+          <nav class="flex-1 min-h-0 overflow-y-auto p-2 space-y-0.5">
+            {#each chatbotSessions as session (session.id)}
+              {#if renamingSessionId === session.id}
+                <div class="px-2 py-1.5">
+                  <!-- svelte-ignore a11y-autofocus -->
+                  <input
+                    type="text"
+                    class="w-full text-sm rounded-md border border-slate-300 px-2 py-1 focus:outline-none focus:ring-2 focus:ring-[#002147] focus:border-transparent"
+                    bind:value={renameInputValue}
+                    on:keydown={(e) => {
+                      if (e.key === 'Enter') commitRenameSession();
+                      if (e.key === 'Escape') cancelRenameSession();
+                    }}
+                    on:blur={commitRenameSession}
+                    autofocus
+                  />
+                </div>
+              {:else}
+                <div class="relative group">
+                  <button
+                    type="button"
+                    class="w-full text-left rounded-lg px-3 py-3 pr-8 text-sm transition-colors min-h-[44px]
+                      {activeChatbotSessionId === session.id
+                        ? 'bg-slate-100 text-[#002147] font-medium'
+                        : 'text-gray-700 hover:bg-slate-50'}"
+                    on:click={() => selectChatbotSession(session.id)}
+                  >
+                    <span class="block truncate">{session.label}</span>
+                    {#if session.preview}
+                      <span class="block text-xs text-gray-400 mt-0.5 truncate">{session.preview}</span>
+                    {:else if session.createdAt}
+                      <span class="block text-xs text-gray-400 mt-0.5">{formatChatbotSessionDate(session.createdAt)}</span>
+                    {/if}
+                  </button>
+                  <div class="absolute right-1 top-1/2 -translate-y-1/2 hidden group-hover:flex items-center gap-0.5">
+                    <button
+                      type="button"
+                      class="p-1 rounded text-gray-400 hover:text-[#002147] hover:bg-slate-200 transition-colors"
+                      on:click|stopPropagation={() => startRenameSession(session.id)}
+                      title="Rename"
+                    ><i class="fas fa-pen text-[10px]"></i></button>
+                    <button
+                      type="button"
+                      class="p-1 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                      on:click|stopPropagation={() => deleteChatbotSession(session.id)}
+                      title="Delete"
+                    ><i class="fas fa-trash text-[10px]"></i></button>
+                  </div>
+                </div>
+              {/if}
+            {/each}
+          </nav>
+        </aside>
+      {/if}
+      <div class="flex-1 min-w-0 min-h-0">
+        {#if showSidebar}
+          {#key activeChatbotSessionId}
+            <iframe
+              title="Chat"
+              src={`/api/workflow-deploy/${projectId}/embed/?hide_header=1${activeChatbotSessionId ? `&session_id=${activeChatbotSessionId}` : ''}`}
+              class="public-chat-iframe w-full h-full block border-0"
+            ></iframe>
+          {/key}
+        {:else}
+          <iframe
+            title="Chat"
+            src="/api/workflow-deploy/{projectId}/embed/?hide_header=1"
+            class="public-chat-iframe w-full h-full block border-0"
+          ></iframe>
+        {/if}
+      </div>
     </main>
   {/if}
 </div>
@@ -255,5 +534,31 @@
   .public-chat-iframe {
     height: calc(100vh - 49px);
     height: calc(100dvh - 49px);
+  }
+
+  /* Conversation rail: drawer on mobile, sticky aside on desktop. */
+  .pchat-conv-rail {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: 80%;
+    max-width: 320px;
+    z-index: 40;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.08);
+  }
+  .pchat-conv-rail.mobile-open {
+    transform: translateX(0);
+  }
+  @media (min-width: 768px) {
+    .pchat-conv-rail {
+      position: relative;
+      inset: auto;
+      width: 16rem;
+      max-width: none;
+      transform: none;
+      box-shadow: none;
+      z-index: 0;
+    }
   }
 </style>
