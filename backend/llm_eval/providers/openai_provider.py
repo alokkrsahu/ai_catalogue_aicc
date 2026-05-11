@@ -192,8 +192,10 @@ class OpenAIProvider(LLMProvider):
             
             body = {
                 "model": self.model,
-                "messages": messages
+                "messages": messages,
             }
+            if "gpt-5" not in self.model.lower():
+                body["temperature"] = self.temperature
             if stream:
                 body["stream"] = True
             tools = kwargs.get("tools")
@@ -347,11 +349,13 @@ class OpenAIProvider(LLMProvider):
                         response_time_ms=response_time_ms,
                         error="Responses API requires at least one non-empty input (instructions or user input items)"
                     )
-                body = {
+                body: Dict[str, Any] = {
                     "model": self.model,
                     "input": input_items,
                     "store": False,
                 }
+                if "gpt-5" not in self.model.lower():
+                    body["temperature"] = self.temperature
                 # Ensure long-form outputs (like document summaries) can fit.
                 # Responses API uses `max_output_tokens` for output length.
                 if self.max_tokens:

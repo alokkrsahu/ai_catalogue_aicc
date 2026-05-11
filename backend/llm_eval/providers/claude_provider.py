@@ -69,7 +69,8 @@ class ClaudeProvider(LLMProvider):
             body = {
                 "model": self.model,
                 "max_tokens": self.max_tokens,
-                "messages": claude_messages
+                "messages": claude_messages,
+                "temperature": self.temperature,
             }
             if system_message_content:
                 body["system"] = system_message_content

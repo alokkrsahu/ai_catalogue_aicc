@@ -506,9 +506,10 @@ class WorkflowExecutor:
                     # Handle agent nodes with real LLM calls
                     agent_config = {
                         'llm_provider': node_data.get('llm_provider', 'openai'),
-                        'llm_model': node_data.get('llm_model', 'gpt-3.5-turbo')
+                        'llm_model': node_data.get('llm_model', 'gpt-3.5-turbo'),
+                        'temperature': node_data.get('temperature', 0.7),
                     }
-                    
+
                     # Get LLM provider for this agent with project context for API keys
                     project = await sync_to_async(lambda: workflow.project)()
                     llm_provider = await self.llm_provider_manager.get_llm_provider(agent_config, project)
@@ -1187,6 +1188,7 @@ class WorkflowExecutor:
                     agent_config = {
                         'llm_provider': node_data.get('llm_provider', 'anthropic'),
                         'llm_model': node_data.get('llm_model', 'claude-3-5-haiku-20241022'),
+                        'temperature': node_data.get('temperature', 0.7),
                     }
                     project = await sync_to_async(lambda: workflow.project)()
                     llm_provider = await self.llm_provider_manager.get_llm_provider(agent_config, project)
@@ -1343,6 +1345,7 @@ class WorkflowExecutor:
                     agent_config = {
                         'llm_provider': node_data.get('llm_provider', 'openai'),
                         'llm_model': node_data.get('llm_model', 'gpt-4o-mini'),
+                        'temperature': node_data.get('temperature', 0.7),
                     }
                     project = await sync_to_async(lambda: workflow.project)()
                     llm_provider = await self.llm_provider_manager.get_llm_provider(agent_config, project)

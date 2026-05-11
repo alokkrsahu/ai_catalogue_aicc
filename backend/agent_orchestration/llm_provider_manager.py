@@ -81,11 +81,12 @@ class LLMProviderManager:
             return None
         
         try:
+            temperature = float(agent_config.get('temperature') or 0.7)
             if provider_type == 'openai':
-                logger.info(f"✅ LLM PROVIDER: Creating OpenAI provider with project key, model {model}")
+                logger.info(f"✅ LLM PROVIDER: Creating OpenAI provider with project key, model {model}, temperature {temperature}")
                 try:
                     max_tokens = agent_config.get('max_tokens', 4000)
-                    provider = OpenAIProvider(api_key=api_key, model=model, max_tokens=max_tokens)
+                    provider = OpenAIProvider(api_key=api_key, model=model, max_tokens=max_tokens, temperature=temperature)
                     logger.info(f"✅ LLM PROVIDER: Successfully created OpenAI provider with project API key")
                     return provider
                 except Exception as openai_error:
@@ -93,14 +94,13 @@ class LLMProviderManager:
                     return None
 
             elif provider_type in ['anthropic', 'claude']:
-                # Claude requires max_tokens, use a reasonable default
                 max_tokens = agent_config.get('max_tokens', 4096)
-                logger.info(f"✅ LLM PROVIDER: Creating Anthropic provider with project key, model {model}, max_tokens: {max_tokens}")
-                return ClaudeProvider(api_key=api_key, model=model, max_tokens=max_tokens)
+                logger.info(f"✅ LLM PROVIDER: Creating Anthropic provider with project key, model {model}, max_tokens: {max_tokens}, temperature {temperature}")
+                return ClaudeProvider(api_key=api_key, model=model, max_tokens=max_tokens, temperature=temperature)
 
             elif provider_type in ['google', 'gemini']:
-                logger.info(f"✅ LLM PROVIDER: Creating Google provider with project key, model {model}")
-                return GeminiProvider(api_key=api_key, model=model)
+                logger.info(f"✅ LLM PROVIDER: Creating Google provider with project key, model {model}, temperature {temperature}")
+                return GeminiProvider(api_key=api_key, model=model, temperature=temperature)
                 
             else:
                 logger.error(f"❌ LLM PROVIDER: Unknown provider type: {provider_type}")

@@ -20,11 +20,12 @@ class LLMResponse:
 class LLMProvider(ABC):
     """Abstract base class for all LLM providers"""
     
-    def __init__(self, api_key: str, model: str, max_tokens: int = 1000, timeout: int = 30):
+    def __init__(self, api_key: str, model: str, max_tokens: int = 1000, timeout: int = 30, temperature: float = 1.0, **kwargs):
         self.api_key = api_key
         self.model = model
         self.max_tokens = max_tokens
         self.timeout = timeout
+        self.temperature = temperature
         self.provider_name = self.__class__.__name__.replace('Provider', '').lower()
     
     @abstractmethod

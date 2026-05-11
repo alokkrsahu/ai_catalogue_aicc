@@ -158,7 +158,7 @@ class GeminiProvider(LLMProvider):
                     "parts": [{"text": system_prefix}]
                 })
             
-            body = {"contents": contents}
+            body = {"contents": contents, "generationConfig": {"temperature": self.temperature}}
             tools = kwargs.get("tools")
             if tools:
                 func_decls = []
