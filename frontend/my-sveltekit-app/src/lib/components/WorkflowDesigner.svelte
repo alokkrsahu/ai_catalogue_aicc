@@ -100,6 +100,21 @@
   const AI_HISTORY_MAX = 10;
   let aiWorkflowHistory: Array<{nodes: any[]; edges: any[]}> = [];
   $: canUndoAI = aiWorkflowHistory.length > 0;
+  // Tracks whether the canvas has been manually edited since the most recent
+  // AI Builder apply. Used by undoAIWorkflow to confirm before discarding
+  // those edits — set true on every manual-mutation save site, reset to false
+  // when the AI Builder applies a graph or when an undo successfully restores
+  // an earlier AI baseline.
+  let dirtySinceLastAIApply = false;
+
+  // Manual-mutation save helper — every direct user edit (node/edge create,
+  // delete, drag, property change) routes through this so the dirty flag and
+  // the persistence call stay in sync. AI Builder apply/undo paths call
+  // saveWorkflowToDatabase directly and reset the flag explicitly.
+  function markDirtyAndSave() {
+    dirtySinceLastAIApply = true;
+    saveWorkflowToDatabase(false);
+  }
   let saving = false;
   let showInstructions = true; // State for dismissable instructions overlay
   let isPanelMaximized = false; // Whether the properties panel is maximized as modal
@@ -1029,6 +1044,10 @@
     showProperties = false;
     showConnectionProperties = false;
 
+    // Freshly-applied AI graph is the new baseline — clear the manual-edit flag
+    // so undoAIWorkflow doesn't prompt unnecessarily on the next click.
+    dirtySinceLastAIApply = false;
+
     saveWorkflowToDatabase(true);
     setTimeout(() => centerView(), 150);
   }
@@ -1036,6 +1055,19 @@
   // Restore the most recent pre-AI snapshot (undo the last AI Builder change).
   function undoAIWorkflow() {
     if (aiWorkflowHistory.length === 0) return;
+
+    // Guard against silently discarding manual edits made after the last AI
+    // apply. The restored snapshot is the canvas as it was at the previous AI
+    // apply — any post-apply manual changes will be lost.
+    if (dirtySinceLastAIApply) {
+      const ok = confirm(
+        'You have manually edited the canvas since the last AI Builder change. ' +
+        'Undo will discard those manual edits and restore the canvas to the ' +
+        'state immediately after the AI applied its changes. Continue?'
+      );
+      if (!ok) return;
+    }
+
     const snapshot = aiWorkflowHistory[aiWorkflowHistory.length - 1];
     aiWorkflowHistory = aiWorkflowHistory.slice(0, -1);
 
@@ -1047,6 +1079,9 @@
     selectedEdge = null;
     showProperties = false;
     showConnectionProperties = false;
+
+    // Restored snapshot is itself an AI-baseline state — reset the dirty flag.
+    dirtySinceLastAIApply = false;
 
     saveWorkflowToDatabase(true);
     setTimeout(() => centerView(), 150);
@@ -1141,7 +1176,7 @@
     showProperties = true;
     
     console.log('➕ WORKFLOW DESIGNER: Added node:', nodeType, nodeId.slice(-4), 'at position', position);
-    saveWorkflowToDatabase(false); // Silent auto-save
+    markDirtyAndSave(); // Silent auto-save
   }
   
   function getDefaultNodeData(nodeType: string) {
@@ -1296,7 +1331,7 @@
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
       if (hasDraggedSignificantly) {
-        saveWorkflowToDatabase(false); // Silent auto-save
+        markDirtyAndSave(); // Silent auto-save
       }
     }
     
@@ -1586,7 +1621,7 @@
       }
     }
     
-    saveWorkflowToDatabase(false); // Silent auto-save
+    markDirtyAndSave(); // Silent auto-save
   }
   
   // Connection rendering helpers
@@ -1825,7 +1860,7 @@
       showProperties = false;
       
       console.log('🗑️ CANVAS: Node deleted');
-      saveWorkflowToDatabase(false); // Silent auto-save
+      markDirtyAndSave(); // Silent auto-save
     }
   }
   
@@ -1857,7 +1892,7 @@
         }
       }
       
-      saveWorkflowToDatabase(false); // Silent auto-save
+      markDirtyAndSave(); // Silent auto-save
     }
   }
   
@@ -1870,7 +1905,7 @@
       selectedEdge = updatedConnection;
       
       console.log('✅ CANVAS: Connection updated:', updatedConnection);
-      saveWorkflowToDatabase(false); // Silent auto-save
+      markDirtyAndSave(); // Silent auto-save
     }
   }
   
@@ -2910,7 +2945,7 @@
                   selectedNode = newNode;
                 }
 
-                saveWorkflowToDatabase(false);
+                markDirtyAndSave();
               }
             }}
             on:toggleMaximize={() => isPanelMaximized = false}
@@ -2972,7 +3007,7 @@
               }
 
               console.log('✅ WORKFLOW: Node updated successfully - name:', newNode.data?.name || newNode.data?.label, 'description:', (newNode.data?.description || '').substring(0, 50));
-              saveWorkflowToDatabase(false);
+              markDirtyAndSave();
             } else {
               console.error('❌ WORKFLOW: Node not found in array!', updatedNode.id);
             }

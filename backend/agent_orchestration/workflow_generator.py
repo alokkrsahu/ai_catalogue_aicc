@@ -1233,50 +1233,14 @@ class WorkflowBuilder:
 
     @staticmethod
     def _resolve_toggle_dependencies(args: Dict) -> Dict:
-        """Enforce toggle dependency chain: doc_tool_calling → doc_aware, web_search, plan_mode."""
-        # Read from "documents" OR already-stored "doc_tool_calling_documents" so
-        # updates via _update_node_property (which pops "documents") don't wipe the list.
-        docs_val = args.get("documents") or args.get("doc_tool_calling_documents", [])
-        has_docs = bool(docs_val)
-        doc_tool_calling = has_docs or args.get("doc_tool_calling", False)
-        web_search = args.get("web_search_enabled", False)
-        doc_aware = args.get("doc_aware", False)
+        """Enforce toggle dependency chain: doc_tool_calling → doc_aware, web_search, plan_mode.
 
-        # Resolve the websearch mode now so the rest of the cascade can see it.
-        # URL mode delivers content via system-prompt injection — it does NOT need
-        # the tool-calling loop. General/domains modes do.
-        ws_mode = (args.get("web_search_mode") or "").lower()
-        if web_search and not ws_mode:
-            ws_mode = "general"
-        ws_needs_tools = web_search and ws_mode != "urls"
-
-        # Tool-calling-mode websearch and doc_aware force-enable doc_tool_calling
-        if ws_needs_tools or doc_aware:
-            doc_tool_calling = True
-
-        # If doc_tool_calling is off, cascade-disable dependents — except URL-mode
-        # websearch, which works independently (excerpts go straight into the
-        # system prompt; no tool loop required).
-        if not doc_tool_calling:
-            if not (web_search and ws_mode == "urls"):
-                web_search = False
-            doc_aware = False
-
-        return {
-            "doc_tool_calling": doc_tool_calling,
-            "doc_tool_calling_documents": docs_val,
-            "plan_mode": args.get("plan_mode", True) if doc_tool_calling else False,
-            "doc_aware": doc_aware,
-            "search_method": "hybrid_search" if doc_aware else "",
-            "vector_collections": ["project_documents"] if doc_aware else [],
-            "web_search_enabled": web_search,
-            "web_search_mode": (ws_mode if ws_mode else "general") if web_search else "",
-            "web_search_cache_ttl": 2592000 if web_search else 0,
-            "web_search_max_results": min(max(args.get("web_search_max_results", 5), 1), 20) if web_search else 0,
-            "web_search_top_k": min(max(args.get("web_search_top_k", 5), 1), 20) if web_search else 0,
-            "web_search_urls": [],
-            "web_search_domains": [],
-        }
+        Body extracted to graph_invariants.resolve_toggle_dependencies so the
+        save-time serializer can apply the same cascade. This delegate keeps
+        the call sites in WorkflowBuilder unchanged.
+        """
+        from .graph_invariants import resolve_toggle_dependencies
+        return resolve_toggle_dependencies(args)
 
     def _expand_documents(self, docs: Any) -> List[str]:
         """Expand wildcard ('*' or 'all') to the full list of available project documents.
@@ -2273,83 +2237,12 @@ def _has_unwired_classifier_categories(builder: WorkflowBuilder) -> bool:
 def _detect_sequential_cycles(builder: WorkflowBuilder) -> List[str]:
     """Run Kahn's algorithm on sequential edges only and report cycles.
 
-    Sequential edges must form a DAG — the runtime executor topological-sorts
-    them. Reflection edges are legal back-edges (bounded by max_iterations,
-    excluded from the topological sort); delegate edges are also excluded.
-
-    Returns human-readable issue strings that name the offending back-edge so
-    the verifier LLM can either convert it to `edge_type="reflection"` (with
-    `max_iterations` / `reflection_prompt`) or delete it.
+    Body extracted to graph_invariants.detect_sequential_cycles so the
+    save-time serializer can call the same check. This wrapper keeps the
+    AI Builder's existing callers unchanged.
     """
-    nodes = builder.nodes
-    edges = builder.edges
-    if not nodes:
-        return []
-
-    name_by_id = {n["id"]: (n.get("data", {}) or {}).get("name", n["id"][:8]) for n in nodes}
-
-    # Build adjacency on sequential edges only. Treat missing/empty type as
-    # sequential (that's the default when edges come from older payloads).
-    seq_edges = [
-        e for e in edges
-        if (e.get("type") or "sequential") == "sequential"
-    ]
-
-    adjacency: Dict[str, List[str]] = {n["id"]: [] for n in nodes}
-    in_degree: Dict[str, int] = {n["id"]: 0 for n in nodes}
-    for e in seq_edges:
-        src, tgt = e.get("source"), e.get("target")
-        if src in adjacency and tgt in in_degree:
-            adjacency[src].append(tgt)
-            in_degree[tgt] += 1
-
-    # Kahn's: repeatedly remove zero-in-degree nodes. Anything left over sits
-    # in a cycle (or is downstream of one).
-    queue = [nid for nid, d in in_degree.items() if d == 0]
-    processed = 0
-    while queue:
-        nid = queue.pop(0)
-        processed += 1
-        for tgt in adjacency.get(nid, []):
-            in_degree[tgt] -= 1
-            if in_degree[tgt] == 0:
-                queue.append(tgt)
-
-    if processed == len(nodes):
-        return []  # Pure DAG on sequential edges.
-
-    # Gather the nodes stuck in / downstream of the cycle and surface the
-    # specific sequential edges that form or feed the cycle so the verifier
-    # LLM can delete or retype the right ones.
-    stuck_ids = {nid for nid, d in in_degree.items() if d > 0}
-    cycle_names = sorted({name_by_id.get(nid, nid[:8]) for nid in stuck_ids})
-    back_edges = [
-        f"'{name_by_id.get(e['source'], e['source'][:8])}' → "
-        f"'{name_by_id.get(e['target'], e['target'][:8])}'"
-        for e in seq_edges
-        if e.get("source") in stuck_ids and e.get("target") in stuck_ids
-    ]
-    if not back_edges:
-        back_edges = ["(could not isolate the specific back-edge)"]
-
-    return [
-        (
-            f"Cycle detected in SEQUENTIAL edges among agents: {cycle_names}. "
-            f"Sequential edges involved: {back_edges}. Sequential edges must "
-            f"form a DAG — the topological-sort executor will break on a "
-            f"cycle. Fix options, in order of preference: "
-            f"(1) If this is an iterative-refinement loop (e.g. reviewer "
-            f"sending draft back to writer), convert ONE back-edge to "
-            f"`edge_type='reflection'` with `max_iterations` and "
-            f"`reflection_prompt` — use `delete_edge` on the cycling edge "
-            f"and recreate it via `connect_nodes(..., edge_type='reflection', "
-            f"max_iterations=<N>, reflection_prompt='...')`. "
-            f"(2) Otherwise `delete_edge` the back-edge entirely. "
-            f"Do NOT fake a revision loop with a ClassifierAgent branch that "
-            f"points back to an earlier agent — that is the same cycle under a "
-            f"different name."
-        )
-    ]
+    from .graph_invariants import detect_sequential_cycles
+    return detect_sequential_cycles(builder.nodes, builder.edges)
 
 
 def _check_router_wiring(builder: WorkflowBuilder) -> List[str]:
@@ -3378,6 +3271,60 @@ def _compute_graph_diff(
     }
 
 
+# ── User-context formatter (used by verifier + self-critique) ──────────
+
+
+def _format_user_context(
+    conversation_history: Optional[List[Dict[str, str]]],
+    user_message: str,
+) -> str:
+    """Package the full prior conversation history + the current user
+    message into one labelled block for embedding in a verifier or
+    self-critique prompt.
+
+    The verifier and self-critique calls don't replay `conversation_history`
+    as native message turns (they're framed as fresh reviews, not chat
+    continuations). Without this helper they used to receive only a
+    truncated `user_message[:N]` quote and zero prior context — so any
+    constraint expressed in an earlier turn (or past the truncation point)
+    was invisible to them. This helper hands them the entire conversation
+    verbatim so they can spot regressions against any prior constraint.
+
+    `conversation_history` is a flat chronological list of
+    `{role, content}` dicts from prior turns. `user_message` is the
+    current turn (not yet in history).
+    """
+    lines: List[str] = []
+    turn = 0
+    if conversation_history:
+        lines.append(
+            "=== PRIOR CONVERSATION (full history of this AI Builder session) ==="
+        )
+        for entry in conversation_history:
+            role = (entry.get("role") or "").strip().lower()
+            content = (entry.get("content") or "").strip()
+            if not content:
+                continue
+            if role == "user":
+                turn += 1
+                lines.append("")
+                lines.append(f"[Turn {turn}] USER:")
+                lines.append(content)
+            elif role == "assistant":
+                lines.append("")
+                lines.append(f"[Turn {turn or 1}] ASSISTANT:")
+                lines.append(content)
+            else:
+                lines.append("")
+                lines.append(f"[Turn {turn or 1}] {role.upper() or 'UNKNOWN'}:")
+                lines.append(content)
+        lines.append("")
+    current_turn = turn + 1 if turn else 1
+    lines.append(f"=== CURRENT USER REQUEST (turn {current_turn}) ===")
+    lines.append(user_message)
+    return "\n".join(lines)
+
+
 # ── Planning helper (Pillar 1) ─────────────────────────────────────────
 
 async def _run_planning_phase(
@@ -3887,7 +3834,7 @@ async def generate_workflow(
                 f"{graph_desc}\n\n"
                 f"{_plan_block}"
                 f"{_issues_block}"
-                f"The user's original request was: \"{user_message[:500]}\"\n\n"
+                f"{_format_user_context(conversation_history, user_message)}\n\n"
                 "VERIFY the following and FIX any issues using the available tools:\n"
                 "1. Does the orchestration make sense for the user's request? Are the right agents created with the right roles?\n"
                 "2. Are all connections valid? Does information flow logically from source to destination?\n"
@@ -4079,7 +4026,7 @@ async def generate_workflow(
                 "verification (router wiring, terminal reachability, regression "
                 "guard). Your job is different from the invariant verifier — find "
                 "SEMANTIC and CONFIGURATION issues a rigid check cannot see.\n\n"
-                f"The user's ORIGINAL REQUEST was:\n  \"{user_message[:800]}\"\n\n"
+                f"{_format_user_context(conversation_history, user_message)}\n\n"
                 f"{crit_desc}\n\n"
                 "Review the workflow critically and look for issues such as:\n"
                 "  • An agent whose system_message is vague, generic, or does not "

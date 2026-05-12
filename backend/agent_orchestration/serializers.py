@@ -2,9 +2,37 @@
 Agent Orchestration Serializers - FIXED VERSION
 Template Independent Agent Workflow Serializers with defensive field handling
 """
+import logging
 
 from rest_framework import serializers
 from users.models import AgentWorkflow, SimulationRun, AgentMessage
+
+from .graph_invariants import (
+    GraphValidationError,
+    validate_and_normalize_graph_json,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _run_graph_invariants(value):
+    """Helper used by every save-path validate_graph_json — runs the
+    structural invariants from graph_invariants and either raises
+    serializers.ValidationError (cycles, bad classifier handles) or returns
+    the toggle-normalised graph_json. Logs whenever normalisation actually
+    changes something so we can observe how often a manual edit falls out
+    of toggle consistency."""
+    try:
+        normalized, meta = validate_and_normalize_graph_json(value)
+    except GraphValidationError as exc:
+        raise serializers.ValidationError(list(exc.issues))
+    changed = meta.get("normalized_nodes", 0)
+    if changed:
+        logger.info(
+            "🔧 GRAPH INVARIANTS: normalised toggle cascade on %d node(s) at save time",
+            changed,
+        )
+    return normalized
 
 
 class AgentWorkflowSerializer(serializers.ModelSerializer):
@@ -111,9 +139,26 @@ class AgentWorkflowSerializer(serializers.ModelSerializer):
         data['edge_count'] = self.get_edge_count(instance)
         data['execution_count'] = self.get_execution_count(instance)
         data['last_execution_status'] = self.get_last_execution_status(instance)
-        
+
         return data
-    
+
+    def validate_graph_json(self, value):
+        """Apply structural invariants on every save (create + update via the
+        universal API). Without this hook, DRF's ModelSerializer would accept
+        any JSON because graph_json is a bare JSONField at the model level —
+        a manual canvas edit could persist a cycle or a stale classifier
+        source_handle that the runtime would silently misroute.
+        """
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("graph_json must be a dictionary")
+        if 'nodes' not in value or 'edges' not in value:
+            raise serializers.ValidationError(
+                "graph_json must contain 'nodes' and 'edges' keys"
+            )
+        if not isinstance(value['nodes'], list) or not isinstance(value['edges'], list):
+            raise serializers.ValidationError("'nodes' and 'edges' must be lists")
+        return _run_graph_invariants(value)
+
     class Meta:
         model = AgentWorkflow
         fields = '__all__'  # We'll handle field filtering in to_representation
@@ -210,18 +255,21 @@ class WorkflowValidationSerializer(serializers.Serializer):
         for key in required_keys:
             if key not in value:
                 raise serializers.ValidationError(f"Graph JSON must contain '{key}' field")
-        
+
         # Validate nodes structure
         nodes = value.get('nodes', [])
         if not isinstance(nodes, list):
             raise serializers.ValidationError("'nodes' must be a list")
-        
+
         # Validate edges structure
         edges = value.get('edges', [])
         if not isinstance(edges, list):
             raise serializers.ValidationError("'edges' must be a list")
-        
-        return value
+
+        # Structural invariants: reject cycles in sequential edges and
+        # classifier edges pointing at non-existent category UUIDs;
+        # normalise toggle inconsistencies silently.
+        return _run_graph_invariants(value)
 
 
 class AgentWorkflowCreateSerializer(serializers.ModelSerializer):
@@ -261,24 +309,25 @@ class AgentWorkflowCreateSerializer(serializers.ModelSerializer):
         """Validate graph JSON structure for creation"""
         if not isinstance(value, dict):
             raise serializers.ValidationError("graph_json must be a dictionary")
-        
+
         if 'nodes' not in value or 'edges' not in value:
             raise serializers.ValidationError("graph_json must contain 'nodes' and 'edges' keys")
-        
+
         if not isinstance(value['nodes'], list) or not isinstance(value['edges'], list):
             raise serializers.ValidationError("'nodes' and 'edges' must be lists")
-        
+
         # Validate node structure
         for i, node in enumerate(value['nodes']):
             if not isinstance(node, dict):
                 raise serializers.ValidationError(f"Node {i} must be a dictionary")
-            
+
             required_fields = ['id', 'type', 'position', 'data']
             for field in required_fields:
                 if field not in node:
                     raise serializers.ValidationError(f"Node {i} missing required field: {field}")
-        
-        return value
+
+        # Structural invariants — see _run_graph_invariants for the full set.
+        return _run_graph_invariants(value)
 
 
 class WorkflowExecutionSerializer(serializers.Serializer):
