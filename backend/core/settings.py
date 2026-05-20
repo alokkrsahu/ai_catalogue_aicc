@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 from pathlib import Path
 import os
 from dotenv import load_dotenv
+from django.core.exceptions import ImproperlyConfigured
 
 # Load environment variables from .env file
 load_dotenv()
@@ -236,7 +237,9 @@ AUTH_USER_MODEL = 'users.User'
 # LLM Eval App Settings
 # IMPORTANT: Generate a secure encryption key for API keys
 # You can generate one by running: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-API_KEY_ENCRYPTION_KEY = 'BvAnyMC4-7_2oomBc_PT5lfmZN_LGisAdcvSF1EOAPQ='
+API_KEY_ENCRYPTION_KEY = os.getenv('API_KEY_ENCRYPTION_KEY')
+if not API_KEY_ENCRYPTION_KEY:
+    raise ImproperlyConfigured("API_KEY_ENCRYPTION_KEY environment variable is required")
 
 # Project-Specific API Key Management Settings
 PROJECT_API_KEY_SETTINGS = {

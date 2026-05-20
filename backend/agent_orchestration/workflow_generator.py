@@ -3741,6 +3741,11 @@ async def generate_workflow(
     # Auto-repair: fix common issues the LLM misses (deterministic)
     _auto_repair_connections(builder)
 
+    # Phase 3 (Verify) instrumentation — counters for EXP_METRIC_WORKFLOW_VERIFY.
+    _verify_t_start = time.time()
+    _verifier_iterations = 0
+    _verifier_tool_calls = 0
+
     # Pre-flight router-wiring invariants — surface any classifier/splitter
     # wiring gaps as concrete issues the verifier agent must fix.
     router_issues = _check_router_wiring(builder)
@@ -3887,6 +3892,7 @@ async def generate_workflow(
             # need multiple rounds of fixes (delete backwards edges, add
             # classifier source_categories, rewire chained specialists, etc.).
             for v_iter in range(6):
+                _verifier_iterations = v_iter + 1
                 v_response = await llm_provider.generate_response(messages=verify_messages, tools=WORKFLOW_TOOLS)
                 if v_response.error:
                     logger.warning(f"⚠️ WORKFLOW GEN: Verification agent error: {v_response.error}")
@@ -3896,6 +3902,7 @@ async def generate_workflow(
                     logger.info(f"🔍 WORKFLOW GEN: Verification agent: {v_response.text[:200]}")
                 if not v_response.tool_calls:
                     break
+                _verifier_tool_calls += len(v_response.tool_calls)
                 # Process verification tool calls
                 formatted_v_calls = []
                 for tc in v_response.tool_calls:
@@ -3942,6 +3949,34 @@ async def generate_workflow(
         logger.info("🔧 WORKFLOW GEN: running post-verifier auto-repair sweep")
         _auto_repair_connections(builder)
 
+    # Phase 3 (Verify) metric — emitted unconditionally so we record even the
+    # case where the verifier-LLM block was skipped (builder.nodes < 3).
+    try:
+        _verify_final_issues = _check_router_wiring(builder) if builder.nodes else []
+        _verify_graph_json = builder.build_graph_json() if builder.nodes else {"nodes": [], "edges": []}
+        _verify_duration_ms = round((time.time() - _verify_t_start) * 1000, 1)
+        from .metrics_logger import log_experiment_metric
+        await log_experiment_metric(
+            project_id=str(project.project_id),
+            experiment_type="workflow_verify",
+            metric_data={
+                "experiment": "workflow_verify",
+                "first_pass_valid": len(router_issues) == 0,
+                "initial_router_issues": len(router_issues),
+                "final_router_issues": len(_verify_final_issues),
+                "verifier_closed": len(_verify_final_issues) == 0,
+                "verifier_iterations": _verifier_iterations,
+                "verifier_tool_calls": _verifier_tool_calls,
+                "duration_ms": _verify_duration_ms,
+                "nodes": len(_verify_graph_json["nodes"]),
+                "edges": len(_verify_graph_json["edges"]),
+            },
+            configuration={"phase": "verify", "max_iterations": 6},
+            log_tag="EXP_METRIC_WORKFLOW_VERIFY",
+        )
+    except Exception as _verify_metric_err:
+        logger.warning(f"⚠️ WORKFLOW GEN: verify metric logging failed: {_verify_metric_err}")
+
     # ── Self-critique phase (4th phase, always-on) ─────────────────────
     # The invariant verifier above checks structural rules (router wiring,
     # terminal reachability, regression guard). The self-critique phase
@@ -3954,6 +3989,7 @@ async def generate_workflow(
     # Replaces the common manual follow-up prompt: "find the issues in
     # the current workflow and fix the errors". Runs silently; the
     # final diff combines initial-build + verifier + self-critique edits.
+    #
     if builder.nodes and len(builder.nodes) >= 3:
         try:
             sc_tool_calls_before = len(builder.tool_calls_log)

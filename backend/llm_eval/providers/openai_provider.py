@@ -390,7 +390,10 @@ class OpenAIProvider(LLMProvider):
                     if isinstance(content, list):
                         part_types = [p.get("type", "?") for p in content if isinstance(p, dict)]
                         logger.info(f"🔍 OPENAI: Message[{i}] role={msg.get('role')!r} content_parts={part_types} (file refs present)")
-            timeout_sec = max(self.timeout, 300) if (use_responses_api or has_tools) else self.timeout
+            # Apply a 300s floor uniformly. Multi-input synthesis agents (no tools,
+            # not Responses-API) can still legitimately exceed the base 30s default
+            # because they combine long context from multiple upstream agents.
+            timeout_sec = max(self.timeout, 300)
             logger.info(f"🔍 OPENAI: Request timeout={timeout_sec}s, use_responses_api={use_responses_api}, self.timeout={self.timeout}")
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_sec, sock_read=timeout_sec, sock_connect=60)) as session:
                 async with session.post(url, headers=self.get_headers(), json=body) as response:
