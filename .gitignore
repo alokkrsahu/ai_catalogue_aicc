@@ -264,6 +264,12 @@ documentation/
 # GitHub Workflows
 .github/workflows/sync-upstream.yml
 
+# Claude Code config (local-only, not needed by other contributors)
+CLAUDE.md
+
+# E2E test script (contains hardcoded local paths and project UUIDs)
+test_workflow_e2e.py
+
 # NON-PROJECT / RESEARCH ARCHIVE
 # =============================================================================
 # All non-project files (old paper drafts, figures, research, docs) live here
