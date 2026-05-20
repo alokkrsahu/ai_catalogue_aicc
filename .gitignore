@@ -261,6 +261,9 @@ documentation/
 *.bib
 
 # =============================================================================
+# GitHub Workflows
+.github/workflows/sync-upstream.yml
+
 # NON-PROJECT / RESEARCH ARCHIVE
 # =============================================================================
 # All non-project files (old paper drafts, figures, research, docs) live here
