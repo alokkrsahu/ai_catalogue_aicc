@@ -1,7 +1,13 @@
 #!/bin/bash
 
 # AI Catalogue - SSL Certificate Renewal Script
-# This script renews Let's Encrypt SSL certificates
+# Uses the host-installed certbot (same version as the Docker image).
+# Authenticator: standalone — briefly stops nginx to free port 80 for the ACME
+# challenge, then starts it again.  A deploy_hook in the renewal config
+# automatically copies the renewed cert to nginx/ssl/ and reloads nginx.
+#
+# Run as: sudo ./scripts/renew-ssl.sh
+# (sudo required because standalone needs to bind port 80)
 
 set -e
 
@@ -17,22 +23,21 @@ if [ -f .env ]; then
     source .env
 fi
 
-# Renew certificates
+# Renew certificates using host certbot.
+# --force-renewal bypasses the "cert still has >30 days" skip guard so the
+# command can be tested manually; remove that flag for automated cron use.
 echo "📜 Renewing SSL certificates..."
-docker compose -f docker-compose.yml -f docker-compose.ssl.yml run --rm certbot renew
+certbot renew \
+    --config-dir /home/alokkrsahu/ai_catalogue/certbot/certs \
+    --work-dir   /home/alokkrsahu/ai_catalogue/certbot/work \
+    --logs-dir   /home/alokkrsahu/ai_catalogue/certbot/logs
 
-# Check if renewal was successful
-if [ $? -eq 0 ]; then
-    echo "✅ Certificate renewal successful!"
-    
-    # Reload nginx to use new certificates
-    echo "🔄 Reloading Nginx configuration..."
-    docker compose -f docker-compose.yml -f docker-compose.ssl.yml exec nginx nginx -s reload
-    
-    echo "🎉 SSL certificates renewed and Nginx reloaded successfully!"
+RESULT=$?
+if [ $RESULT -eq 0 ]; then
+    echo "✅ Certificate renewal successful (or cert still valid — no action needed)."
     echo "📅 Next renewal check in ~60 days"
 else
-    echo "❌ Certificate renewal failed"
+    echo "❌ Certificate renewal failed (exit code $RESULT)"
     echo "🔍 Check the output above for details"
     exit 1
 fi
