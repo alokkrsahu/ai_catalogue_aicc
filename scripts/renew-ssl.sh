@@ -6,8 +6,8 @@
 # challenge, then starts it again.  A deploy_hook in the renewal config
 # automatically copies the renewed cert to nginx/ssl/ and reloads nginx.
 #
-# Run as: sudo ./scripts/renew-ssl.sh
-# (sudo required because standalone needs to bind port 80)
+# Can be run as a normal user — the script calls sudo internally for the
+# certbot step (standalone needs root to bind port 80).
 
 set -e
 
@@ -23,11 +23,10 @@ if [ -f .env ]; then
     source .env
 fi
 
-# Renew certificates using host certbot.
-# --force-renewal bypasses the "cert still has >30 days" skip guard so the
-# command can be tested manually; remove that flag for automated cron use.
+# Renew certificates using host certbot (sudo required for standalone + root-
+# owned log/work dirs left by previous Docker-based runs).
 echo "📜 Renewing SSL certificates..."
-certbot renew \
+sudo certbot renew \
     --config-dir /home/alokkrsahu/ai_catalogue/certbot/certs \
     --work-dir   /home/alokkrsahu/ai_catalogue/certbot/work \
     --logs-dir   /home/alokkrsahu/ai_catalogue/certbot/logs
