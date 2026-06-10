@@ -118,7 +118,10 @@
     let loc = '';
     if (cit.page) loc += `p.${cit.page}`;
     if (cit.section) loc += (loc ? ', ' : '') + cit.section;
-    tooltip.innerHTML = `<div class="cite-tooltip-title">${cit.document_title || 'Document'}${loc ? ' — ' + loc : ''}</div><div class="cite-tooltip-quote">"${(cit.quoted_text || '').slice(0, 300)}"</div>`;
+    const urlHtml = cit.url
+      ? `<div class="cite-tooltip-url"><a href="${cit.url}" target="_blank" rel="noopener noreferrer">${cit.url}</a></div>`
+      : '';
+    tooltip.innerHTML = `<div class="cite-tooltip-title">${cit.document_title || 'Document'}${loc ? ' — ' + loc : ''}</div>${urlHtml}<div class="cite-tooltip-quote">"${(cit.quoted_text || '').slice(0, 300)}"</div>`;
     const rect = target.getBoundingClientRect();
     tooltip.style.position = 'fixed';
     tooltip.style.left = `${rect.left}px`;
@@ -1715,6 +1718,18 @@
     color: #38bdf8;
     margin-bottom: 6px;
     font-size: 12px;
+  }
+  :global(.cite-tooltip-url) {
+    margin-bottom: 6px;
+    font-size: 11px;
+    word-break: break-all;
+  }
+  :global(.cite-tooltip-url a) {
+    color: #7dd3fc;
+    text-decoration: underline;
+  }
+  :global(.cite-tooltip-url a:hover) {
+    color: #38bdf8;
   }
   :global(.cite-tooltip-quote) {
     font-style: italic;
