@@ -545,7 +545,7 @@ def _generate_llm_response(message: str, context_results: List[Dict], conversati
                     # Map to standard roles
                     if role.lower() == 'assistant':
                         messages.append({"role": "assistant", "content": content})
-        else:
+                    else:
                         messages.append({"role": "user", "content": content})
 
         # Add current user message
@@ -582,11 +582,19 @@ def _format_sources(context_results: List[Dict]) -> List[Dict]:
     sources = []
     for result in context_results[:3]:  # Show top 3 sources
         metadata = result.get('metadata', {})
+        # Surface the document's source_url so clients can render clickable
+        # citations. Only expose real web URLs — blank values and internal
+        # pseudo-URLs (e.g. 'upload://<filename>' from bulk uploads) degrade
+        # to '' so clients render a plain (non-link) chip.
+        source_url = (metadata.get('source_url') or '').strip()
+        if not source_url.startswith(('http://', 'https://')):
+            source_url = ''
         sources.append({
             'title': metadata.get('title', 'Knowledge Entry'),
             'source': metadata.get('source', 'Public Knowledge Base'),
             'category': metadata.get('category', 'General'),
             'relevance_score': result.get('similarity_score', 0),
+            'url': source_url,
             'excerpt': result.get('content', '')[:150] + '...' if len(result.get('content', '')) > 150 else result.get('content', '')
         })
     return sources
@@ -1057,6 +1065,22 @@ def _generate_streaming_llm_response(message: str, context_results: list, conver
                 total_tokens = 0
                 response_time_ms = 0
                 chroma_search_time = 0  # TODO: Calculate from context search
+
+                # Emit citation sources as the first SSE event (same shape as
+                # the non-streaming response's 'sources' array, including the
+                # clickable 'url' field) so clients can render citation chips
+                # before/while the answer streams. Clients that switch on the
+                # event 'type' ignore unknown types, so this is additive.
+                if context_results:
+                    try:
+                        sources_event = {
+                            "type": "sources",
+                            "sources": _format_sources(context_results),
+                            "request_id": request_id,
+                        }
+                        yield f"data: {json.dumps(sources_event)}\n\n"
+                    except Exception as e:
+                        logger.error(f"❌ STREAM: Failed to emit sources event [{request_id}]: {e}")
 
                 try:
                     for chunk in original_generator:

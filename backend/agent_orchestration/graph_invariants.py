@@ -113,9 +113,23 @@ def resolve_toggle_dependencies(args: Dict[str, Any]) -> Dict[str, Any]:
     prompt, so it does not need the tool-calling loop and is not gated on
     doc_tool_calling.
 
+    Content fields (web_search_urls, web_search_domains, cache TTL, an
+    explicit search_method) are PASSED THROUGH, not reset. This resolver
+    runs on every workflow save via the DRF serializers, so resetting them
+    here would erase user configuration on each canvas save — and the
+    post-save orphan cleanup would then delete the cached per-URL summaries
+    too. The invariant: toggle resolution may enforce cross-field
+    consistency, but must never discard content it doesn't model. Lists are
+    preserved even while web_search is off so a disable/re-enable cycle
+    round-trips losslessly.
+
     Returns a dict with the resolved toggle values. Callers merge it into
     the node's data block.
     """
+    # Local import: keeps this module importable without the websearch
+    # package being initialised (mirrors workflow_generator's style).
+    from .websearch import clean_url_list
+
     docs_val = args.get("documents") or args.get("doc_tool_calling_documents", [])
     has_docs = bool(docs_val)
     doc_tool_calling = has_docs or args.get("doc_tool_calling", False)
@@ -135,20 +149,39 @@ def resolve_toggle_dependencies(args: Dict[str, Any]) -> Dict[str, Any]:
             web_search = False
         doc_aware = False
 
+    # Pass-through sanitisation (validate/dedupe/cap, never reset).
+    ws_urls, _dropped_invalid, _dropped_over_cap = clean_url_list(
+        args.get("web_search_urls") or []
+    )
+    seen_domains = set()
+    ws_domains = []
+    for d in (args.get("web_search_domains") or []):
+        if not isinstance(d, str):
+            continue
+        d = d.strip()
+        if d and d not in seen_domains:
+            seen_domains.add(d)
+            ws_domains.append(d)
+
+    cache_ttl = args.get("web_search_cache_ttl")
+    if not isinstance(cache_ttl, int) or cache_ttl < 0:
+        cache_ttl = 2592000 if web_search else 0
+    cache_ttl = min(cache_ttl, 365 * 86400)
+
     return {
         "doc_tool_calling": doc_tool_calling,
         "doc_tool_calling_documents": docs_val,
         "plan_mode": args.get("plan_mode", True) if doc_tool_calling else False,
         "doc_aware": doc_aware,
-        "search_method": "hybrid_search" if doc_aware else "",
-        "vector_collections": ["project_documents"] if doc_aware else [],
+        "search_method": (args.get("search_method") or "hybrid_search") if doc_aware else "",
+        "vector_collections": (args.get("vector_collections") or ["project_documents"]) if doc_aware else [],
         "web_search_enabled": web_search,
         "web_search_mode": (ws_mode if ws_mode else "general") if web_search else "",
-        "web_search_cache_ttl": 2592000 if web_search else 0,
+        "web_search_cache_ttl": cache_ttl,
         "web_search_max_results": min(max(args.get("web_search_max_results", 5), 1), 20) if web_search else 0,
         "web_search_top_k": min(max(args.get("web_search_top_k", 5), 1), 20) if web_search else 0,
-        "web_search_urls": [],
-        "web_search_domains": [],
+        "web_search_urls": ws_urls,
+        "web_search_domains": ws_domains,
     }
 
 

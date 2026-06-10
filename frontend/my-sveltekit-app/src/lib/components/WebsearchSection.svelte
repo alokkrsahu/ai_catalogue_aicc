@@ -339,11 +339,11 @@
       if (!nodeConfig.web_search_max_results) nodeConfig.web_search_max_results = 5;
       if (!nodeConfig.web_search_urls) nodeConfig.web_search_urls = [];
       if (!nodeConfig.web_search_domains) nodeConfig.web_search_domains = [];
-    } else {
-      // Disable WebSearch but preserve mode so re-enable restores it.
-      nodeConfig.web_search_urls = [];
-      nodeConfig.web_search_domains = [];
     }
+    // On disable: preserve mode AND the URL/domain lists so re-enable
+    // restores the full config. The lists are inert while disabled (the
+    // executor gates on web_search_enabled first), and wiping them would
+    // also cascade-delete the cached per-URL summaries server-side.
     nodeConfig = { ...nodeConfig };
     onChange();
   }

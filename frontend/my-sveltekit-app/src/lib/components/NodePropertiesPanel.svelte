@@ -2787,11 +2787,11 @@
                   // their summaries don't get wiped (and orphan-cleanup
                   // deleted) just because they toggled doc_tool_calling off.
                   // General/domains websearch DOES need the tool loop, so
-                  // those modes still cascade-disable.
+                  // those modes still cascade-disable — but only the toggle:
+                  // the URL/domain lists are content, inert while disabled,
+                  // and must survive so re-enabling restores them.
                   if (nodeConfig.web_search_mode !== 'urls') {
                     nodeConfig.web_search_enabled = false;
-                    nodeConfig.web_search_urls = [];
-                    nodeConfig.web_search_domains = [];
                   }
                 }
                 nodeConfig = { ...nodeConfig };
