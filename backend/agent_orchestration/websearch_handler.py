@@ -1037,12 +1037,16 @@ class WebSearchHandler:
                 short_prompt = (
                     f"Summarise the following web page content in approximately 200 words. "
                     f"Focus on what this page is about, its key topics, and when it would be "
-                    f"most useful to consult it. Be concise and factual.\n\n"
+                    f"most useful to consult it. Be concise and factual. "
+                    f"Write entirely in English — do not use any non-English words or characters "
+                    f"regardless of the language of the source content.\n\n"
                     f"URL: {url}\n\nContent:\n{raw_text}"
                 )
                 long_prompt = (
                     f"Write a detailed summary (up to 3000 words) of the following web page. "
-                    f"Include the main topics, key facts, data, and any notable details.\n\n"
+                    f"Include the main topics, key facts, data, and any notable details. "
+                    f"Write entirely in English — do not use any non-English words or characters "
+                    f"regardless of the language of the source content.\n\n"
                     f"URL: {url}\n\nContent:\n{raw_text}"
                 )
 
