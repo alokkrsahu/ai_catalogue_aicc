@@ -974,8 +974,26 @@ class DeploymentViewSet(viewsets.ViewSet):
                     {'error': 'urls must be a non-empty list'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            from .websearch import clean_url_list
-            urls, dropped_invalid, dropped_over_cap = clean_url_list(urls)
+            # Validate (protocol check + dedupe) WITHOUT applying the per-agent
+            # URL cap.  MAX_URLS_PER_AGENT is a node-editor UI limit — applying
+            # it here silently truncates the tail of large URL lists so those
+            # URLs are never queued, even on repeated retries.
+            seen_urls: set = set()
+            cleaned_urls: list = []
+            dropped_invalid = 0
+            for item in urls:
+                if not isinstance(item, str) or not item.strip():
+                    dropped_invalid += 1
+                    continue
+                u = item.strip()
+                if not (u.startswith('http://') or u.startswith('https://')):
+                    dropped_invalid += 1
+                    continue
+                if u not in seen_urls:
+                    seen_urls.add(u)
+                    cleaned_urls.append(u)
+            urls = cleaned_urls
+            dropped_over_cap = 0
             if not urls:
                 return Response(
                     {'error': 'No valid URLs provided'},
