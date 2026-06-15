@@ -1035,18 +1035,23 @@ class WebSearchHandler:
                 raw_text = raw_text[:8000]
 
                 short_prompt = (
-                    f"Summarise the following web page content in approximately 200 words. "
-                    f"Focus on what this page is about, its key topics, and when it would be "
-                    f"most useful to consult it. Be concise and factual. "
-                    f"Write entirely in English — do not use any non-English words or characters "
-                    f"regardless of the language of the source content.\n\n"
+                    f"Extract the key factual information from the following web page. "
+                    f"Preserve specific names, titles, dates, requirements, contact details, "
+                    f"links, and any concrete facts exactly as they appear — do not paraphrase "
+                    f"or generalise. Aim for around 200 words but prioritise completeness of "
+                    f"facts over brevity. Write entirely in English — do not use any non-English "
+                    f"words or characters regardless of the language of the source content.\n\n"
                     f"URL: {url}\n\nContent:\n{raw_text}"
                 )
                 long_prompt = (
-                    f"Write a detailed summary (up to 3000 words) of the following web page. "
-                    f"Include the main topics, key facts, data, and any notable details. "
-                    f"Write entirely in English — do not use any non-English words or characters "
-                    f"regardless of the language of the source content.\n\n"
+                    f"Extract ALL factual information from the following web page as faithfully "
+                    f"as possible. Preserve every specific name, title, date, deadline, price, "
+                    f"requirement, step, contact detail, URL, list item, and concrete fact "
+                    f"exactly as stated on the page. Do not paraphrase, generalise, or omit "
+                    f"details. Structure the output clearly using the same sections and headings "
+                    f"as the original page where possible. Write entirely in English — do not "
+                    f"use any non-English words or characters regardless of the language of the "
+                    f"source content.\n\n"
                     f"URL: {url}\n\nContent:\n{raw_text}"
                 )
 
