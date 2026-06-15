@@ -86,6 +86,7 @@ def _parse_citations_block(text: str) -> Tuple[str, List[Dict[str, Any]]]:
     text is returned with an empty list.
     """
     pattern = r"---CITATIONS---\s*(.*?)\s*---END_CITATIONS---"
+    logger.info(f"🔗 CITE[5/PARSE]: Scanning response ({len(text)} chars) for ---CITATIONS--- block")
     match = re.search(pattern, text, re.DOTALL)
     if not match:
         # #region agent log
@@ -123,6 +124,8 @@ def _parse_citations_block(text: str) -> Tuple[str, List[Dict[str, Any]]]:
                     except (TypeError, ValueError):
                         pass
                 normalized.append(item)
+            url_hits = sum(1 for c in normalized if c.get('url'))
+            logger.info(f"🔗 CITE[5/PARSE]: Extracted {len(normalized)} citations ({url_hits} with URL)")
             return clean_text, normalized
     except (json.JSONDecodeError, TypeError) as e:
         # #region agent log

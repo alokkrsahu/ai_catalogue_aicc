@@ -40,6 +40,7 @@ class WebSearchHandler:
         self.fetcher_service = WebsiteFetcherService()
         self.search_service = DuckDuckGoService()
         self.web_rag_service = WebRAGService()
+        self._last_url_chunks: List[Dict[str, Any]] = []
         logger.info("🌐 WEBSEARCH HANDLER: Initialized with cache, fetcher, search, and RAG services")
     
     # =========================================================================
@@ -256,6 +257,11 @@ class WebSearchHandler:
         if not query:
             query = "general overview"  # minimal fallback query
         chunks = await self.web_rag_service.search(query, project_id, top_k=top_k)
+        self._last_url_chunks = list(chunks) if chunks else []
+        logger.info(
+            f"🔗 CITE[1/CHUNKS]: Stored {len(self._last_url_chunks)} URL chunks for citation construction "
+            f"(sample urls: {[c.get('url','')[:80] for c in self._last_url_chunks[:3]]})"
+        )
         if chunks:
             return self._format_rag_results(chunks), cache_meta
 

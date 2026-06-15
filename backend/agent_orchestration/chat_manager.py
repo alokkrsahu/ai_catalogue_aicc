@@ -515,6 +515,11 @@ class ChatManager:
         if self.websearch_handler and self.websearch_handler.is_websearch_enabled(agent_node) and project_id and (not _will_use_tool_path or _ws_mode == 'urls'):
             try:
                 logger.info(f"🌐 WEBSEARCH: Single agent {agent_name} - WebSearch enabled (context augmentation)")
+                logger.info(
+                    f"🔗 CITE[4b/WS-CONTEXT]: Single-input {agent_name} fetching websearch context "
+                    f"(mode={_ws_mode!r}, doc_tool_calling={agent_data_ws.get('doc_tool_calling')}, "
+                    f"will_use_tool_path={_will_use_tool_path}) — _last_url_chunks will be set here"
+                )
                 websearch_context = await self.websearch_handler.get_websearch_context(
                     agent_node, conversation_history, project_id,
                     execution_id=execution_id,

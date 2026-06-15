@@ -7,7 +7,10 @@ grounding metadata while conversation_history stays plain text.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 # Keys for structured handoff (must match JSON stored in executed_nodes)
 TEXT_KEY = "text"
@@ -93,6 +96,11 @@ def format_upstream_citations_block(agent_name: str, citations: List[Dict[str, A
     """
     Human-readable block appended for downstream LLM prompts so [N] markers stay interpretable.
     """
+    url_count = sum(1 for c in citations if c.get('url'))
+    logger.info(
+        f"🔗 CITE[4/UPSTREAM]: Formatting block from '{agent_name}' — "
+        f"{len(citations)} citations ({url_count} with URL, {len(citations)-url_count} doc-only)"
+    )
     if not citations:
         return ""
     lines = [

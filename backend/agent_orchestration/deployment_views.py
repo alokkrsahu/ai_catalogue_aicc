@@ -2376,6 +2376,11 @@ def public_chat_endpoint_stream(request, project_id):
             # so the response survives even if the client disconnects mid-stream.
             stream_citations = execution_result.get('citations') or []
             logger.info(f"🔍 DEPLOYMENT STREAM: citations from execution_result: {len(stream_citations)} items, keys in result: {list(execution_result.keys())}")
+            logger.info(
+                f"🔗 CITE[7/OUTPUT]: {len(stream_citations)} citations reaching frontend stream "
+                f"(refs: {[c.get('ref') for c in stream_citations]}, "
+                f"urls: {[c.get('url','')[:60] for c in stream_citations]})"
+            )
             assistant_history_entry = {
                 'role': 'assistant',
                 'content': assistant_response,

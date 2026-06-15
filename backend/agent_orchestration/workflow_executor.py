@@ -760,6 +760,11 @@ class WorkflowExecutor:
                                     f"URL-mode websearch with no docs / no DocAware; "
                                     f"excerpts are already in the system prompt"
                                 )
+                                logger.info(
+                                    f"🔗 CITE[2/BYPASS]: {node_name} will use simple-path LLM call; "
+                                    f"_ws_handler={_ws_handler is not None}, "
+                                    f"_last_url_chunks={len(getattr(_ws_handler, '_last_url_chunks', []))}"
+                                )
 
                             if (
                                 (node_data.get('doc_tool_calling') or _ws_needs_tool_loop or _da_enabled)
@@ -834,6 +839,64 @@ class WorkflowExecutor:
                                 except Exception as _cite_err:
                                     logger.warning(f"⚠️ CITATION PARSE: Failed for {node_name}: {_cite_err}")
 
+                            # URL-only websearch agents (web_search_mode='urls') never go through
+                            # the tool-calling loop, so the LLM has no structured tool results to
+                            # cite from — it falls back to bare inline URLs. Build citations
+                            # programmatically from the Milvus chunks that were already retrieved
+                            # and injected into the system prompt as numbered sources.
+                            if _url_only_websearch and not _synthesis_citations and _ws_handler:
+                                _url_chunks = getattr(_ws_handler, '_last_url_chunks', [])[:5]
+                                logger.info(
+                                    f"🔗 CITE[3/AUTO-BUILD]: Entering for {node_name} — "
+                                    f"_url_only={_url_only_websearch}, existing_cites={len(_synthesis_citations)}, "
+                                    f"ws_handler={_ws_handler is not None}, last_url_chunks={len(getattr(_ws_handler, '_last_url_chunks', []))}, "
+                                    f"taking top {len(_url_chunks)}"
+                                )
+                                for _ci, _chunk in enumerate(_url_chunks, 1):
+                                    _chunk_url = _chunk.get('url', '')
+                                    _chunk_content = (_chunk.get('content') or '').strip()[:300]
+                                    _chunk_title = (
+                                        _chunk.get('section_heading')
+                                        or _chunk_url.rstrip('/').split('/')[-1]
+                                        or _chunk_url
+                                    )
+                                    logger.info(
+                                        f"🔗 CITE[3/AUTO-BUILD]: chunk {_ci} — url={_chunk_url[:80]!r}, "
+                                        f"title={_chunk_title!r:.40}, content_len={len(_chunk_content)}"
+                                    )
+                                    if _chunk_url and _chunk_content:
+                                        _synthesis_citations.append({
+                                            'ref': _ci,
+                                            'document_title': _chunk_title,
+                                            'quoted_text': _chunk_content,
+                                            'url': _chunk_url,
+                                            'source': 'web',
+                                        })
+                                logger.info(
+                                    f"🔗 CITE[3/AUTO-BUILD]: Done for {node_name} — "
+                                    f"built {len(_synthesis_citations)} citations "
+                                    f"(urls: {[c.get('url','')[:60] for c in _synthesis_citations]})"
+                                )
+
+                            # Deduplicate citations by base URL (strip #fragment) regardless of source.
+                            # Milvus chunks from the same page produce multiple refs for the same URL.
+                            if _synthesis_citations:
+                                _seen_base_urls: set = set()
+                                _deduped: list = []
+                                for _c in _synthesis_citations:
+                                    _base = _c.get('url', '').split('#')[0].rstrip('/')
+                                    if not _base or _base not in _seen_base_urls:
+                                        _seen_base_urls.add(_base)
+                                        _deduped.append(_c)
+                                if len(_deduped) < len(_synthesis_citations):
+                                    logger.info(
+                                        f"🔗 CITE[3/DEDUP]: {node_name} — {len(_synthesis_citations)} → "
+                                        f"{len(_deduped)} citations (removed {len(_synthesis_citations) - len(_deduped)} same-page duplicates)"
+                                    )
+                                    _synthesis_citations = _deduped
+                                    for _ri, _c in enumerate(_synthesis_citations, 1):
+                                        _c['ref'] = _ri
+
                             logger.info(f"✅ ORCHESTRATOR: Agent {node_name} completed successfully - response length: {len(agent_response_text)} chars")
                             logger.info(f"🔍 DEBUG: Raw agent response for {node_name}: {agent_response_text[:200]}...")
 
@@ -868,6 +931,11 @@ class WorkflowExecutor:
                                             _uc_src = _uc.get('source')
                                             if _uc_title and _uc_url and _uc_title not in _upstream_url_map:
                                                 _upstream_url_map[_uc_title] = (_uc_url, _uc_src)
+                                _before_url_count = sum(1 for c in _synthesis_citations if c.get('url'))
+                                logger.info(
+                                    f"🔗 CITE[6/BACKFILL]: {node_name} — {len(_synthesis_citations)} citations, "
+                                    f"{_before_url_count} already have URL, upstream_map has {len(_upstream_url_map)} entries"
+                                )
                                 if _upstream_url_map:
                                     for _sc in _synthesis_citations:
                                         if not _sc.get('url'):
@@ -875,6 +943,11 @@ class WorkflowExecutor:
                                             if _match:
                                                 _sc['url'], _sc['source'] = _match
                                                 logger.info(f"📎 CITATION URL BACKFILL: Restored url for ref {_sc.get('ref')} in {node_name}")
+                                _after_url_count = sum(1 for c in _synthesis_citations if c.get('url'))
+                                logger.info(
+                                    f"🔗 CITE[6/BACKFILL]: Done — {_after_url_count}/{len(_synthesis_citations)} "
+                                    f"citations have URL (was {_before_url_count} before backfill)"
+                                )
 
                             if _synthesis_citations:
                                 _msg_metadata['citations'] = _synthesis_citations
