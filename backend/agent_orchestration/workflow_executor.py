@@ -853,6 +853,29 @@ class WorkflowExecutor:
                                 'llm_model': agent_config['llm_model'],
                                 'cost_estimate': getattr(agent_response, 'cost_estimate', None) if hasattr(agent_response, 'cost_estimate') else None,
                             }
+                            # Back-fill missing URLs/source from upstream citations.
+                            # The LLM may reproduce citations without the url field even
+                            # when it was present in the upstream context block. Build a
+                            # lookup keyed by document_title and fill gaps programmatically.
+                            if _synthesis_citations:
+                                _upstream_url_map: dict = {}
+                                _agg = locals().get('aggregated_context')
+                                if _agg:
+                                    for _inp in (_agg.get('all_inputs') or []):
+                                        for _uc in (_inp.get('citations') or []):
+                                            _uc_title = (_uc.get('document_title') or '').strip()
+                                            _uc_url = _uc.get('url')
+                                            _uc_src = _uc.get('source')
+                                            if _uc_title and _uc_url and _uc_title not in _upstream_url_map:
+                                                _upstream_url_map[_uc_title] = (_uc_url, _uc_src)
+                                if _upstream_url_map:
+                                    for _sc in _synthesis_citations:
+                                        if not _sc.get('url'):
+                                            _match = _upstream_url_map.get((_sc.get('document_title') or '').strip())
+                                            if _match:
+                                                _sc['url'], _sc['source'] = _match
+                                                logger.info(f"📎 CITATION URL BACKFILL: Restored url for ref {_sc.get('ref')} in {node_name}")
+
                             if _synthesis_citations:
                                 _msg_metadata['citations'] = _synthesis_citations
 

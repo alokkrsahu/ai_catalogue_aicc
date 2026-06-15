@@ -112,5 +112,7 @@ def format_upstream_citations_block(agent_name: str, citations: List[Dict[str, A
         if c.get("section"):
             loc_parts.append(str(c["section"]))
         loc = f" ({', '.join(loc_parts)})" if loc_parts else ""
-        lines.append(f'  [{ref}] {title}{loc}: "{qt}"')
+        url_part = f" | url: {c['url']}" if c.get("url") else ""
+        source_part = f" | source: {c['source']}" if c.get("source") else ""
+        lines.append(f'  [{ref}] {title}{loc}{url_part}{source_part}: "{qt}"')
     return "\n".join(lines)

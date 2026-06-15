@@ -54,7 +54,9 @@ CITATION_FORMAT_BLOCK = (
     '[{"ref": 1, "document_title": "Page or document title", "quoted_text": "Exact short excerpt that supports the claim", "url": "https://example.com/page", "source": "web"}]\n'
     "---END_CITATIONS---\n\n"
     "For document (non-web) sources, omit 'url'/'source' and include 'page' (integer) and/or 'section' (string) instead. "
-    "Keep quoted_text under 300 characters. If a claim is not supported by any supplied source, do not fabricate a citation — state the limitation instead."
+    "Keep quoted_text under 300 characters. If a claim is not supported by any supplied source, do not fabricate a citation — state the limitation instead. "
+    "IMPORTANT: When upstream agent outputs include a 'url:' field in the grounded source references block, "
+    "you MUST copy that exact URL into the 'url' field of your citation JSON for that source — do not omit or invent a URL."
 )
 
 # Per workflow node `type` — guidance that doesn't depend on sources being present.
