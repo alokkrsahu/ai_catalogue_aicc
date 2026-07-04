@@ -872,13 +872,22 @@ class WorkflowExecutor:
                             # cite from — it falls back to bare inline URLs. Build citations
                             # programmatically from the Milvus chunks that were already retrieved
                             # and injected into the system prompt as numbered sources.
+                            #
+                            # Cover ALL chunks, not a top-5 slice: _format_rag_results numbered
+                            # every chunk [1]..[N] in the prompt, so the LLM can legitimately
+                            # cite any of them. A [:5] slice left [6]..[N] markers with no
+                            # citation object — orphans that surfaced to users as numbering
+                            # gaps like "[1] ... [3]" (observed in production: text cited [7],
+                            # citations list empty). Dedup below collapses same-page chunks and
+                            # reconcile_citations drops whatever the text doesn't reference, so
+                            # the final chip count stays small regardless of N here.
                             if _url_only_websearch and not _synthesis_citations and _ws_handler:
-                                _url_chunks = getattr(_ws_handler, '_last_url_chunks', [])[:5]
+                                _url_chunks = getattr(_ws_handler, '_last_url_chunks', [])
                                 logger.info(
                                     f"🔗 CITE[3/AUTO-BUILD]: Entering for {node_name} — "
                                     f"_url_only={_url_only_websearch}, existing_cites={len(_synthesis_citations)}, "
-                                    f"ws_handler={_ws_handler is not None}, last_url_chunks={len(getattr(_ws_handler, '_last_url_chunks', []))}, "
-                                    f"taking top {len(_url_chunks)}"
+                                    f"ws_handler={_ws_handler is not None}, "
+                                    f"building refs for all {len(_url_chunks)} prompt sources"
                                 )
                                 for _ci, _chunk in enumerate(_url_chunks, 1):
                                     _chunk_url = _chunk.get('url', '')

@@ -155,6 +155,37 @@ class WorkflowDeploymentExecutor:
                     end_node_output, response_citations = reconcile_citations(
                         end_node_output, response_citations
                     )
+                    # When the text has NO inline [N] markers at all, reconcile
+                    # leaves the citations untouched (nothing to anchor them to)
+                    # and they render as an unanchored "sources consulted" chip
+                    # row. That's fine, but AUTO-BUILD now covers every prompt
+                    # source (needed to prevent orphan markers), which can mean
+                    # 8-10 chips on a markerless answer. Cap the unanchored list
+                    # at 5 — matching the pre-widening visual density — keeping
+                    # the highest-relevance (lowest-ref) sources.
+                    import re as _re_cap
+                    if not _re_cap.search(r'\[\d+\](?!\()', end_node_output):
+                        if len(response_citations) > 5:
+                            logger.info(
+                                f"🔗 CITE[RECONCILE]: Markerless response — capping unanchored "
+                                f"source chips {len(response_citations)} → 5"
+                            )
+                            response_citations = response_citations[:5]
+                elif end_node_output:
+                    # Zero citations survived but the text still carries [N]
+                    # markers (e.g. the LLM echoed excerpt numbering from an
+                    # upstream agent that never produced citation objects).
+                    # A public-facing final response must never show dead
+                    # citation numbers — strip them. (?!\() skips markdown
+                    # links like "[1](https://…)".
+                    import re as _re_strip
+                    _stripped = _re_strip.sub(r'\s*\[\d+\](?!\()', '', end_node_output)
+                    if _stripped != end_node_output:
+                        logger.info(
+                            "🔗 CITE[RECONCILE]: Stripped all inline [N] markers from final "
+                            "response — no citation objects available to back any of them"
+                        )
+                        end_node_output = _stripped
 
                 logger.info(f"✅ DEPLOYMENT: Workflow execution completed in {execution_time_ms}ms")
 

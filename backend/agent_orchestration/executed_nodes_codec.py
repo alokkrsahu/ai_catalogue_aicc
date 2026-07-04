@@ -106,10 +106,13 @@ def reconcile_citations(text: str, citations: List[Dict[str, Any]]) -> "tuple[st
 
     This renumbers referenced markers to consecutive integers in order of
     first appearance, drops citation objects that aren't referenced by any
-    marker, and leaves un-backed markers (no matching citation object) as
-    literal text — there's no data to attach to them, but at least every
-    citation object that *does* survive has a real, findable marker, and the
-    numbering has no gaps.
+    marker, and STRIPS un-backed markers (no matching citation object) from
+    the text — there's no data to attach to them, and leaving them produced
+    exactly the "[1] and [3] shown, [2] missing" gaps users reported: e.g. a
+    URL-websearch agent's LLM cites source [7] from its numbered-excerpts
+    prompt, but no citation object was ever built for 7, so the bare "[7]"
+    survived every renumbering pass as dead text. After this, the final text
+    contains only consecutive markers, each backed by a real citation.
     """
     if not citations:
         return text, citations
@@ -131,11 +134,15 @@ def reconcile_citations(text: str, citations: List[Dict[str, Any]]) -> "tuple[st
     import re
     seen_order: List[int] = []
     seen_set = set()
+    orphan_refs = set()
     for m in re.finditer(r"\[(\d+)\]", text):
         n = int(m.group(1))
-        if n in by_ref and n not in seen_set:
-            seen_set.add(n)
-            seen_order.append(n)
+        if n in by_ref:
+            if n not in seen_set:
+                seen_set.add(n)
+                seen_order.append(n)
+        else:
+            orphan_refs.add(n)
 
     if not seen_order:
         # No marker in the text actually resolves to a citation object —
@@ -144,9 +151,23 @@ def reconcile_citations(text: str, citations: List[Dict[str, Any]]) -> "tuple[st
 
     old_to_new = {old: i for i, old in enumerate(seen_order, 1)}
 
+    new_text = text
+    # Strip orphan markers FIRST — before renumbering — so a dead "[2]" can
+    # never sit next to (or be mistaken for) a live marker renumbered TO [2].
+    # Also eat any whitespace immediately before the marker so "text [7]."
+    # collapses to "text." rather than "text .". The (?!\() guard skips
+    # markdown links like "[2](https://…)" — stripping just the "[2]" there
+    # would leave a broken bare "(url)".
+    if orphan_refs:
+        for orphan in orphan_refs:
+            new_text = re.sub(rf"\s*\[{orphan}\](?!\()", "", new_text)
+        logger.info(
+            f"🔗 CITE[RECONCILE]: Stripped {len(orphan_refs)} orphan marker(s) "
+            f"{sorted(orphan_refs)} with no backing citation object"
+        )
+
     # Two-pass placeholder swap so renumbering never collides mid-rewrite
     # (e.g. [2] -> [1] while an original [1] is still pending its own rewrite).
-    new_text = text
     for old in sorted(old_to_new, reverse=True):
         new_text = re.sub(rf"\[{old}\](?!\d)", f"[__CITE_{old_to_new[old]}__]", new_text)
     for new in old_to_new.values():
