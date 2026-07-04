@@ -4,7 +4,8 @@ Management endpoints for deployments and public-facing chat endpoint.
 
 Deployment / chat limitations (see DEPLOYMENT_CHAT_LIMITATIONS.md in project root):
 - No user file upload in embed chat; attachments come from workflow config only.
-- Streaming is simulated (full response then word-by-word); not true LLM token streaming.
+- Streaming is simulated (full response then word-by-word, sent as fast as the
+  connection allows — no artificial per-word delay); not true LLM token streaming.
 - Concurrent requests with the same session_id can overwrite turns; no per-session locking.
 """
 import logging
@@ -2424,7 +2425,15 @@ def public_chat_endpoint_stream(request, project_id):
                 flags=_re.IGNORECASE,
             ).rstrip()
 
-            # Stream the cleaned response word by word for smooth appearance
+            # Stream the cleaned response word by word so the client can render
+            # incrementally. The backend already spent real time computing this
+            # response (workflow execution) — do NOT add an artificial per-word
+            # delay here. An earlier version slept 20ms between words to fake a
+            # "typing" effect, which added several extra seconds of pure latency
+            # on top of actual computation for any non-trivial response length,
+            # and blocked the worker thread for that whole duration. Any pacing
+            # for a typing effect belongs client-side (CSS/JS), where it costs
+            # no server latency or worker time.
             words = assistant_response.split(' ')
             accumulated = ""
 
@@ -2435,10 +2444,6 @@ def public_chat_endpoint_stream(request, project_id):
 
                 # Send chunk
                 yield f"data: {json.dumps({'type': 'content', 'content': word + (' ' if i < len(words) - 1 else ''), 'request_id': request_id})}\n\n"
-
-                # Small delay for smooth streaming (optional)
-                import time
-                time.sleep(0.02)  # 20ms delay between words
 
             # Send citations as a separate SSE event after content stream.
             # Use text-parsed citations if available, otherwise use structured

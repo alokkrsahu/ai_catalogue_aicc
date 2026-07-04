@@ -893,9 +893,48 @@ class WorkflowExecutor:
                                         f"🔗 CITE[3/DEDUP]: {node_name} — {len(_synthesis_citations)} → "
                                         f"{len(_deduped)} citations (removed {len(_synthesis_citations) - len(_deduped)} same-page duplicates)"
                                     )
-                                    _synthesis_citations = _deduped
-                                    for _ri, _c in enumerate(_synthesis_citations, 1):
+                                    # agent_response_text was already generated (above) against the
+                                    # PRE-dedup numbering the LLM saw in its numbered-sources system
+                                    # prompt. Renumbering _synthesis_citations without also rewriting
+                                    # the [N] markers already baked into the text desyncs the two —
+                                    # e.g. the LLM wrote "[1]...[2]...[3]" but dedup collapses refs 2
+                                    # and 3 (same base URL) into one surviving entry renumbered to "1",
+                                    # leaving the text's [2]/[3] markers with no matching citation
+                                    # object. Confirmed in production history (Tools Agent, About AICC
+                                    # Agent, etc. all showed exactly this: text refs [1,2] / [1,2,3],
+                                    # citations refs [1]).
+                                    #
+                                    # Map every ORIGINAL ref (survivors and dropped duplicates alike)
+                                    # to its surviving entry's new ref, keyed by base URL — a dropped
+                                    # duplicate shares its source with the survivor, so its old marker
+                                    # should point there too rather than become an orphan.
+                                    # NOTE: _deduped's surviving dicts are the SAME objects as their
+                                    # counterparts in _synthesis_citations (appended by reference, not
+                                    # copied), so old refs must be captured for ALL entries before any
+                                    # 'ref' field is mutated — otherwise survivors would read back their
+                                    # already-rewritten new ref instead of their original one.
+                                    _base_to_new_ref = {}
+                                    for _ri, _c in enumerate(_deduped, 1):
+                                        _c_base = _c.get('url', '').split('#')[0].rstrip('/')
+                                        _base_to_new_ref[_c_base] = _ri
+                                    _old_to_new = {}
+                                    for _c in _synthesis_citations:
+                                        _old_ref = _c.get('ref')
+                                        _c_base = _c.get('url', '').split('#')[0].rstrip('/')
+                                        if _old_ref is not None and _c_base in _base_to_new_ref:
+                                            _old_to_new[_old_ref] = _base_to_new_ref[_c_base]
+                                    for _ri, _c in enumerate(_deduped, 1):
                                         _c['ref'] = _ri
+                                    _synthesis_citations = _deduped
+                                    if _old_to_new and any(k != v for k, v in _old_to_new.items()):
+                                        for _old in sorted(_old_to_new, reverse=True):
+                                            agent_response_text = agent_response_text.replace(
+                                                f'[{_old}]', f'[__CITE_{_old_to_new[_old]}__]'
+                                            )
+                                        for _new in set(_old_to_new.values()):
+                                            agent_response_text = agent_response_text.replace(
+                                                f'[__CITE_{_new}__]', f'[{_new}]'
+                                            )
 
                             logger.info(f"✅ ORCHESTRATOR: Agent {node_name} completed successfully - response length: {len(agent_response_text)} chars")
                             logger.info(f"🔍 DEBUG: Raw agent response for {node_name}: {agent_response_text[:200]}...")

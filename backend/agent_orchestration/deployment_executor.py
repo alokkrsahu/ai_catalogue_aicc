@@ -10,6 +10,7 @@ from asgiref.sync import sync_to_async
 
 from .conversation_orchestrator import ConversationOrchestrator
 from .docaware_handler import FileAttachmentPreparationError
+from .executed_nodes_codec import reconcile_citations
 from .models import WorkflowDeployment
 
 logger = logging.getLogger('workflow_deployment')
@@ -145,6 +146,16 @@ class WorkflowDeploymentExecutor:
                     execution_result, graph_json
                 )
 
+                # Reconcile inline [N] markers with the citations list — the text
+                # and citations can come from different nodes (aggregation,
+                # upstream-context handoff, reflection revisions) with no
+                # guarantee they still line up, which is how users end up seeing
+                # e.g. "[1] ... [3]" with no citation ever explaining "2".
+                if end_node_output and response_citations:
+                    end_node_output, response_citations = reconcile_citations(
+                        end_node_output, response_citations
+                    )
+
                 logger.info(f"✅ DEPLOYMENT: Workflow execution completed in {execution_time_ms}ms")
 
                 # Ensure we have a valid response
@@ -242,6 +253,44 @@ class WorkflowDeploymentExecutor:
             if isinstance(c, dict):
                 c['ref'] = i
         return all_cites
+
+    @staticmethod
+    def _ref_lookup_from_messages(messages: List[Dict], predecessor_name: str) -> Dict[int, Dict[str, Any]]:
+        """
+        Map original ref-number -> citation object, scanned across ALL agent
+        messages (excluding Start/End), predecessor's own citations winning
+        ties. Unlike _collect_all_upstream_citations this does NOT renumber —
+        it's used to backfill specific missing ref numbers, not to build a
+        fresh sequential list.
+
+        Needed because a synthesizer node is instructed to reuse the exact
+        [N] numbers from its upstream context (format_upstream_citations_block
+        says "maps to [N] markers in the text above"), but its own
+        self-reported ---CITATIONS--- JSON block can be an incomplete subset
+        of that — e.g. it writes "[1] ... [2] ... [3]" in prose but its JSON
+        only lists ref 1. The predecessor's own (partial) citations aren't
+        wrong, just incomplete, so we look up the missing ref numbers from
+        whichever upstream agent originally defined them.
+        """
+        lookup: Dict[int, Dict[str, Any]] = {}
+        for msg in reversed(messages):
+            if not isinstance(msg, dict):
+                continue
+            if msg.get('agent_name') != predecessor_name:
+                continue
+            meta = msg.get('metadata') or {}
+            for c in (meta.get('citations') or []):
+                if isinstance(c, dict) and c.get('ref') is not None:
+                    lookup.setdefault(c['ref'], c)
+            break
+        for msg in messages:
+            if not isinstance(msg, dict) or msg.get('agent_type') in ('StartNode', 'EndNode'):
+                continue
+            meta = msg.get('metadata') or {}
+            for c in (meta.get('citations') or []):
+                if isinstance(c, dict) and c.get('ref') is not None:
+                    lookup.setdefault(c['ref'], c)
+        return lookup
 
     def _extract_end_node_output(
         self,
@@ -372,6 +421,36 @@ class WorkflowDeploymentExecutor:
                         cites = self._collect_all_upstream_citations(messages, predecessor_name)
                         if cites:
                             logger.info(f"✅ DEPLOYMENT: Collected {len(cites)} citations from upstream agents")
+                    else:
+                        # Predecessor HAS citations, but they can be an incomplete
+                        # subset of what its own text actually references — e.g.
+                        # a synthesizer instructed to reuse upstream [N] numbers
+                        # writes "[1]...[2]...[3]" in prose but its own
+                        # ---CITATIONS--- JSON only lists ref 1 (confirmed in
+                        # production data: exec_1782207768289_2cc148be, Response
+                        # Synthesizer). Backfill any marker in `chosen` whose ref
+                        # is missing from `cites` by looking it up from whichever
+                        # upstream agent originally defined that ref number.
+                        import re as _re_backfill
+                        existing_refs = {
+                            c.get('ref') for c in cites if isinstance(c, dict) and c.get('ref') is not None
+                        }
+                        text_refs = {int(m) for m in _re_backfill.findall(r'\[(\d+)\]', chosen)}
+                        missing_refs = text_refs - existing_refs
+                        if missing_refs:
+                            ref_lookup = self._ref_lookup_from_messages(messages, predecessor_name)
+                            added = 0
+                            for ref in sorted(missing_refs):
+                                found = ref_lookup.get(ref)
+                                if found:
+                                    cites.append(found)
+                                    added += 1
+                            if added:
+                                logger.info(
+                                    f"✅ DEPLOYMENT: Backfilled {added} citation(s) referenced by "
+                                    f"'{predecessor_name}' but missing from its own citations list "
+                                    f"(refs {sorted(missing_refs)})"
+                                )
                     logger.info(f"✅ DEPLOYMENT: Using End node input from predecessor '{predecessor_name}': {chosen[:100]}... ({len(cites)} citations)")
                     return chosen, cites
                 else:

@@ -92,6 +92,82 @@ def renumber_citations_globally(inputs: List[Dict[str, Any]], start_ref: int = 1
     return current_ref
 
 
+def reconcile_citations(text: str, citations: List[Dict[str, Any]]) -> "tuple[str, List[Dict[str, Any]]]":
+    """
+    Make inline [N] markers in `text` line up 1:1 with `citations` entries.
+
+    The pipeline lets each node number its own citations locally, then merges
+    text/citations produced by different agents (aggregation, upstream-context
+    handoff, reflection revisions). Nothing upstream of this guarantees the
+    surviving citation objects still match the [N] markers actually present in
+    the final text — e.g. an intermediate node's citation [2] can get dropped
+    or reordered while its marker (or a differently-sourced [3]) survives in
+    the text, so users see "[1] ... [3]" with no citation ever explaining "2".
+
+    This renumbers referenced markers to consecutive integers in order of
+    first appearance, drops citation objects that aren't referenced by any
+    marker, and leaves un-backed markers (no matching citation object) as
+    literal text — there's no data to attach to them, but at least every
+    citation object that *does* survive has a real, findable marker, and the
+    numbering has no gaps.
+    """
+    if not citations:
+        return text, citations
+
+    by_ref: Dict[int, Dict[str, Any]] = {}
+    for c in citations:
+        if not isinstance(c, dict):
+            continue
+        ref = c.get("ref")
+        try:
+            ref = int(ref)
+        except (TypeError, ValueError):
+            continue
+        by_ref.setdefault(ref, c)
+
+    if not by_ref:
+        return text, citations
+
+    import re
+    seen_order: List[int] = []
+    seen_set = set()
+    for m in re.finditer(r"\[(\d+)\]", text):
+        n = int(m.group(1))
+        if n in by_ref and n not in seen_set:
+            seen_set.add(n)
+            seen_order.append(n)
+
+    if not seen_order:
+        # No marker in the text actually resolves to a citation object —
+        # leave both sides untouched rather than guessing.
+        return text, citations
+
+    old_to_new = {old: i for i, old in enumerate(seen_order, 1)}
+
+    # Two-pass placeholder swap so renumbering never collides mid-rewrite
+    # (e.g. [2] -> [1] while an original [1] is still pending its own rewrite).
+    new_text = text
+    for old in sorted(old_to_new, reverse=True):
+        new_text = re.sub(rf"\[{old}\](?!\d)", f"[__CITE_{old_to_new[old]}__]", new_text)
+    for new in old_to_new.values():
+        new_text = new_text.replace(f"[__CITE_{new}__]", f"[{new}]")
+
+    reconciled = []
+    for old in seen_order:
+        c = dict(by_ref[old])
+        c["ref"] = old_to_new[old]
+        reconciled.append(c)
+
+    dropped = len(citations) - len(reconciled)
+    if dropped:
+        logger.info(
+            f"🔗 CITE[RECONCILE]: {len(citations)} → {len(reconciled)} citations "
+            f"({dropped} unreferenced in final text, markers renumbered to consecutive)"
+        )
+
+    return new_text, reconciled
+
+
 def format_upstream_citations_block(agent_name: str, citations: List[Dict[str, Any]]) -> str:
     """
     Human-readable block appended for downstream LLM prompts so [N] markers stay interpretable.

@@ -111,11 +111,25 @@
   // delete, drag, property change) routes through this so the dirty flag and
   // the persistence call stay in sync. AI Builder apply/undo paths call
   // saveWorkflowToDatabase directly and reset the flag explicitly.
+  // Debounced: property-panel fields call this on every keystroke, so we
+  // coalesce bursts into one save ~400ms after the user stops typing instead
+  // of firing a network request per character.
+  let markDirtySaveTimeout: ReturnType<typeof setTimeout> | null = null;
   function markDirtyAndSave() {
     dirtySinceLastAIApply = true;
-    saveWorkflowToDatabase(false);
+    if (markDirtySaveTimeout) clearTimeout(markDirtySaveTimeout);
+    markDirtySaveTimeout = setTimeout(() => {
+      markDirtySaveTimeout = null;
+      saveWorkflowToDatabase(false);
+    }, 400);
   }
   let saving = false;
+  // True when an edit happened while a save was already in flight. Without
+  // this, saveWorkflowToDatabase's "if (saving) return" guard would silently
+  // drop that edit forever — nothing would re-trigger a save for it once the
+  // in-flight request completed, so the user's latest change would never
+  // reach the database even though it's still visible on their canvas.
+  let saveQueued = false;
   let showInstructions = true; // State for dismissable instructions overlay
   let isPanelMaximized = false; // Whether the properties panel is maximized as modal
   
@@ -656,8 +670,13 @@
   
   // Save workflow functionality with database persistence
   async function saveWorkflowToDatabase(showToast = true) {
-    if (saving) return;
-    
+    if (saving) {
+      // Don't drop this edit — replay it once the in-flight save finishes so
+      // the latest canvas state always ends up persisted.
+      saveQueued = true;
+      return;
+    }
+
     try {
       saving = true;
       
@@ -726,9 +745,15 @@
       }
     } finally {
       saving = false;
+      if (saveQueued) {
+        saveQueued = false;
+        // Fire-and-forget: captures whatever nodes/edges look like right now,
+        // which includes every edit that arrived while the previous save ran.
+        saveWorkflowToDatabase(false);
+      }
     }
   }
-  
+
   // Agent palette drag handlers
   function handleDragStart(nodeType: string) {
     draggedNodeType = nodeType;
