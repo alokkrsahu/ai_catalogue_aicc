@@ -122,10 +122,13 @@
       }
     }
     // SplitterAgent minimal defaults — router-style agent, same pattern.
+    // Deliberately a lightweight model: this node only makes a structured
+    // routing decision, never generates the user-facing answer, so the
+    // flagship model buys nothing but adds several seconds of latency.
     if (node.type === 'SplitterAgent') {
       if (!nodeConfig.llm_provider) {
         nodeConfig.llm_provider = 'openai';
-        nodeConfig.llm_model = 'gpt-4o-mini';
+        nodeConfig.llm_model = 'gpt-5.4-mini';
       }
       if (typeof nodeConfig.overlap_allowed !== 'boolean') {
         nodeConfig.overlap_allowed = false;

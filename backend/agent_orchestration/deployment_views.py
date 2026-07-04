@@ -2265,7 +2265,14 @@ def public_chat_endpoint_stream(request, project_id):
             )
             wf_thread.start()
 
-            # Consume intermediate events from queue and yield as SSE
+            # Consume intermediate events from queue and yield as SSE.
+            # "token" events are live chunks from workflow_executor.py's
+            # real-token-streaming path (final-response node only) — translate
+            # them into the same {'type': 'content', ...} shape the frontend
+            # already renders, so no new client-side event handling is needed.
+            # Track whether any arrived so the post-hoc word-chunking loop
+            # below can skip re-sending content that was already streamed live.
+            live_streamed = False
             while True:
                 try:
                     evt = event_queue.get(timeout=0.5)
@@ -2273,7 +2280,11 @@ def public_chat_endpoint_stream(request, project_id):
                     continue
                 if evt["type"] == "_done":
                     break
-                yield f"data: {json.dumps(evt)}\n\n"
+                if evt["type"] == "token":
+                    live_streamed = True
+                    yield f"data: {json.dumps({'type': 'content', 'content': evt.get('content', '')})}\n\n"
+                else:
+                    yield f"data: {json.dumps(evt)}\n\n"
 
             wf_thread.join(timeout=5)
 
@@ -2434,16 +2445,21 @@ def public_chat_endpoint_stream(request, project_id):
             # and blocked the worker thread for that whole duration. Any pacing
             # for a typing effect belongs client-side (CSS/JS), where it costs
             # no server latency or worker time.
-            words = assistant_response.split(' ')
-            accumulated = ""
+            # If the final-response node already streamed its tokens live
+            # (workflow_executor.py's _stream_or_call_llm, forwarded above as
+            # "token" -> "content" SSE events), the client already has this
+            # text on screen — sending it again here would duplicate it.
+            if not live_streamed:
+                words = assistant_response.split(' ')
+                accumulated = ""
 
-            for i, word in enumerate(words):
-                accumulated += word
-                if i < len(words) - 1:
-                    accumulated += " "
+                for i, word in enumerate(words):
+                    accumulated += word
+                    if i < len(words) - 1:
+                        accumulated += " "
 
-                # Send chunk
-                yield f"data: {json.dumps({'type': 'content', 'content': word + (' ' if i < len(words) - 1 else ''), 'request_id': request_id})}\n\n"
+                    # Send chunk
+                    yield f"data: {json.dumps({'type': 'content', 'content': word + (' ' if i < len(words) - 1 else ''), 'request_id': request_id})}\n\n"
 
             # Send citations as a separate SSE event after content stream.
             # Use text-parsed citations if available, otherwise use structured
@@ -2472,9 +2488,15 @@ def public_chat_endpoint_stream(request, project_id):
             )
             background_thread.start()
             
-            # Send completion (stream_citations computed earlier, before streaming)
-            logger.info(f"🔍 DEPLOYMENT STREAM: Sending done event with {len(stream_citations)} citations, parsed_from_text={parsed_citations_json is not None}")
-            yield f"data: {json.dumps({'type': 'done', 'request_id': request_id, 'execution_time_ms': execution_time_ms, 'citations': stream_citations})}\n\n"
+            # Send completion (stream_citations computed earlier, before streaming).
+            # `content` carries the fully-processed authoritative text (citation
+            # parse/backfill/reconcile already applied above) — the frontend's
+            # `done` handler prefers this over what it accumulated from live
+            # "content" events, since reconcile_citations can renumber [N]
+            # markers after streaming already started (e.g. dropping an
+            # unreferenced citation and shifting the rest down).
+            logger.info(f"🔍 DEPLOYMENT STREAM: Sending done event with {len(stream_citations)} citations, parsed_from_text={parsed_citations_json is not None}, live_streamed={live_streamed}")
+            yield f"data: {json.dumps({'type': 'done', 'request_id': request_id, 'execution_time_ms': execution_time_ms, 'citations': stream_citations, 'content': assistant_response})}\n\n"
             
         except Exception as e:
             logger.error(f"❌ DEPLOYMENT STREAM: Error in stream generation: {e}", exc_info=True)
@@ -4944,8 +4966,31 @@ def embed_chatbot_html(request, project_id):
                 return;
               }} else if (data.type === 'done') {{
                 collapseActivityPanel();
-                // Always clean the streamed text (strip citations block + heading)
-                const parsed = parseCitations(accumulatedContent);
+                // Edge case: live-streamed prose was entirely held back (e.g. the
+                // whole response was the citations marker with nothing before
+                // it) — no bubble exists yet. Create one now, same as the
+                // 'content' handler above, so the authoritative text still renders.
+                if (!thinkingHidden) {{
+                  hideThinkingIndicator();
+                  thinkingHidden = true;
+                  msg = document.createElement('div');
+                  msg.className = 'msg assistant';
+                  bubble = document.createElement('div');
+                  bubble.className = 'bubble';
+                  markdownEl = document.createElement('markdown');
+                  bubble.appendChild(markdownEl);
+                  msg.appendChild(bubble);
+                  messagesEl.appendChild(msg);
+                }}
+                // Prefer the server's authoritative post-processing text over what
+                // was accumulated from live "content" events: reconcile_citations
+                // can renumber [N] markers (e.g. dropping an unreferenced citation
+                // and shifting the rest down) AFTER streaming already started, so
+                // the live-typed text can be stale by the time this event arrives.
+                const authoritativeText = (typeof data.content === 'string' && data.content)
+                  ? data.content
+                  : accumulatedContent;
+                const parsed = parseCitations(authoritativeText);
                 let cleanContent = parsed.cleanText;
                 let citations = [];
                 if (Array.isArray(data.citations) && data.citations.length > 0) {{

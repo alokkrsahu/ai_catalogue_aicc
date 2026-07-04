@@ -168,14 +168,25 @@ class DynamicModelsService:
                     # Enhanced model information based on model ID patterns
                     model_id = model_info.id.lower()
                     
+                    # GPT-5 mini/nano tier — cheap + fast, not the flagship. Checked
+                    # before the generic 'gpt-5' branch below (which would otherwise
+                    # match first and mislabel these as flagship AssistantAgent models).
+                    # Good fit for SplitterAgent/ClassifierAgent, which only need to
+                    # make a structured routing decision, not full reasoning depth.
+                    if 'gpt-5' in model_id and ('mini' in model_id or 'nano' in model_id):
+                        model_info.context_length = 128000
+                        model_info.cost_per_1k_tokens = 0.002
+                        model_info.capabilities = ['text_generation', 'fast_response', 'cost_effective']
+                        model_info.recommended_for = ['SplitterAgent', 'ClassifierAgent', 'DelegateAgent', 'UserProxyAgent']
+
                     # GPT-5 and future models (forward-compatible)
-                    if 'gpt-5' in model_id:
+                    elif 'gpt-5' in model_id:
                         model_info.context_length = 128000  # Default, will be updated when specs are known
                         model_info.cost_per_1k_tokens = 0.01  # Default, will be updated when pricing is known
                         model_info.capabilities = ['text_generation', 'analysis', 'reasoning', 'latest_model']
                         model_info.recommended_for = ['AssistantAgent', 'GroupChatManager']
                         logger.info(f"🚀 NEW MODEL: Detected GPT-5 model: {model_info.id}")
-                    
+
                     elif 'gpt-4' in model_id:
                         if 'turbo' in model_id or '1106' in model_id or '0125' in model_id:
                             model_info.context_length = 128000
@@ -195,8 +206,14 @@ class DynamicModelsService:
                         model_info.context_length = 16385 if 'turbo' in model_id else 4096
                         model_info.cost_per_1k_tokens = 0.002
                         model_info.capabilities = ['text_generation', 'analysis']
-                        model_info.recommended_for = ['UserProxyAgent', 'DelegateAgent']
-                        
+                        model_info.recommended_for = ['UserProxyAgent', 'DelegateAgent', 'SplitterAgent', 'ClassifierAgent']
+
+                    elif 'gpt-4o' in model_id and 'mini' in model_id:
+                        model_info.context_length = 128000
+                        model_info.cost_per_1k_tokens = 0.0015
+                        model_info.capabilities = ['text_generation', 'fast_response', 'cost_effective']
+                        model_info.recommended_for = ['SplitterAgent', 'ClassifierAgent', 'DelegateAgent', 'UserProxyAgent']
+
                     elif 'gpt-4o' in model_id:
                         model_info.context_length = 128000
                         model_info.cost_per_1k_tokens = 0.005
@@ -237,25 +254,36 @@ class DynamicModelsService:
                     # Enhanced model information based on model ID patterns
                     model_id = model_info.id.lower()
                     
+                    # Gemini 2.x "flash" tier — cheap + fast, checked before the
+                    # generic 'gemini-2' branch below (which would otherwise match
+                    # first and mislabel these as flagship AssistantAgent models,
+                    # the same coarseness gap the 1.5 generation already avoids by
+                    # distinguishing pro vs flash below).
+                    if 'gemini-2' in model_id and 'flash' in model_id:
+                        model_info.context_length = 1000000
+                        model_info.cost_per_1k_tokens = 0.0005
+                        model_info.capabilities = ['text_generation', 'fast_response', 'cost_effective', 'multimodal']
+                        model_info.recommended_for = ['SplitterAgent', 'ClassifierAgent', 'DelegateAgent', 'UserProxyAgent']
+
                     # Gemini 2.0 and future models (forward-compatible)
-                    if 'gemini-2' in model_id or 'gemini-2.0' in model_id:
+                    elif 'gemini-2' in model_id or 'gemini-2.0' in model_id:
                         model_info.context_length = 2000000  # Default, will be updated when specs are known
                         model_info.cost_per_1k_tokens = 0.00125  # Default, will be updated when pricing is known
                         model_info.capabilities = ['text_generation', 'analysis', 'reasoning', 'multimodal', 'vision', 'latest_model']
                         model_info.recommended_for = ['AssistantAgent', 'GroupChatManager']
                         logger.info(f"🚀 NEW MODEL: Detected Gemini 2.0 model: {model_info.id}")
-                    
+
                     elif 'gemini-1.5-pro' in model_id:
                         model_info.context_length = 2000000  # Gemini 1.5 Pro has 2M context
                         model_info.cost_per_1k_tokens = 0.00125
                         model_info.capabilities = ['text_generation', 'analysis', 'reasoning', 'multimodal', 'vision', 'ultra_long_context']
                         model_info.recommended_for = ['AssistantAgent', 'GroupChatManager']
-                        
+
                     elif 'gemini-1.5-flash' in model_id:
                         model_info.context_length = 1000000  # Gemini 1.5 Flash has 1M context
                         model_info.cost_per_1k_tokens = 0.00075
                         model_info.capabilities = ['text_generation', 'analysis', 'fast_response', 'multimodal', 'vision']
-                        model_info.recommended_for = ['DelegateAgent', 'UserProxyAgent']
+                        model_info.recommended_for = ['SplitterAgent', 'ClassifierAgent', 'DelegateAgent', 'UserProxyAgent']
                         
                     elif 'gemini-pro' in model_id and '1.5' not in model_id and '2' not in model_id:
                         model_info.context_length = 32768
@@ -306,7 +334,7 @@ class DynamicModelsService:
                     elif 'claude-3-5-haiku' in model_id:
                         model_info.cost_per_1k_tokens = 0.001
                         model_info.capabilities = ['text_generation', 'analysis', 'fast_response', 'cost_effective']
-                        model_info.recommended_for = ['DelegateAgent', 'UserProxyAgent']
+                        model_info.recommended_for = ['SplitterAgent', 'ClassifierAgent', 'DelegateAgent', 'UserProxyAgent']
                         
                     elif 'claude-3-opus' in model_id:
                         model_info.cost_per_1k_tokens = 0.015
@@ -321,7 +349,7 @@ class DynamicModelsService:
                     elif 'claude-3-haiku' in model_id:
                         model_info.cost_per_1k_tokens = 0.00025
                         model_info.capabilities = ['text_generation', 'analysis', 'fast_response', 'cost_effective']
-                        model_info.recommended_for = ['UserProxyAgent', 'DelegateAgent']
+                        model_info.recommended_for = ['SplitterAgent', 'ClassifierAgent', 'UserProxyAgent', 'DelegateAgent']
                         
                     elif 'claude-2' in model_id:
                         model_info.context_length = 100000

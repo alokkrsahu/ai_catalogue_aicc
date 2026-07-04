@@ -100,7 +100,29 @@ class WorkflowExecutor:
         graph_json = await sync_to_async(lambda: workflow.graph_json)()
         workflow_name = await sync_to_async(lambda: workflow.name)()
         project_id = await sync_to_async(lambda: workflow.project.project_id)()
-        
+
+        # Which node feeds the End node directly — its output becomes the
+        # user-visible response (same single-EndNode/single-predecessor lookup
+        # deployment_executor.py::_extract_end_node_output uses downstream of
+        # execution). Only this node is eligible for live token streaming (see
+        # _stream_or_call_llm): streaming any other node would be invisible to
+        # the user anyway, and a node feeding a reflection revision would show
+        # text that later gets silently replaced, so it's excluded too.
+        final_response_node_id: Optional[str] = None
+        _end_nodes = [n for n in graph_json.get('nodes', []) if n.get('type') == 'EndNode']
+        if len(_end_nodes) == 1:
+            _end_id = _end_nodes[0].get('id')
+            _preds = [e.get('source') for e in graph_json.get('edges', []) if e.get('target') == _end_id]
+            if len(_preds) == 1:
+                _pred_id = _preds[0]
+                _pred_node = next((n for n in graph_json.get('nodes', []) if n.get('id') == _pred_id), None)
+                _pred_has_reflection_out = any(
+                    e.get('source') == _pred_id and e.get('type') == 'reflection'
+                    for e in graph_json.get('edges', [])
+                )
+                if _pred_node and _pred_node.get('type') == 'AssistantAgent' and not _pred_has_reflection_out:
+                    final_response_node_id = _pred_id
+
         is_deployment = deployment_context is not None and deployment_context.get('is_deployment', False)
         if is_deployment:
             logger.info(f"🚀 DEPLOYMENT: Starting workflow execution for {workflow_id} (deployment mode)")
@@ -312,6 +334,7 @@ class WorkflowExecutor:
                             total_response_time, providers_used, project_id,
                             deployment_context=deployment_context,
                             event_callback=event_callback,
+                            final_response_node_id=final_response_node_id,
                         )
                         
                         # Update state from parallel execution results
@@ -805,10 +828,15 @@ class WorkflowExecutor:
                                 # a plan" with the system prompt as the body.
                                 if event_callback:
                                     event_callback("agent_started", {"agent": node_name, "agent_type": node_type})
-                                agent_response = await llm_provider.generate_response(
-                                    messages=llm_messages
+                                # Streams live (token-by-token) instead of blocking when this
+                                # node is the graph's final-response node in a deployment/chat
+                                # context — see _stream_or_call_llm. Falls back to the ordinary
+                                # blocking call for every other node/context unchanged.
+                                agent_response = await self._stream_or_call_llm(
+                                    node, llm_provider, llm_messages, event_callback,
+                                    final_response_node_id,
                                 )
-                            
+
                                 if agent_response.error:
                                     raise Exception(f"Agent {node_name} error: {agent_response.error}")
                             
@@ -3820,13 +3848,100 @@ class WorkflowExecutor:
                     changed = True
 
         return skipped
-    
+
+    async def _stream_or_call_llm(
+        self,
+        node: Dict[str, Any],
+        llm_provider,
+        llm_messages: List[Dict[str, Any]],
+        event_callback,
+        final_response_node_id: Optional[str],
+    ) -> LLMResponse:
+        """
+        Call the LLM for a plain (non-tool-calling) node. If this node is the
+        graph's designated final-response node (see execute_workflow's
+        final_response_node_id computation) and event_callback is available
+        (deployment/chat context — never the internal designer test-run or
+        eval harness, neither of which pass one), stream tokens live via
+        generate_response_stream instead of blocking on generate_response, so
+        the user sees the answer typing in instead of waiting for the whole
+        thing. Falls back to the ordinary blocking call for every other case,
+        including when the messages carry file attachments (the streaming
+        provider methods have no Responses-API path for those).
+        """
+        node_id = node.get('id')
+        file_ref_check = getattr(llm_provider, '_messages_contain_file_refs', None)
+        has_file_refs = bool(file_ref_check(llm_messages)) if file_ref_check else False
+
+        eligible = (
+            event_callback is not None
+            and final_response_node_id is not None
+            and node_id == final_response_node_id
+            and hasattr(llm_provider, 'generate_response_stream')
+            and not has_file_refs
+        )
+
+        if not eligible:
+            return await llm_provider.generate_response(messages=llm_messages)
+
+        import re as _re_stream
+
+        node_name = node.get('data', {}).get('name', node_id)
+        logger.info(f"🌊 STREAM: {node_name} is the final-response node — streaming tokens live")
+
+        start_time = time.time()
+        full_text = ""
+        buffer = ""
+        marker_seen = False
+        # Tolerant opener — the LLM occasionally drops the leading "---"
+        # (bare "CITATIONS"), matching the same tolerance
+        # deployment_views.py/document_tool_service.py already apply to the
+        # complete text. We only need to detect the START of the block here
+        # (it hasn't finished arriving yet), not the full ---...---END--- pair.
+        # Case-sensitive on purpose: ordinary prose mentioning "citations"
+        # lowercase mid-sentence won't false-trigger; the model always emits
+        # this marker upper-case per the citation-format instructions.
+        citation_opener = _re_stream.compile(r'-{0,3}\s*CITATIONS\s*-{0,3}')
+        holdback = 20  # generous tail — enough to catch the marker split across chunk boundaries
+
+        async for chunk in llm_provider.generate_response_stream(messages=llm_messages):
+            full_text += chunk
+            if marker_seen:
+                continue  # already past the marker — keep accumulating full_text only
+            buffer += chunk
+            m = citation_opener.search(buffer)
+            if m:
+                safe = buffer[:m.start()]
+                if safe:
+                    event_callback("token", {"content": safe})
+                marker_seen = True
+                buffer = ""
+            elif len(buffer) > holdback:
+                safe = buffer[:-holdback]
+                if safe:
+                    event_callback("token", {"content": safe})
+                buffer = buffer[-holdback:]
+
+        if not marker_seen and buffer:
+            event_callback("token", {"content": buffer})
+
+        stream_error = getattr(llm_provider, '_last_stream_error', None)
+        response_time_ms = int((time.time() - start_time) * 1000)
+        return LLMResponse(
+            text=full_text,
+            model=getattr(llm_provider, 'model', 'unknown'),
+            provider=getattr(llm_provider, 'provider_name', 'unknown'),
+            response_time_ms=response_time_ms,
+            error=stream_error,
+        )
+
     async def _execute_nodes_in_parallel(self, ready_nodes: List[Tuple[int, Dict[str, Any]]],
                                         workflow, graph_json, executed_nodes, conversation_history,
                                         execution_record, messages, message_sequence, agents_involved,
                                         total_response_time, providers_used, project_id,
                                         deployment_context: Optional[Dict[str, Any]] = None,
-                                        event_callback=None) -> List[Dict[str, Any]]:
+                                        event_callback=None,
+                                        final_response_node_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Execute multiple nodes in parallel using asyncio.gather
         
@@ -4054,8 +4169,13 @@ class WorkflowExecutor:
                         agent_response_text = agent_response.text.strip()
                     response_time_ms = 0
                 else:
-                    # Simple LLM call (no tools)
-                    agent_response = await llm_provider.generate_response(messages=llm_messages)
+                    # Simple LLM call (no tools) — streams live instead of blocking
+                    # when this node is the graph's final-response node in a
+                    # deployment/chat context; see _stream_or_call_llm.
+                    agent_response = await self._stream_or_call_llm(
+                        node, llm_provider, llm_messages, event_callback,
+                        final_response_node_id,
+                    )
                     if agent_response.error:
                         raise Exception(f"Agent {node_name} error: {agent_response.error}")
                     agent_response_text = agent_response.text.strip()

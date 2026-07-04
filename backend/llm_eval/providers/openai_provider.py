@@ -563,16 +563,26 @@ class OpenAIProvider(LLMProvider):
     ) -> AsyncGenerator[str, None]:
         """
         Generate streaming response from OpenAI API.
-        
-        Yields text chunks as they arrive from the API.
+
+        Yields text chunks as they arrive from the API. Real failures are NOT
+        yielded as text (a caller that just concatenates chunks would otherwise
+        treat "Error: ..." as if it were the assistant's answer) — they're
+        stashed on self._last_stream_error, mirroring the self._last_tool_calls/
+        _last_finish_reason convention used by generate_response, so callers
+        can check it after the generator is exhausted and raise appropriately.
         """
+        self._last_stream_error = None
+
         # Validate that either prompt or messages is provided
         if not prompt and not messages:
-            yield f"Error: Either 'prompt' or 'messages' must be provided"
+            self._last_stream_error = "Either 'prompt' or 'messages' must be provided"
             return
-        
+
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
+            # Same 300s floor generate_response applies (line ~396) — multi-input
+            # synthesis-style calls can legitimately exceed the base 30s default.
+            timeout_sec = max(self.timeout, 300)
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_sec, sock_read=timeout_sec, sock_connect=60)) as session:
                 async with session.post(
                     self.base_url,
                     headers=self.get_headers(),
@@ -582,12 +592,12 @@ class OpenAIProvider(LLMProvider):
                         async for line in response.content:
                             if not line:
                                 continue
-                            
+
                             # Parse SSE format
                             line_text = line.decode('utf-8').strip()
                             if not line_text or line_text == 'data: [DONE]':
                                 continue
-                            
+
                             if line_text.startswith('data: '):
                                 try:
                                     data = json.loads(line_text[6:])  # Remove 'data: ' prefix
@@ -603,10 +613,13 @@ class OpenAIProvider(LLMProvider):
                                     logger.error(f"❌ OPENAI STREAM: Error parsing chunk: {e}")
                                     continue
                     else:
-                        error_data = await response.json()
-                        error_msg = error_data.get("error", {}).get("message", "Unknown error")
-                        yield f"Error: {error_msg}"
-                        
+                        try:
+                            error_data = await response.json()
+                            error_msg = error_data.get("error", {}).get("message", "Unknown error")
+                        except Exception:
+                            error_msg = f"HTTP {response.status}"
+                        self._last_stream_error = error_msg
+
         except Exception as e:
             logger.error(f"❌ OPENAI STREAM: Error in streaming: {e}", exc_info=True)
-            yield f"Error: {str(e)}"
+            self._last_stream_error = str(e)

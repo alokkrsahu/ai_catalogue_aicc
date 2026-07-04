@@ -318,7 +318,7 @@ WORKFLOW_TOOLS = [
                     },
                     "llm_model": {
                         "type": "string",
-                        "description": "Model name (default: gpt-4o-mini — cheap/fast works well for routing)"
+                        "description": "Model name — use the LIGHTWEIGHT model listed in AVAILABLE LLM MODELS above (not the flagship/content-generation one). This node only makes a structured routing decision, never generates the user-facing answer."
                     },
                     "temperature": {
                         "type": "number",
@@ -703,7 +703,7 @@ Example B — SplitterAgent task decomposition (research report)
                  then combines their outputs."
   Tool calls (in order):
     1. add_start_node(prompt="Research topic and requirements")
-    2. add_splitter_agent(name="Task Splitter")   # defaults: openai/gpt-4o-mini, strict partition
+    2. add_splitter_agent(name="Task Splitter")   # defaults: openai/gpt-5.4-mini (lightweight — routing only), strict partition
     3. add_assistant_agent(name="Source Researcher", system_message="You find primary sources and raw data...")
     4. add_assistant_agent(name="Draft Writer",      system_message="You compose prose from research findings...")
     5. add_assistant_agent(name="Copy Editor",       system_message="You polish prose for clarity and style...")
@@ -1079,6 +1079,15 @@ CRITICAL — provider/model selection rules:
 • When unsure or the user didn't specify, pick the FIRST provider listed.
 • The platform will auto-substitute the first available provider if you pick
   an unconfigured one — but it's better to choose correctly the first time.
+• SplitterAgent and ClassifierAgent nodes ONLY make a structured routing/
+  allocation decision (which downstream agent(s) get the work, or which
+  category applies) — they never generate the user-facing answer. ALWAYS use
+  the lightweight model listed above (the one NOT marked "recommended for
+  content-generation agents"), regardless of which provider you picked,
+  UNLESS the user explicitly asks for higher-quality routing. Using the
+  flagship model for these nodes buys no routing-quality improvement but
+  measurably slows every single query — 2-3+ extra seconds of pure latency
+  before the actual answer even starts being generated.
 
 ═══════════════════════════════════════════════════════════
 YOUR PROCESS — FOLLOW THESE 3 PHASES
@@ -1115,9 +1124,11 @@ class WorkflowBuilder:
 
     # Sensible default model per provider when we have to fall back because the
     # LLM picked a provider the project has no API key for. Picked for cheap +
-    # reliable tool-calling behavior.
+    # reliable tool-calling behavior. gpt-4o-mini was retired from some
+    # accounts' catalogs; gpt-5.4-mini is the current equivalent lightweight
+    # tier (confirmed live against a real project key).
     _PROVIDER_DEFAULT_MODELS = {
-        "openai": "gpt-4o-mini",
+        "openai": "gpt-5.4-mini",
         "anthropic": "claude-3-5-haiku-20241022",
         "google": "gemini-2.0-flash",
     }
@@ -1518,7 +1529,7 @@ class WorkflowBuilder:
         name = args["name"]
         provider, model = self._resolve_provider_and_model(
             args.get("llm_provider", "openai"),
-            args.get("llm_model", "gpt-4o-mini"),
+            args.get("llm_model", "gpt-5.4-mini"),
         )
         self.nodes.append({
             "id": node_id,
@@ -3412,29 +3423,70 @@ async def generate_workflow(
 
     available_models_lines = []
     available_providers: List[str] = []  # Project actually has API keys for these
-    provider_models = {
-        "openai": "gpt-5.3-chat-latest (recommended), gpt-4o, gpt-4o-mini, o3-mini",
+    # Static fallback only — used when the live model fetch below fails (e.g.
+    # network hiccup, invalid key). Kept intentionally generic/stale-tolerant
+    # since it's a last resort, not the primary source of truth anymore.
+    provider_models_fallback = {
+        "openai": "gpt-5.3-chat-latest (recommended), gpt-5.4-mini",
         "anthropic": "claude-sonnet-4-20250514, claude-3-5-haiku-20241022",
         "google": "gemini-2.5-flash, gemini-2.0-flash",
     }
+    provider_labels = {"openai": "OpenAI", "anthropic": "Anthropic", "google": "Google"}
+
+    from agent_orchestration.dynamic_models_service import dynamic_models_service
+
     try:
         from project_api_keys.services import ProjectAPIKeyService
         key_service = ProjectAPIKeyService()
-        for provider_name, models_str in provider_models.items():
+        for provider_name in provider_models_fallback.keys():
             key = await sync_to_async(key_service.get_project_api_key)(project, provider_name)
-            if key:
-                available_providers.append(provider_name)
-                label = provider_name.capitalize()
-                if provider_name == "openai":
-                    label = "OpenAI"
-                available_models_lines.append(f"- {label}: {models_str}")
+            if not key:
+                continue
+            available_providers.append(provider_name)
+            label = provider_labels.get(provider_name, provider_name.capitalize())
+
+            # Pick a flagship (content-generation) and a lightweight (routing)
+            # model from the project's ACTUAL live model list, rather than a
+            # hardcoded string that inevitably goes stale as providers ship
+            # new model families. Falls back to the static hint on any error.
+            try:
+                models = await dynamic_models_service.get_models_for_provider(
+                    provider_name, project=project,
+                )
+                flagship = next(
+                    (m for m in models if m.recommended_for and 'AssistantAgent' in m.recommended_for),
+                    None,
+                )
+                lightweight = next(
+                    (m for m in models if m.recommended_for and 'SplitterAgent' in m.recommended_for),
+                    None,
+                )
+                if flagship and lightweight and flagship.id != lightweight.id:
+                    models_str = (
+                        f"{flagship.id} (recommended for content-generation agents), "
+                        f"{lightweight.id} (recommended for SplitterAgent/ClassifierAgent "
+                        f"routing — fast + cheap, sufficient for structured allocation/"
+                        f"category decisions)"
+                    )
+                elif flagship:
+                    models_str = f"{flagship.id} (recommended)"
+                else:
+                    models_str = provider_models_fallback[provider_name]
+            except Exception as model_fetch_err:
+                logger.warning(
+                    f"⚠️ WORKFLOW GEN: Live model fetch failed for {provider_name}, "
+                    f"using static fallback: {model_fetch_err}"
+                )
+                models_str = provider_models_fallback[provider_name]
+
+            available_models_lines.append(f"- {label}: {models_str}")
     except Exception as e:
         logger.warning(f"⚠️ WORKFLOW GEN: Could not check API keys: {e}")
         # Fallback when key lookup crashes: assume all three are available so
         # we don't block the LLM. Runtime errors will be visible if a chosen
         # provider has no key.
-        available_providers = list(provider_models.keys())
-        for provider_name, models_str in provider_models.items():
+        available_providers = list(provider_models_fallback.keys())
+        for provider_name, models_str in provider_models_fallback.items():
             available_models_lines.append(f"- {provider_name.capitalize()}: {models_str}")
 
     if not available_models_lines:
