@@ -46,7 +46,7 @@ class WorkflowDeployment(models.Model):
         help_text='Default rate limit per minute for origins without specific limits'
     )
     initial_greeting = models.CharField(
-        max_length=500,
+        max_length=2500,
         default='Hi! I am your AI assistant.',
         help_text='Initial greeting message shown by the embedded chatbot'
     )

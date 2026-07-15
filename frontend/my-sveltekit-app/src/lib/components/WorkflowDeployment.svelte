@@ -26,6 +26,7 @@
   
   // Endpoint URL
   let endpointUrl = '';
+  const GREETING_MAX_LENGTH = 2500;
   let initialGreeting = 'Hi! I am your AI assistant.';
   
   // Chatbot branding customization
@@ -788,15 +789,21 @@
             <label class="block text-sm font-medium text-gray-700 mb-2">
               Initial Greeting Message
             </label>
-            <input
-              type="text"
+            <textarea
               bind:value={initialGreeting}
+              maxlength={GREETING_MAX_LENGTH}
+              rows="4"
               class="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-oxford-blue focus:border-oxford-blue"
               placeholder="Hi! I am your AI assistant."
-            />
-            <p class="text-sm text-gray-500 mt-1">
-              This message will be shown as the first assistant message in the embedded chatbot. Changes are project-specific.
-            </p>
+            ></textarea>
+            <div class="flex justify-between mt-1">
+              <p class="text-sm text-gray-500">
+                This message will be shown as the first assistant message in the embedded chatbot. Changes are project-specific.
+              </p>
+              <p class="text-sm {initialGreeting.length >= GREETING_MAX_LENGTH ? 'text-red-500' : 'text-gray-500'} whitespace-nowrap ml-4">
+                {initialGreeting.length}/{GREETING_MAX_LENGTH}
+              </p>
+            </div>
           </div>
 
           <!-- Embed Snippet -->

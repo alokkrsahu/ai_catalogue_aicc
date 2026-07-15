@@ -31,6 +31,7 @@ from django.views.decorators.cache import never_cache
 from django.shortcuts import get_object_or_404
 from django.core.files.storage import default_storage
 from django.db import transaction
+from django.db.utils import DataError
 from rest_framework import viewsets, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
@@ -543,6 +544,17 @@ class DeploymentViewSet(viewsets.ViewSet):
                     {'error': 'workflow_id is required'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
+
+            # Validate field lengths up front so oversized input returns a
+            # clear 400 instead of a database-level 500.
+            max_greeting_length = WorkflowDeployment._meta.get_field('initial_greeting').max_length
+            initial_greeting = request.data.get('initial_greeting')
+            if initial_greeting is not None and len(str(initial_greeting)) > max_greeting_length:
+                return Response(
+                    {'error': f'Initial greeting is too long ({len(str(initial_greeting))} characters). '
+                              f'Maximum allowed is {max_greeting_length} characters.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             
             workflow = get_object_or_404(AgentWorkflow, workflow_id=workflow_id, project=project)
             
@@ -661,6 +673,13 @@ class DeploymentViewSet(viewsets.ViewSet):
                 'message': 'Deployment created successfully' if created else 'Deployment updated successfully'
             }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
             
+        except DataError as e:
+            logger.warning(f"⚠️ DEPLOYMENT: Invalid deployment data: {e}")
+            return Response(
+                {'error': 'One of the provided values is too long for its field. '
+                          'Please shorten it and try again.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         except Exception as e:
             logger.error(f"❌ DEPLOYMENT: Error creating/updating deployment: {e}", exc_info=True)
             return Response(
