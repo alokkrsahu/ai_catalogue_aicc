@@ -4216,9 +4216,12 @@ def embed_chatbot_html(request, project_id):
     // sometimes prefix them with leading whitespace. If we don't normalise,
     // each bullet line is treated as a plain paragraph and <p> margins stack
     // between items (~16px per gap) instead of tight <li> spacing.
+    // Leading whitespace is PRESERVED ($1) — an indented bullet means a
+    // nested sub-item, and flattening it to column 0 would make the list
+    // processor below close the parent <ol> instead of nesting.
     html = html.replace(
-      /^\\s*[\\u2022\\u00B7\\u25CF\\u25AA\\u25CB\\u25E6\\u2043\\u2219\\u25AB\\u25A0\\u2013\\u2014]\\s+/gm,
-      '- '
+      /^(\\s*)[\\u2022\\u00B7\\u25CF\\u25AA\\u25CB\\u25E6\\u2043\\u2219\\u25AB\\u25A0\\u2013\\u2014]\\s+/gm,
+      '$1- '
     );
 
     // Headers
@@ -4245,21 +4248,53 @@ def embed_chatbot_html(request, project_id):
     const processedLines = [];
     let inOrderedList = false;
     let inUnorderedList = false;
-    
+    // Closer for an in-progress nested <ul> under the current <ol> item.
+    // Empty string when no nested list is open.
+    let nestedCloser = '';
+
+    function closeNested() {{
+      if (nestedCloser) {{ processedLines.push(nestedCloser); nestedCloser = ''; }}
+    }}
+
     for (let i = 0; i < lines.length; i++) {{
       const line = lines[i];
       const orderedMatch = line.match(/^(\\d+)\\.\\s+(.+)$/);
       const unorderedMatch = line.match(/^[-*]\\s+(.+)$/);
+      // Indented bullet while an <ol> is open = sub-item of the current
+      // numbered entry. Previously this fell through to the paragraph branch,
+      // which CLOSED the <ol>; the next numbered item then opened a fresh
+      // <ol> restarting at 1 — so "1. / 2. / 3." rendered as "1. / 1. / 1.".
+      const nestedBulletMatch = inOrderedList ? line.match(/^\\s+[-*]\\s+(.+)$/) : null;
 
       if (orderedMatch) {{
+        closeNested();
         if (!inOrderedList) {{
           if (inUnorderedList) {{ processedLines.push('</ul>'); inUnorderedList = false; }}
-          processedLines.push('<ol>');
+          // start="N" carries the item's REAL number from the markdown, so
+          // even when intervening content (sub-bullets, explanatory lines)
+          // legitimately splits one logical list into several <ol> fragments,
+          // the visible numbering continues 1, 2, 3 instead of resetting.
+          processedLines.push('<ol start="' + orderedMatch[1] + '">');
           inOrderedList = true;
         }}
         processedLines.push('<li>' + orderedMatch[2] + '</li>');
+      }} else if (nestedBulletMatch) {{
+        if (!nestedCloser) {{
+          const last = processedLines.length - 1;
+          if (last >= 0 && processedLines[last].endsWith('</li>')) {{
+            // Re-open the parent <li> and start a nested <ul> inside it —
+            // the only valid place for a sub-list in HTML.
+            processedLines[last] = processedLines[last].slice(0, -5) + '<ul>';
+            nestedCloser = '</ul></li>';
+          }} else {{
+            processedLines.push('<ul>');
+            nestedCloser = '</ul>';
+          }}
+        }}
+        processedLines.push('<li>' + nestedBulletMatch[1] + '</li>');
       }} else if (unorderedMatch) {{
         if (!inUnorderedList) {{
+          closeNested();
           if (inOrderedList) {{ processedLines.push('</ol>'); inOrderedList = false; }}
           processedLines.push('<ul>');
           inUnorderedList = true;
@@ -4267,28 +4302,32 @@ def embed_chatbot_html(request, project_id):
         processedLines.push('<li>' + unorderedMatch[1] + '</li>');
       }} else if ((inOrderedList || inUnorderedList) && /^\\s*$/.test(line)) {{
         // Blank line inside a list — peek ahead. If the next non-blank line is
-        // the same kind of bullet, keep the <ul>/<ol> open and absorb this
-        // blank line. Otherwise close the list as before. Without this,
-        // LLM responses with blank lines between bullets render as N separate
-        // <ul> elements, each contributing extra vertical margin.
+        // the same kind of bullet (or a nested sub-bullet of an open <ol>),
+        // keep the list open and absorb this blank line. Otherwise close the
+        // list as before. Without this, LLM responses with blank lines between
+        // bullets render as N separate <ul>/<ol> elements.
         let j = i + 1;
         while (j < lines.length && /^\\s*$/.test(lines[j])) j++;
         if (j < lines.length) {{
           const nextOrdered = lines[j].match(/^(\\d+)\\.\\s+(.+)$/);
           const nextUnordered = lines[j].match(/^[-*]\\s+(.+)$/);
-          if ((inOrderedList && nextOrdered) || (inUnorderedList && nextUnordered)) {{
+          const nextNested = lines[j].match(/^\\s+[-*]\\s+(.+)$/);
+          if ((inOrderedList && (nextOrdered || nextNested)) || (inUnorderedList && nextUnordered)) {{
             continue;  // keep list open, drop the blank line
           }}
         }}
+        closeNested();
         if (inOrderedList) {{ processedLines.push('</ol>'); inOrderedList = false; }}
         if (inUnorderedList) {{ processedLines.push('</ul>'); inUnorderedList = false; }}
         processedLines.push(line);
       }} else {{
+        closeNested();
         if (inOrderedList) {{ processedLines.push('</ol>'); inOrderedList = false; }}
         if (inUnorderedList) {{ processedLines.push('</ul>'); inUnorderedList = false; }}
         processedLines.push(line);
       }}
     }}
+    closeNested();
     if (inOrderedList) processedLines.push('</ol>');
     if (inUnorderedList) processedLines.push('</ul>');
     html = processedLines.join('\\n');
