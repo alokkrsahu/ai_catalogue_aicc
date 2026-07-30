@@ -1656,9 +1656,16 @@ class WorkflowExecutor:
                     )
                 else:
                     workflow.average_execution_time = duration
-                
-                workflow.save()
-            
+
+                # update_fields is load-bearing: this instance was loaded before
+                # a potentially long execution (and deployment_executor mutates
+                # its graph_json in memory), so a full-row save here would
+                # overwrite canvas edits the user saved mid-execution.
+                workflow.save(update_fields=[
+                    'total_executions', 'successful_executions',
+                    'last_executed_at', 'average_execution_time',
+                ])
+
             await sync_to_async(update_workflow_stats)()
             
             # CRITICAL FIX: Get the latest messages_data from database first
@@ -1930,7 +1937,8 @@ class WorkflowExecutor:
             def update_failed_stats():
                 workflow.total_executions += 1
                 workflow.last_executed_at = timezone.now()
-                workflow.save()
+                # update_fields is load-bearing — see update_workflow_stats above.
+                workflow.save(update_fields=['total_executions', 'last_executed_at'])
             
             await sync_to_async(update_failed_stats)()
             

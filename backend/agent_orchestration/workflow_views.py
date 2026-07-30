@@ -1096,7 +1096,9 @@ class AgentWorkflowViewSet(viewsets.ModelViewSet):
         # Update workflow status
         if not errors:
             workflow.status = AgentWorkflowStatus.VALIDATED
-            workflow.save()
+            # Only the status changes here — a full-row save could clobber a
+            # canvas autosave that landed since this instance was fetched.
+            workflow.save(update_fields=['status'])
         
         return Response({
             'valid': len(errors) == 0,
