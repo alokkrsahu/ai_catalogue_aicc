@@ -17,6 +17,12 @@ that slot does — there is no separate slot configuration on the
 SplitterAgent node. "Slots inherit the config of the agents they're
 connected to" — so the splitter just needs to look downstream.
 
+The splitter node's OWN ``system_message`` is the workflow author's
+routing policy: when non-empty it is embedded into the routing prompt
+as authoritative guidance for which agents receive subtasks. It
+complements the auto-generated agent listing (it cannot rename agents
+or bypass the forced tool call).
+
 Architecturally symmetric with ClassifierAgent:
   * ClassifierAgent has `categories` — LLM picks exactly ONE
   * SplitterAgent has `downstream_agents` (derived from outgoing edges)
@@ -53,6 +59,19 @@ from .classifier_executor import CLASSIFIER_SKIPPED_SENTINEL as BRANCH_SKIPPED_S
 
 class SplitterAllocationError(Exception):
     """Raised when the splitter LLM fails to produce a valid allocation after retry."""
+
+
+# How much of each downstream agent's system_message the routing LLM gets to
+# see. This must be generous: routing keywords often live deep inside long
+# operational prompts (a 400-char cap once hid "object types" at char 433 of
+# a 4194-char prompt, making the router blind to that agent's speciality and
+# consistently misroute — see FAIRsharing FIONA incident, 2026-07).
+ROLE_SNIPPET_MAX_CHARS = 2000
+
+# Cap on the splitter node's own system_message (the operator routing policy)
+# when embedded into the routing prompt. User-authored and normally short;
+# the cap only guards against pathological inputs blowing up the prompt.
+OPERATOR_POLICY_MAX_CHARS = 8000
 
 
 def _build_allocation_tool(downstream_agents: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -114,7 +133,11 @@ def _build_allocation_tool(downstream_agents: List[Dict[str, Any]]) -> Dict[str,
     }
 
 
-def _build_system_prompt(downstream_agents: List[Dict[str, Any]], overlap_allowed: bool) -> str:
+def _build_system_prompt(
+    downstream_agents: List[Dict[str, Any]],
+    overlap_allowed: bool,
+    operator_policy: str = "",
+) -> str:
     """Auto-generated system prompt for the splitter LLM. Lists each downstream
     agent's name + role so the LLM knows what kind of work each agent handles.
 
@@ -123,6 +146,12 @@ def _build_system_prompt(downstream_agents: List[Dict[str, Any]], overlap_allowe
     consulted — the splitter must reason only from the operational prompt
     that will actually run on the downstream agent, not from UI copy that
     can drift from behaviour.
+
+    ``operator_policy`` is the splitter node's own ``system_message`` — the
+    workflow author's routing rules. When present it is embedded verbatim
+    (capped at OPERATOR_POLICY_MAX_CHARS) as authoritative routing guidance;
+    it complements the structural rules but never overrides them (the LLM
+    must still call the tool with exact agent names from the list).
     """
     lines = [
         "You are a task splitter. Your job is to read the input and allocate "
@@ -159,6 +188,19 @@ def _build_system_prompt(downstream_agents: List[Dict[str, Any]], overlap_allowe
         "WHY that subtask fits that agent — this is logged and surfaced to "
         "operators."
     )
+    if operator_policy:
+        lines.append("")
+        lines.append(
+            "Routing policy from the workflow author — follow it when deciding "
+            "which agents receive subtasks. If it refers to an agent by an "
+            "abbreviated or partial name, map that reference to the closest "
+            "matching agent name from the list below and use the EXACT listed "
+            "name in your allocation:"
+        )
+        policy = operator_policy[:OPERATOR_POLICY_MAX_CHARS]
+        if len(operator_policy) > OPERATOR_POLICY_MAX_CHARS:
+            policy += "…"
+        lines.append(policy)
     lines.append("")
     lines.append("Downstream agents available for allocation:")
     for idx, agent in enumerate(downstream_agents, start=1):
@@ -169,7 +211,7 @@ def _build_system_prompt(downstream_agents: List[Dict[str, Any]], overlap_allowe
         role = (agent.get("system_message") or "").strip()
         lines.append(f"  {idx}. {name}")
         if role:
-            snippet = role[:400] + ("…" if len(role) > 400 else "")
+            snippet = role[:ROLE_SNIPPET_MAX_CHARS] + ("…" if len(role) > ROLE_SNIPPET_MAX_CHARS else "")
             lines.append(f"     Role: {snippet}")
         else:
             lines.append("     Role: (no system_message configured)")
@@ -202,7 +244,9 @@ async def execute_splitter(
     Parameters
     ----------
     splitter_node : dict
-        The SplitterAgent node (needs ``data.name`` and ``data.overlap_allowed``).
+        The SplitterAgent node. Uses ``data.name``, ``data.overlap_allowed``,
+        and ``data.system_message`` (the workflow author's routing policy,
+        embedded into the routing prompt when non-empty).
     input_text : str
         The aggregated upstream input the splitter must decompose.
     downstream_agents : list of dict
@@ -230,6 +274,7 @@ async def execute_splitter(
     data = splitter_node.get("data", {}) or {}
     splitter_name = data.get("name", splitter_node.get("id", "Splitter"))
     overlap_allowed = bool(data.get("overlap_allowed", False))
+    operator_policy = (data.get("system_message") or "").strip()
     t_start = time.time()
 
     if len(downstream_agents) < 2:
@@ -253,7 +298,12 @@ async def execute_splitter(
         name_to_target_id[name] = a.get("id")
 
     tools = [_build_allocation_tool(downstream_agents)]
-    system_prompt = _build_system_prompt(downstream_agents, overlap_allowed)
+    system_prompt = _build_system_prompt(downstream_agents, overlap_allowed, operator_policy)
+    if operator_policy:
+        logger.info(
+            f"🪓 SPLITTER: '{splitter_name}' operator routing policy included "
+            f"({len(operator_policy)} chars)"
+        )
     tool_choice = _tool_choice_for_provider(provider_name)
 
     base_messages: List[Dict[str, Any]] = [
