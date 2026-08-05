@@ -59,7 +59,7 @@ Only **nginx (80/443)** is published on all interfaces. Every other port binds `
 | 5173 | frontend-dev | Vite dev server + HMR — loopback only; reach the app via nginx |
 | 3000 | frontend | Production Node server — loopback only |
 | 5432 | postgres | Loopback only |
-| 6379 | redis | Loopback only. **No password or ACL is configured**, so the binding is the only control. |
+| 6379 | redis | Loopback only, and `requirepass` is enforced (`REDIS_PASSWORD`). |
 | 8001 | chromadb | Container port 8000. Loopback only — it has no auth and CORS `*`. |
 | 19530 | milvus | gRPC; authentication enabled. Loopback only. |
 | 9091 | milvus | HTTP — `/healthz`, `/webui/`. Loopback only. |
@@ -69,7 +69,7 @@ Only **nginx (80/443)** is published on all interfaces. Every other port binds `
 
 To reach a loopback-bound service from your workstation, use an SSH tunnel rather than republishing the port, e.g. `ssh -L 8080:127.0.0.1:8080 <host>` for pgAdmin.
 
-**Still worth doing:** set a Redis password and put authentication in front of ChromaDB, so the loopback binding is not the only thing protecting them.
+**Still worth doing:** put authentication in front of ChromaDB, so the loopback binding is not the only thing protecting it.
 
 ---
 
@@ -87,6 +87,7 @@ Copy `.env.example` to `.env` and fill in the values marked REQUIRED. Variables 
 | `DJANGO_SECRET_KEY` | No compose default. Also enforced in settings: with `DEBUG=False`, a missing or public dev key raises `ImproperlyConfigured` at startup. |
 | `API_KEY_ENCRYPTION_KEY` | No default. Encrypts `llm_eval.APIKeyConfig`. A literal key was previously hardcoded in `docker-compose.yml` and is public in git history — it has been rotated and must not be reused. |
 | `DB_PASSWORD` | No default. The previous default (`ai_catalogue_password`) is published in this repository. |
+| `REDIS_PASSWORD` | No default. Redis runs with `requirepass`; the cache holds fetched web content and rate-limit counters, so write access can poison LLM inputs. |
 | At least one of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` | Otherwise no LLM node can execute. |
 
 Generate the keys:
@@ -107,7 +108,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 - **Database** — `DB_NAME` (`ai_catalogue_db`), `DB_USER` (`ai_catalogue_user`), `DB_PASSWORD`, `DB_PORT` (`5432`), `DB_AUTH_METHOD` (`md5`). `DB_HOST` is forced to `postgres` for the backend container. Tuning: `DB_CONN_MAX_AGE` (`300`, `600` in prod), `DB_CONNECT_TIMEOUT` (`60`), `DB_SSL_MODE` (`prefer`).
 - **Vector stores** — `MILVUS_HOST`/`MILVUS_PORT` (forced to `milvus`/`19530` for the backend). `CHROMADB_PORT` is overloaded: it sets the ChromaDB **host** port (default `8001`) while the backend always talks to `chromadb:8000` internally.
-- **Redis** — `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB` (`0`). Used as the Django cache backend and the web-search cache.
+- **Redis** — `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB` (`0`), `REDIS_PASSWORD` (**required**). Used as the Django cache backend and the web-search cache. The credential is carried in the cache `LOCATION` URL (URL-quoted), so the raw redis-py client used for pattern deletes inherits it automatically — there is only one place to configure it.
 - **Django** — `DEBUG`, `ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`, `CSRF_TRUSTED_ORIGINS`, `ENVIRONMENT`, `JWT_ACCESS_TOKEN_LIFETIME` (60 min), `JWT_REFRESH_TOKEN_LIFETIME` (1440 min).
 - **LLM** — `OPENAI_API_KEY` / `OPENAI_MODEL` (`gpt-3.5-turbo`), `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` / `GEMINI_MODEL` (`gemini-1.5-flash`), and `AICC_CHATBOT_OPENAI_API_KEY` — a **separate** key used only by the public chatbot so that public traffic never consumes the platform key.
 - **Frontend** — `BACKEND_URL` (server-side SvelteKit, `http://backend:8000`), `VITE_BACKEND_URL` and `VITE_API_BASE_URL` (browser-facing; point these at your public origin).

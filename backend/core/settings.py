@@ -13,6 +13,8 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 from pathlib import Path
 import os
 from dotenv import load_dotenv
+from urllib.parse import quote
+
 from django.core.exceptions import ImproperlyConfigured
 
 # Load environment variables from .env file
@@ -307,11 +309,23 @@ MILVUS_CONFIG = {
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
 REDIS_PORT = os.getenv('REDIS_PORT', '6379')
 REDIS_DB = os.getenv('REDIS_DB', '0')
+REDIS_PASSWORD = os.getenv('REDIS_PASSWORD', '')
+
+# Redis is the Django cache backend and holds fetched web-page content, cached
+# search results, chunk embeddings and the rate-limit counters. Anyone able to
+# write to it can poison what the LLMs are given, so the server runs with
+# `requirepass` and the credential travels in the connection URL. Quoted because
+# a password containing '@', ':' or '/' would otherwise corrupt the URL.
+# Empty password is still accepted so an unauthenticated local Redis works.
+if REDIS_PASSWORD:
+    _redis_auth = f":{quote(REDIS_PASSWORD, safe='')}@"
+else:
+    _redis_auth = ''
 
 CACHES = {
     'default': {
         'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-        'LOCATION': f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}",
+        'LOCATION': f"redis://{_redis_auth}{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}",
         'KEY_PREFIX': 'ai_catalogue',
         'TIMEOUT': 3600,  # Default timeout: 1 hour
         'OPTIONS': {

@@ -93,6 +93,7 @@ Then, in the app: create a project from a template, upload documents, run **Star
 | `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` | Same startup guard, though MinIO is currently unused. |
 | `DJANGO_SECRET_KEY` | No default; required whenever `DEBUG=False`. |
 | `DB_PASSWORD` | No default; the previous default is public in this repository. |
+| `REDIS_PASSWORD` | No default; Redis runs with `requirepass`. |
 | One of `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` | Needed for platform-level features. |
 
 ---
@@ -189,7 +190,7 @@ These documents are derived from the source rather than from earlier documentati
 
 Only nginx (80/443) is published on all interfaces; every other service binds `127.0.0.1`. `DEBUG` defaults to `False`, and with `DEBUG=False` a missing or publicly-known `DJANGO_SECRET_KEY` fails startup rather than being used silently. `DB_PASSWORD`, `DJANGO_SECRET_KEY` and both encryption keys have no defaults and must be set.
 
-Remaining known gaps — Redis has no password, ChromaDB has no authentication, and the deployment CORS middleware only blocks preflight — are tracked in [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md). Before rotating an encryption key, read [`docs/DEPLOYMENT.md` §11](docs/DEPLOYMENT.md#11-rotating-encryption-keys): `PROJECT_API_KEY_ENCRYPTION_KEY` cannot be changed without re-encrypting stored data.
+Redis enforces `requirepass`. Remaining known gaps — ChromaDB has no authentication and the deployment CORS middleware only blocks preflight — are tracked in [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md). Before rotating an encryption key, read [`docs/DEPLOYMENT.md` §11](docs/DEPLOYMENT.md#11-rotating-encryption-keys): `PROJECT_API_KEY_ENCRYPTION_KEY` cannot be changed without re-encrypting stored data.
 
 ---
 

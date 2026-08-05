@@ -31,9 +31,14 @@ services:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
-    command: redis-server --appendonly yes
+    command: >
+      redis-server --appendonly yes
+      --requirepass "${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}"
+    environment:
+      # Consumed by redis-cli in the healthcheck below (avoids -a on the cmdline)
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -162,6 +167,7 @@ services:
       DB_HOST: postgres
       MILVUS_HOST: milvus
       REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
       MINIO_HOST: minio
       
       # Default values for development (override via .env for production)
