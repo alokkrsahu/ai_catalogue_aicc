@@ -1,194 +1,77 @@
-# Bulk Upload Simplification - Changes Made
+# Public Knowledge Base — Bulk Document Upload
 
-## 🎯 **Problem Solved**
-The bulk upload functionality was failing due to complex custom widgets, file processing pipelines, and JavaScript integration issues. Manual upload worked fine because it used standard Django forms.
+**Module:** `backend/public_chatbot/`
+**Surface:** Django admin only — there is no REST endpoint for this.
 
-## 🔧 **Solution Implemented**
-Replaced all complex logic with the simplest possible implementation using standard Django components.
-
----
-
-## 📝 **Changes Made**
-
-### **1. Forms (`forms.py`) - SIMPLIFIED**
-
-#### **Before:**
-- Custom `MultipleFileField` class
-- Custom `CustomMultipleFileWidget` with manual HTML generation
-- Complex file extraction logic in `clean_files()`
-- Multiple form classes (DocumentProcessingForm, BatchActionForm, etc.)
-- Complex validation with DocumentProcessor dependencies
-
-#### **After:**
-```python
-class BulkDocumentUploadForm(forms.Form):
-    # Simple standard Django FileField with multiple=True
-    files = forms.FileField(
-        widget=forms.ClearableFileInput(attrs={'multiple': True}),
-        help_text="Select multiple files to upload",
-        required=True
-    )
-    
-    category = forms.CharField(max_length=50, initial='general')
-```
-
-**Key Changes:**
-- ✅ Replaced custom widget with `forms.ClearableFileInput(attrs={'multiple': True})`
-- ✅ Removed all complex validation logic
-- ✅ Removed dependency on DocumentProcessor
-- ✅ Simplified to just 2 fields: files + category
-
-### **2. Admin View (`admin.py`) - SIMPLIFIED**
-
-#### **Before:**
-- Complex `_process_bulk_upload()` method with 100+ lines
-- DocumentProcessor integration
-- Security validation pipeline
-- Progress tracking system
-- Auto-sync functionality
-- Quality score filtering
-
-#### **After:**
-```python
-def _process_simple_bulk_upload(self, request, form):
-    # Get files from request.FILES - Django handles multiple files automatically
-    uploaded_files = request.FILES.getlist('files')
-    category = form.cleaned_data.get('category', 'general')
-    
-    for uploaded_file in uploaded_files:
-        content = self._extract_simple_content(uploaded_file)
-        doc = PublicKnowledgeDocument.objects.create(
-            title=uploaded_file.name.rsplit('.', 1)[0].replace('_', ' ').title(),
-            content=content,
-            category=category,
-            # ... basic fields only
-        )
-```
-
-**Key Changes:**
-- ✅ Removed DocumentProcessor dependency
-- ✅ Removed security validation pipeline
-- ✅ Removed progress tracking
-- ✅ Simple text extraction (UTF-8 decoding only)
-- ✅ Direct database creation without complex workflows
-
-### **3. Template (`bulk_upload.html`) - SIMPLIFIED**
-
-#### **Before:**
-- 500+ lines of HTML and JavaScript
-- Complex drag-and-drop functionality
-- Progress bars and status tracking
-- Extensive debugging JavaScript
-- Custom CSS for file drop zones
-
-#### **After:**
-```html
-<form method="post" enctype="multipart/form-data">
-    {% csrf_token %}
-    <div class="form-row">
-        <label for="{{ form.files.id_for_label }}">Files:</label>
-        {{ form.files }}
-    </div>
-    <div class="form-row">
-        <label for="{{ form.category.id_for_label }}">Category:</label>
-        {{ form.category }}
-    </div>
-    <input type="submit" value="🚀 Upload Documents" class="default"/>
-</form>
-```
-
-**Key Changes:**
-- ✅ Removed all custom JavaScript
-- ✅ Removed drag-and-drop functionality
-- ✅ Standard Django form rendering
-- ✅ Simple CSS styling only
-- ✅ No progress tracking UI
+This file describes how bulk upload works today. It previously contained a before/after changelog of a 2025 refactor, which had drifted from the code (among other things it stated that the custom `MultipleFileField` had been removed, when the current form uses exactly that). It has been replaced with a description of current behaviour.
 
 ---
 
-## 🚀 **How It Works Now**
+## Where it lives
 
-### **File Upload Process:**
-1. User selects multiple files using standard browser file picker
-2. Files are submitted via standard Django form POST
-3. `request.FILES.getlist('files')` extracts all uploaded files
-4. Each file is read as text (UTF-8 decoding)
-5. Documents are created directly in database
-6. User sees success/error messages
-7. Redirected to document list
+| Piece | Location |
+|---|---|
+| Admin view | `PublicKnowledgeDocumentAdmin.bulk_upload_view` — `public_chatbot/admin.py` |
+| URL | `/admin/public_chatbot/publicknowledgedocument/bulk-upload/`, registered via `get_urls()` and wrapped in `admin_site.admin_view` (staff only) |
+| Form | `BulkDocumentUploadForm` — `public_chatbot/forms.py` |
+| Template | `public_chatbot/templates/admin/public_chatbot/bulk_upload.html` |
+| Processing | `PublicKnowledgeDocumentAdmin._process_simple_bulk_upload`, wrapped in `@transaction.atomic` |
+| Target model | `PublicKnowledgeDocument` — `public_chatbot/models.py` |
 
-### **File Processing:**
-- **Text Extraction**: Simple UTF-8 decoding with fallback encodings
-- **Title Generation**: Filename without extension, formatted as title
-- **Default Values**: Quality score 50, not approved, empty tags
-- **Categories**: User-specified category applied to all files
+Access requires `has_add_permission`; otherwise the view raises `PermissionDenied`.
 
 ---
 
-## ✅ **Benefits of Simplification**
+## The form
 
-### **Reliability:**
-- ✅ Uses standard Django form processing (battle-tested)
-- ✅ No custom widgets that can break
-- ✅ No complex JavaScript that can fail
-- ✅ Standard browser file picker (always works)
+`BulkDocumentUploadForm` has two fields:
 
-### **Maintainability:**
-- ✅ 90% less code to maintain
-- ✅ No external dependencies (DocumentProcessor, security, etc.)
-- ✅ Easy to debug and troubleshoot
-- ✅ Standard Django patterns
+- **`files`** — a custom `MultipleFileField` paired with a `MultipleFileInput` widget whose `accept` attribute advertises `.txt, .pdf, .docx, .html, .md, .csv, .json`. Required.
+- **`category`** — free-text `CharField` (max 50), default `general`, applied to every document in the batch.
 
-### **User Experience:**
-- ✅ Fast and responsive (no complex processing)
-- ✅ Clear error messages
-- ✅ Immediate feedback
-- ✅ Works on all browsers/devices
+The form also takes a `user` keyword argument, which the admin view supplies so the uploader can be attributed.
+
+`accept` is a browser hint only and does not enforce anything server-side; what actually succeeds depends on what `_extract_simple_content` can read.
 
 ---
 
-## 🧪 **Testing**
+## Processing
 
-Run the test script to verify functionality:
-```bash
-cd backend
-python test_simplified_bulk_upload.py
-```
+For each file in `request.FILES.getlist('files')`:
 
-## 🔄 **Usage**
+1. Extract text via `_extract_simple_content`.
+2. **Skip** the file if the result is empty or under 10 characters, recording a per-file error.
+3. Create a `PublicKnowledgeDocument` with:
+   - `title` — derived from the filename: extension stripped, underscores replaced with spaces, title-cased.
+   - `content` — the extracted text.
+   - `category` — from the form.
+   - the uploader recorded via `get_user_identifier(request.user)` as a username string (`PublicKnowledgeDocument` deliberately has no user foreign keys).
 
-1. Navigate to: `/admin/public_chatbot/publicknowledgedocument/bulk-upload/`
-2. Click "Choose Files" and select multiple text files
-3. Enter a category name
-4. Click "🚀 Upload Documents"
-5. Documents will be created and require manual approval
+The batch runs in one transaction; per-file failures are collected and shown as admin messages rather than aborting the run.
 
----
-
-## 📋 **What Was Removed**
-
-### **Complex Components Removed:**
-- ❌ Custom `MultipleFileField` and `CustomMultipleFileWidget`
-- ❌ DocumentProcessor pipeline (PDF, DOCX, Excel processing)
-- ❌ Security validation system
-- ❌ Progress tracking system
-- ❌ Auto-approval and auto-sync functionality
-- ❌ Quality score calculation
-- ❌ Complex file validation
-- ❌ Drag-and-drop JavaScript
-- ❌ Advanced metadata extraction
-
-### **Still Available:**
-- ✅ Manual document upload (unchanged)
-- ✅ Document approval workflow
-- ✅ ChromaDB sync (manual via admin actions)
-- ✅ All existing document management features
+`PublicKnowledgeDocument.save()` computes `document_id`, `content_preview` and a SHA-256 `content_hash` automatically, and calls `full_clean()` on every write.
 
 ---
 
-## 🎯 **Result**
+## What upload does *not* do
 
-**Before**: Complex bulk upload that didn't work
-**After**: Simple bulk upload that works reliably
+New documents are **not** live to the chatbot. Two further steps are required:
 
-The bulk upload now works exactly like the manual upload but allows selecting multiple files at once. All documents require manual approval, maintaining security and quality control.
+1. **Approval** — `is_approved` and `security_reviewed` both default to false. Set them from the admin list view.
+2. **Sync to ChromaDB** — run `python manage.py sync_public_knowledge`, which pushes documents that are both approved and security-reviewed into the vector store and sets `synced_to_chromadb` / `chromadb_id`. Use `--force-sync` to re-push already-synced rows, `--dry-run` to preview, `--category` / `--limit` to narrow the batch.
+
+Deletion removes the row from ChromaDB via the pre/post-delete signals in `public_chatbot/signals.py`.
+
+The `quality_score` field (0–100) exists for filtering but is not populated by bulk upload.
+
+---
+
+## Related management commands
+
+| Command | Purpose |
+|---|---|
+| `sync_public_knowledge` | Push approved documents into ChromaDB |
+| `init_sample_knowledge` | Insert ~6 pre-approved seed documents (`--clear-existing` to reset) |
+| `test_bulk_upload` | Diagnostics: `--create-samples` writes fixture files, `--test-security` exercises `DocumentSecurityValidator`, `--test-formats` exercises `DocumentProcessor`. With no flags it only prints banners. |
+
+For how the chatbot consumes this knowledge base — and why it is isolated from the Milvus-backed project system — see [`public_chatbot/ARCHITECTURE.md`](public_chatbot/ARCHITECTURE.md).

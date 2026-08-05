@@ -1,264 +1,195 @@
 # IntelliDoc — AI Builder for Multi-Agent Workflows
 
-IntelliDoc is an open-source system that generates validated, operator-editable multi-agent workflows from a single natural-language request. The canonical use case is transparent Deep Research: given a prompt, the AI Builder synthesises a workflow that retrieves relevant documents, searches the web, delegates subtasks to specialised agents, and compiles a structured report — all without writing a line of code. MIT licensed.
+IntelliDoc generates validated, operator-editable multi-agent workflows from a single natural-language request. The canonical use case is transparent Deep Research: given a prompt, the AI Builder synthesises a workflow that retrieves relevant documents, searches the web, delegates subtasks to specialised agents, and compiles a structured report — without writing code. MIT licensed.
 
 ---
 
-## Key Features
+## Key features
 
-- **AI Builder (Plan → Build → Verify → Self-Critique)** — four-phase pipeline that synthesises a complete workflow graph, validates it against structural invariants, then critiques and repairs its own output before presenting it to the operator
-- **Visual Workflow Designer** — drag-and-drop canvas with 9 agent node types: LLM, DocAware, WebSearch, Classifier, Splitter, Aggregator, Evaluator, MCP, Human-in-the-Loop
-- **Per-agent RAG via Milvus** — 7 configurable search strategies (semantic, hybrid, contextual, and more) against project-scoped Milvus collections
-- **Web search with Redis caching** — external search results cached to avoid redundant requests
-- **Reference-based evaluation** — BLEU / ROUGE / BERTScore + LLM-as-judge scoring for systematic quality measurement
-- **Embeddable chatbot deployment** — publish any workflow as a public chatbot endpoint
-- **Multi-provider LLM per agent** — mix OpenAI, Anthropic, and Google models within a single workflow; per-node temperature control
-- **MCP server integration** — attach Model Context Protocol servers to individual agent nodes
-- **Human-in-the-loop** — pause execution, request operator input, and resume — streamed live via WebSocket
+- **AI Builder (Plan → Build → Verify → Self-Critique)** — synthesises a complete workflow graph, validates it against structural invariants, then critiques and repairs its own output before presenting it.
+- **Visual workflow designer** — drag-and-drop canvas with nine node types: Start, End, Assistant, UserProxy (human-in-the-loop), GroupChatManager, Delegate, Classifier, Splitter, MCP Server. Edits autosave to the database.
+- **Per-agent RAG via Milvus** — seven configurable search strategies against project-scoped collections, with per-agent folder/file scoping.
+- **Format-adaptive web search** — URL, domain and general modes. URL content is extracted with layered fallbacks (DOM, JSON-LD, SPA hydration state, `<noscript>`, text density, markdown alternates) and cached in Redis.
+- **Reference-based evaluation** — CSV-driven ROUGE / BLEU / BERTScore / semantic-similarity scoring.
+- **Embeddable chatbot deployment** — publish any workflow as a public endpoint with optional password protection, per-origin allowlists and rate limits.
+- **Multi-provider LLMs per agent** — mix OpenAI, Anthropic and Google models in one workflow, with per-node temperature.
+- **Grounded citations** — `[N]` markers reconciled end to end so numbering is always consecutive and every marker is backed by a real source.
+- **MCP server integration** and **human-in-the-loop** pause/resume, streamed live over SSE.
 
 ---
 
-## Architecture
-
-### Tech Stack
+## Stack
 
 | Layer | Technology |
 |---|---|
-| Backend framework | Django 5.2 + Django REST Framework |
+| Runtime | Python 3.13 |
+| Backend | Django ≥5.2 + Django REST Framework |
 | Database | PostgreSQL 15 |
-| Vector database | Milvus 2.6 |
-| Cache / broker | Redis 7 |
-| Frontend framework | SvelteKit 2 + Svelte 5, TypeScript, Tailwind CSS |
-| Build tool | Vite 6 |
+| Vector DB | Milvus 2.6 (projects) · ChromaDB 1.0.20 (isolated public chatbot) |
+| Cache | Redis 7 |
+| Frontend | SvelteKit 2 + Svelte 5, TypeScript, Tailwind 3, Vite 6 |
 | Auth | JWT via SimpleJWT (Bearer tokens) |
-| Realtime | Django Channels (WebSocket) |
+| Real-time | Server-Sent Events |
 | Reverse proxy | Nginx |
-| Containerisation | Docker Compose (9 services) |
-| Embedding model | `all-MiniLM-L6-v2` (384-dim, SentenceTransformers) |
+| Containers | Docker Compose — **11 services** |
+| Embeddings | `all-MiniLM-L6-v2` (384-dim, SentenceTransformers) |
 
-### Docker Services
+> Note: `celery` and `channels` appear in `requirements.txt` but are **not wired up** — there is no Celery app, worker or task dispatch, and no WebSocket routing. Background work uses threads; real-time uses SSE.
+
+### Services
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    ai_catalogue_network (172.20.0.0/16)         │
-│                                                                  │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌─────────────┐  │
-│  │ postgres │   │  redis   │   │  minio   │   │    etcd     │  │
-│  │  :5432   │   │  :6379   │   │  :9000   │   │   :2379     │  │
-│  └──────────┘   └──────────┘   └──────────┘   └─────────────┘  │
-│                                                      │           │
-│  ┌──────────────────────────────────────────────┐   │           │
-│  │                   milvus                     │◄──┘           │
-│  │                  :19530                      │               │
-│  └──────────────────────────────────────────────┘               │
-│                                                                  │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐                     │
-│  │ chromadb │   │ backend  │   │ frontend │                     │
-│  │  :8001   │   │  :8000   │   │  :3000   │                     │
-│  └──────────┘   └──────────┘   └──────────┘                     │
-│                        ▲              ▲                          │
-│                        └──────┬───────┘                         │
-│                         ┌─────┴────┐                            │
-│                         │  nginx   │ ← public :80 / :443        │
-│                         └──────────┘                            │
-└─────────────────────────────────────────────────────────────────┘
+                        ┌──────────┐
+     public :80/:443 ───│  nginx   │
+                        └────┬─────┘
+                 ┌───────────┴───────────┐
+          ┌──────▼──────┐         ┌──────▼───────┐
+          │   backend    │         │   frontend   │
+          │    :8000     │         │ :3000 / :5173│
+          └──────┬───────┘         └──────────────┘
+                 │
+   ┌─────────┬───┴─────┬──────────┬───────────┐
+┌──▼───┐ ┌───▼───┐ ┌───▼────┐ ┌───▼─────┐ ┌───▼────┐
+│postgres│ │ redis │ │ milvus │ │chromadb │ │ minio  │
+│ :5432  │ │ :6379 │ │ :19530 │ │  :8001  │ │(unused)│
+└────────┘ └───────┘ └───┬────┘ └─────────┘ └────────┘
+                     ┌───▼───┐
+                     │ etcd  │      plus: pgadmin :8080, attu :3001
+                     └───────┘
 ```
 
 ---
 
-## Prerequisites
+## Quick start
 
-- Docker ≥ 24
-- Docker Compose ≥ 2.20
-- At least one LLM API key (OpenAI, Anthropic, or Google)
-- 8 GB RAM (16 GB recommended when running all 9 services)
-- macOS, Linux, or WSL2 on Windows
-
----
-
-## Quick Start
+Prerequisites: Docker ≥ 24, Docker Compose ≥ 2.20, 8 GB RAM (16 GB recommended), and at least one LLM API key.
 
 ```bash
-# 1. Clone the repository
-git clone <repo-url>
-cd ai_catalogue_aicc
-
-# 2. Copy and configure the environment file
+git clone <repo-url> && cd ai_catalogue
 cp .env.example .env
 
-# 3. Fill in your API keys and generate the required secret keys
-#    Django secret key:
-python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
+# Generate the required secrets
+python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"   # DJANGO_SECRET_KEY
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"                    # PROJECT_API_KEY_ENCRYPTION_KEY
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"                    # API_KEY_ENCRYPTION_KEY
 
-#    Fernet encryption keys (run twice — one for each variable):
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-
-# 4. Start all services with hot reload
-./scripts/start-dev.sh
-
-# 5. Open the app
+./scripts/start-dev.sh          # first run: 8–12 min (images + embedding model)
 open http://localhost
 ```
 
-First run downloads Docker images and the embedding model (~8–12 minutes). Subsequent starts are much faster.
+Then, in the app: create a project from a template, upload documents, run **Start Processing**, and add a provider API key under the project's API-key settings.
 
----
+> **API keys are per project.** There is no environment-variable fallback on the workflow path — a project with no configured `ProjectAPIKey` cannot execute any LLM node.
 
-## Environment Variables
+`.env.example` is incomplete relative to what the compose stack reads; all missing variables have working defaults in `docker-compose.yml`. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the full list.
 
-Copy `.env.example` to `.env` and fill in every value marked below as required.
+### Required configuration
 
-| Variable | Required | Description | How to generate |
-|---|---|---|---|
-| `DJANGO_SECRET_KEY` | Yes | Django cryptographic signing key | `python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"` |
-| `API_KEY_ENCRYPTION_KEY` | Yes | Fernet key for encrypting stored API keys | `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
-| `PROJECT_API_KEY_ENCRYPTION_KEY` | Yes | Fernet key for per-project API keys | Same command as above |
-| `DB_NAME` | Yes | PostgreSQL database name | Any string, e.g. `ai_catalogue_db` |
-| `DB_USER` | Yes | PostgreSQL username | Any string |
-| `DB_PASSWORD` | Yes | PostgreSQL password | Any strong password |
-| `DB_HOST` | Yes | PostgreSQL host | `postgres` (Docker) or `localhost` (standalone) |
-| `DB_PORT` | Yes | PostgreSQL port | `5432` |
-| `MILVUS_HOST` | Yes | Milvus host | `milvus` (Docker) or `localhost` (standalone) |
-| `MILVUS_PORT` | Yes | Milvus port | `19530` |
-| `MILVUS_ROOT_USER` | Yes | Milvus admin username | `milvusadmin` |
-| `MILVUS_ROOT_PASSWORD` | Yes | Milvus admin password | Any strong password |
-| `MINIO_ROOT_USER` | Yes | MinIO username (Milvus storage) | `minioadmin` |
-| `MINIO_ROOT_PASSWORD` | Yes | MinIO password | Any strong password |
-| `OPENAI_API_KEY` | At least one | OpenAI API key | [platform.openai.com](https://platform.openai.com) |
-| `ANTHROPIC_API_KEY` | At least one | Anthropic API key | [console.anthropic.com](https://console.anthropic.com) |
-| `GOOGLE_API_KEY` | At least one | Google Gemini API key | [aistudio.google.com](https://aistudio.google.com) |
-| `CORS_ALLOWED_ORIGINS` | Yes (prod) | Comma-separated allowed origins | e.g. `https://yourdomain.com` |
-| `CSRF_TRUSTED_ORIGINS` | Yes (prod) | Comma-separated trusted origins | e.g. `https://yourdomain.com` |
-| `DEBUG` | No | Set `False` in production | `True` for development |
-
----
-
-## Deployment Scripts
-
-All scripts live in `scripts/`. See `scripts/SCRIPTS.md` for the full decision table.
-
-| Scenario | Script | Approx. downtime |
-|---|---|---|
-| First run / fresh infrastructure | `./scripts/start-dev.sh` | N/A (first boot) |
-| Code-only changes (`.py`, `.svelte`, `.ts`) | `./scripts/quick-deploy.sh` | ~2 s |
-| New pip/npm packages or Dockerfile changes | `./scripts/rebuild-deploy.sh` | ~10 s |
-| Production with SSL (Let's Encrypt) | `./scripts/setup-ssl.sh` then `./scripts/production.sh` | N/A |
-| Renew SSL certificate | `./scripts/renew-ssl.sh` | 0 (hot reload) |
-| Full reset and clean restart | `./scripts/reset.sh` | Full restart |
-
-### Docker Compose variants
-
-| File | Purpose |
+| Variable | Why |
 |---|---|
-| `docker-compose.yml` | Core 9-service stack (baseline) |
-| `docker-compose.override.yml` | Dev hot-reload overlay (auto-merged by Docker Compose) |
-| `docker-compose.prod.yml` | Production overlay — no dev mounts |
-| `docker-compose.ssl.yml` | SSL / Let's Encrypt overlay |
-| `docker-compose-chroma-addon.yml` | Optional isolated ChromaDB addon |
+| `PROJECT_API_KEY_ENCRYPTION_KEY` | No default. Encrypts per-project provider keys. |
+| `API_KEY_ENCRYPTION_KEY` | **Set this explicitly** — the compose default is a key committed to this repository. |
+| `MILVUS_ROOT_USER`, `MILVUS_ROOT_PASSWORD` | No default; startup scripts abort without them. |
+| `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` | Same startup guard, though MinIO is currently unused. |
+| `DJANGO_SECRET_KEY` | Has an insecure placeholder default. |
+| One of `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` | Needed for platform-level features. |
 
 ---
 
-## Development Without Docker
+## Everyday commands
 
-### Backend (standalone)
+| Task | Command |
+|---|---|
+| Code-only change (`.py`, `.svelte`, `.ts`) | `./scripts/quick-deploy.sh` |
+| New dependency or Dockerfile change | `./scripts/rebuild-deploy.sh` |
+| Restart everything without rebuilding | `./scripts/restart-dev.sh` |
+| Full rebuild from scratch | `./scripts/start-dev.sh` |
+| Reclaim disk (keeps volumes) | `./scripts/docker-cleanup.sh` |
+
+See [`scripts/SCRIPTS.md`](scripts/SCRIPTS.md) for the complete table.
+
+> **`docker-compose.override.yml` is auto-loaded**, so any bare `docker compose …` command runs the *development* stack — `runserver`, `DEBUG=True`, the Vite dev server. Only `scripts/production.sh` opts out. Note that the production overlay does not currently start; see [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) (B1, B2).
+
+---
+
+## Development without Docker
 
 ```bash
+# Backend
 cd backend
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-
-# Point .env DB_HOST=localhost, MILVUS_HOST=localhost, etc.
+# point DB_HOST / MILVUS_HOST / REDIS_HOST at localhost in .env
 python manage.py migrate
-python manage.py setup_container_data   # loads demo data
+python manage.py setup_container_data      # seeds dashboard icons
 python manage.py runserver 0.0.0.0:8000
 
-# Start Celery worker (separate terminal)
-celery -A core worker -l info
-```
-
-### Frontend (standalone)
-
-```bash
+# Frontend
 cd frontend/my-sveltekit-app
 npm install
-npm run dev        # dev server at http://localhost:5173
-npm run build      # production build
-npm run check      # svelte-check type checking
-npm run lint       # ESLint
+npm run dev       # http://localhost:5173
+npm run check     # svelte-check
+npm run lint      # ESLint
 ```
 
-The Vite dev server proxies `/api` requests to the backend. Set the `BACKEND_URL` env var to change the target (default `http://localhost:8000`).
+The Vite dev server proxies `/api` to `BACKEND_URL` (default `http://127.0.0.1:8000`). There is no Celery worker to start.
 
 ---
 
-## Project Structure
+## Repository layout
 
 ```
 .
-├── backend/                        # Django backend
-│   ├── agent_orchestration/        # Core orchestration engine
-│   │   ├── workflow_executor.py    # Sequential workflow execution
-│   │   ├── parallel_executor.py    # Parallel branch execution
-│   │   ├── chat_manager.py         # LLM interaction layer
-│   │   ├── consumers.py            # WebSocket consumers (streaming)
-│   │   ├── deployment_executor.py  # Public deployment execution
-│   │   ├── workflow_generator.py   # AI Builder (Plan→Build→Verify→Critique)
-│   │   ├── docaware/               # Per-agent RAG (Milvus integration)
-│   │   └── websearch/              # Web search with Redis caching
-│   ├── api/                        # Core REST views and serializers
-│   ├── core/                       # Settings, URL routing, ASGI/WSGI
-│   ├── llm_eval/                   # LLM evaluation framework
-│   ├── mcp_servers/                # MCP server integration
-│   ├── project_api_keys/           # Encrypted per-project API key storage
-│   ├── public_chatbot/             # Public-facing chatbot (isolated CORS)
-│   ├── templates/                  # Project template system
-│   ├── users/                      # Custom User model
-│   └── vector_search/              # Milvus indexing and search
-├── frontend/my-sveltekit-app/
-│   └── src/
-│       ├── routes/                 # SvelteKit pages
-│       │   └── features/intellidoc/  # Main project UI
-│       └── lib/
-│           ├── components/         # Svelte 5 UI components
-│           ├── services/           # API clients and WebSocket
-│           ├── stores/             # Svelte state stores
-│           └── types.ts            # Shared TypeScript types
-├── nginx/                          # Nginx reverse proxy config
-├── scripts/                        # Deployment and utility scripts
-├── docker-compose.yml              # Core service definitions
-├── docker-compose.override.yml     # Dev hot-reload overlay
-├── docker-compose.prod.yml         # Production overlay
-├── docker-compose.ssl.yml          # SSL overlay
-├── docker-compose-chroma-addon.yml # ChromaDB addon
-└── .env.example                    # Environment variable template
+├── backend/
+│   ├── agent_orchestration/      # workflow engine, deployment, RAG, web search
+│   │   ├── workflow_executor.py  # the executor (sequential + parallel)
+│   │   ├── chat_manager.py       # prompt crafting, GroupChatManager
+│   │   ├── graph_invariants.py   # save-time graph validation
+│   │   ├── workflow_generator.py # AI Builder
+│   │   ├── deployment_views.py   # public chatbot endpoints + embed page
+│   │   ├── docaware/             # per-agent RAG over Milvus
+│   │   └── websearch/            # fetch, extract, cache, index
+│   ├── api/                      # auth, permissions, UniversalProjectViewSet
+│   ├── core/                     # settings, urls, wsgi/asgi
+│   ├── users/                    # custom User + ~30 domain models
+│   ├── vector_search/            # ingestion: parse → chunk → embed → Milvus
+│   ├── public_chatbot/           # isolated unauthenticated chatbot (ChromaDB)
+│   ├── llm_eval/                 # multi-provider comparison
+│   ├── templates/                # filesystem template registry
+│   ├── project_api_keys/         # encrypted per-project keys
+│   └── mcp_servers/              # encrypted MCP credentials
+├── frontend/my-sveltekit-app/src/
+│   ├── routes/                   # SvelteKit pages
+│   └── lib/{components,services,stores}/
+├── docs/                         # architecture, API, deployment, known issues
+├── nginx/                        # dev / prod / ssl configs
+├── scripts/                      # deployment and utility scripts
+└── docker-compose*.yml
 ```
 
 ---
 
-## API Overview
+## Documentation
 
-All endpoints are under `/api/`. Authentication uses JWT Bearer tokens — obtain tokens via `/api/token/` and pass them as `Authorization: Bearer <token>`.
+| Document | Contents |
+|---|---|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Apps, domain model, `graph_json` format, node types, execution semantics, retrieval, citations, frontend |
+| [`docs/API.md`](docs/API.md) | Complete endpoint reference, including every public endpoint and its auth model |
+| [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Compose stack, configuration, nginx, scripts, ports, persistence, backup |
+| [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) | Verified defects and dead code, triaged by severity |
+| [`backend/public_chatbot/ARCHITECTURE.md`](backend/public_chatbot/ARCHITECTURE.md) | Public chatbot isolation model |
+| [`backend/agent_orchestration/parallelization_analysis.md`](backend/agent_orchestration/parallelization_analysis.md) | GroupChatManager / Delegate execution flow |
 
-| Group | Base path | Description |
-|---|---|---|
-| Projects | `/api/projects/` | Create, list, update, delete projects |
-| Workflows | `/api/projects/{id}/workflows/` | Workflow CRUD and execution |
-| Workflow execution | `/api/projects/{id}/workflows/{id}/execute/` | Trigger a workflow run |
-| Document processing | `/api/projects/{id}/process_documents/` | Upload and index documents |
-| Vector search | `/api/projects/{id}/search/` | Search indexed documents |
-| LLM configuration | `/api/llm/` | Multi-provider LLM settings |
-| Per-project API keys | `/api/project-api-keys/` | Encrypted API key management |
-| DocAware / RAG | `/api/agent-orchestration/` | DocAware search and orchestration |
-| Public chatbot | `/api/public-chatbot/` | Unauthenticated chatbot endpoint |
-| Workflow deployment | `/api/workflow-deploy/{project_id}/` | Public deployment (no auth) |
-| MCP servers | `/api/mcp-servers/` | MCP server configuration |
-| Templates | `/api/templates/` | Dynamic project template registry |
-| Auth | `/api/token/`, `/api/token/refresh/` | JWT obtain and refresh |
+These documents are derived from the source rather than from earlier documentation, and they record defects as well as intended behaviour. Please keep them that way — if you change behaviour, update the corresponding section; if you fix something in `KNOWN_ISSUES.md`, remove the entry.
 
-WebSocket endpoint: `ws://localhost/ws/agent-orchestration/{project_id}/` — used for streaming execution updates, human-in-the-loop messages, and keep-alive pings.
+---
+
+## Security notes for operators
+
+Before exposing an instance to the internet, read the security section of [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md). In particular: only ports 80 and 443 should be reachable (Postgres, Redis, ChromaDB, Milvus, pgAdmin, Attu, the Django port and the Vite dev server are all bound to `0.0.0.0` by default), `DEBUG` defaults to `True`, `API_KEY_ENCRYPTION_KEY` must be overridden, and the unauthenticated password-reset endpoint returns its reset token in the response body.
 
 ---
 
 ## License
 
-MIT License — see `LICENSE` for details.
+MIT — see [`LICENSE`](LICENSE).
