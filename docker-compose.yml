@@ -122,30 +122,6 @@ services:
     networks:
       - ai_catalogue_network
 
-  # ChromaDB Vector Database (for Public Chatbot)
-  chromadb:
-    image: chromadb/chroma:1.0.20
-    container_name: ai_catalogue_chromadb
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:${CHROMADB_PORT:-8001}:8000"
-    environment:
-      CHROMA_SERVER_HOST: "0.0.0.0"
-      CHROMA_SERVER_PORT: "8000"
-      CHROMA_SERVER_CORS_ALLOW_ORIGINS: '["*"]'
-    volumes:
-      - chromadb_data:/chroma/chroma
-    healthcheck:
-      # CRITICAL FIX: Use correct ChromaDB v2 API endpoint
-      # v1/heartbeat is deprecated, use v2 health endpoint instead
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
-    networks:
-      - ai_catalogue_network
-
   # Django Backend
   backend:
     build:
@@ -191,13 +167,6 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      
-      # Public Chatbot API Keys (isolated from main system)
-      AICC_CHATBOT_OPENAI_API_KEY: ${AICC_CHATBOT_OPENAI_API_KEY:-}
-      
-      # ChromaDB Configuration (for Public Chatbot)
-      CHROMADB_HOST: chromadb
-      CHROMADB_PORT: 8000
       
       # HuggingFace Model Download Configuration (prevents timeout errors)
       HF_HUB_DOWNLOAD_TIMEOUT: "300"
@@ -337,8 +306,6 @@ volumes:
   backend_media:
     driver: local
   backend_logs:
-    driver: local
-  chromadb_data:
     driver: local
   redis_data:
     driver: local

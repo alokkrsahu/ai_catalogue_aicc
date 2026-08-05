@@ -44,9 +44,8 @@ Open items are a to-do list. Items that have been fixed are moved to the **Resol
 | B20 | **`nginx.dev.conf` requires another project's containers** (`chatgpt_analytics_*`) to be on the network, or nginx will not start. | `nginx/nginx.dev.conf` |
 | B21 | **`nginx.ssl.conf` lacks the 1500 s API timeouts** present in the dev and prod configs, so switching to the SSL overlay would break long document processing at nginx's 60 s default. | `nginx/nginx.ssl.conf` |
 | B22 | **`deploy.replicas: 2` is a no-op** under `docker compose` and conflicts with the fixed `8000:8000` / `3000:3000` host bindings. | `docker-compose.prod.yml` |
-| B23 | **`stop.sh` never stops** `redis`, `chromadb`, `attu` or `frontend-dev`. | `scripts/stop.sh` |
+| B23 | **`stop.sh` never stops** `redis`, `attu` or `frontend-dev`. | `scripts/stop.sh` |
 | B24 | **Every `backend/*.sh` script hardcodes a macOS path** (`/Users/alok/Documents/AICC/...`) and a `venv` that does not exist here. `workflow_complete_fix.sh` and `workflow_fix_applied.sh` only echo text. | `backend/*.sh` |
-| B25 | **ChromaDB heartbeat mismatch** — several scripts poll the deprecated `/api/v1/heartbeat` while the compose healthcheck uses `/api/v2/heartbeat`. The container is currently reported unhealthy. | `scripts/start-dev.sh`, `restart-dev.sh` |
 
 ---
 
@@ -76,7 +75,6 @@ Open items are a to-do list. Items that have been fixed are moved to the **Resol
 | M21 | **StartNode only executes if it is first in the topological order** — it is handled by a pre-loop block guarded on index 0, so a graph that sorts it later never runs it. | `workflow_executor.py` |
 | M22 | **There is no keep-alive on the deployment SSE stream**; the generator does not yield on queue timeouts. | `deployment_views.py` |
 | M23 | **`docker-cleanup.sh` claims `./volumes/*` are preserved data.** Those directories are mounted by no compose file and are empty leftovers. | `scripts/docker-cleanup.sh` |
-| M24 | **`IPUsageLimit.is_rate_limited()` hardcodes 100/day and 20/hour**, duplicating (and able to diverge from) the `ChatbotConfiguration` fields. | `public_chatbot/models.py` |
 
 ---
 
@@ -93,9 +91,8 @@ Open items are a to-do list. Items that have been fixed are moved to the **Resol
 | V7 | **`core/settings_minimal.py` / `urls_minimal.py`** — referenced by nothing and materially divergent (SQLite, hardcoded secret). Dangerous if activated. | |
 | V8 | **Dead models** — `WorkflowTemplate` (no references); `SimulationRun` / `AgentMessage` (only the unwired Celery path writes them). `DashboardIcon.generate_collection_name()` references a field the model does not have. | |
 | V9 | **Half of `api/views.py`** is unrouted and shadowed by `templates.views` equivalents: `IntelliDocProjectViewSet`, `ProjectTemplateViewSet`, `process_project_documents`, `get_project_vector_status`, `search_project_documents`. | |
-| V10 | **`k8s/`** — gitignored, last touched 2025-09, image drift (Milvus 2.5.15 vs 2.6.0), and **no Redis or ChromaDB** despite both now being required. ~50 `K8S_*`/`AZURE_*` variables in `.env` exist only for it. | |
+| V10 | **`k8s/`** — gitignored, last touched 2025-09, image drift (Milvus 2.5.15 vs 2.6.0), and **no Redis** despite it now being required. ~50 `K8S_*`/`AZURE_*` variables in `.env` exist only for it. | |
 | V11 | **Duplicate definitions** — `vector_search/api_views.py` defines `get_vector_status` three times and `process_unified` twice (earlier ones shadowed); `vector_search/summarization.py` is shadowed by the `summarization/` package and can never be imported. | |
-| V12 | **`docker-compose-chroma-addon.yml`** conflicts with the base `chromadb` service on port 8001 and is superseded. `backend/docker-compose-milvus*.yml`, `docker-compose-postgres.yml`, `milvus*.yaml` are all unreferenced. | |
 | V13 | **`deployment_urls.py` builds a router that is never included** — all 12 `@action` decorators on `DeploymentViewSet` are inert metadata; the explicit paths do the routing. | |
 | V14 | **Unreachable OPTIONS branches** in four public deployment views — the CORS middleware answers preflight first. | |
 | V15 | **Empty template includes** — `/api/templates/legal/`, `/medical/`, `/history/` include `urlpatterns = []`. The `aicc-intellidoc` include is commented out and replaced by a hardcoded lambda labelled "EMERGENCY FIX". | |
@@ -126,8 +123,8 @@ Open items are a to-do list. Items that have been fixed are moved to the **Resol
 | S3 | Debug workflow endpoint ignored project access | `has_user_access` check added. Verified: non-member GET/POST → 403, superuser → 200. |
 | S4 | All six `/api/milvus/*` endpoints were unauthenticated | Staff-only guard on every view. Verified: all six → 401 anonymous. Nothing in the product calls them. |
 | S5 | `/api/templates/refresh/` was unauthenticated and cleared the whole cache | `refresh` is staff-only; `discover` and `endpoints` require authentication. Verified: all → 401 anonymous. The frontend uses the DRF `/enhanced-project-templates/` routes, so nothing broke. |
-| S6 | Infrastructure ports bound to `0.0.0.0` | Postgres, Redis, ChromaDB, Milvus, Django, pgAdmin, Attu and both frontends now bind `127.0.0.1`. Only nginx (80/443) is public. Verified from the host's own interface: every infra port refused, port 80 open. |
 | S7 | `DEBUG` defaulted to `True`; the insecure `SECRET_KEY` fallback was silent | `DEBUG` now defaults to `False`. The public dev `SECRET_KEY` is only permitted while `DEBUG` is on; with `DEBUG=False` a missing or dev key raises `ImproperlyConfigured` at startup. |
+| — | ChromaDB had no authentication and CORS `*` | Service removed entirely (2026-08-05). Its volume was empty, so the index was already lost; the 30 curated documents remain in PostgreSQL and were backed up. The `public_chatbot` feature is disabled and returns 503. Resolves the old B25 (heartbeat mismatch) and V12 (conflicting legacy addon compose file) as a side effect. |
 | — | Redis ran with no password or ACL | `requirepass` enabled via `REDIS_PASSWORD`; the credential travels in the Django cache `LOCATION` URL so every consumer (including the raw redis-py pattern-delete path) picks it up. Verified: anonymous `PING`, `SET` and `FLUSHALL` all refused with `NOAUTH`. |
 | M15 | `.env.example` was missing ~14 variables the compose stack reads | Completed: the required ones are marked REQUIRED and an "additional variables" block documents the rest (53 variables total). |
 | S13 | Hardcoded `SECRET_KEY` in `core/settings_minimal.py` | Replaced with an env lookup that raises if unset, so the inert module no longer carries a committed secret. (The module remains unused — see V7.) |

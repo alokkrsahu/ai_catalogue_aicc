@@ -101,8 +101,9 @@ INSTALLED_APPS = [
     'django_milvus_search',  # Add the Django Milvus Search app
     'project_api_keys.apps.ProjectApiKeysConfig',  # Project-specific API key management
     'mcp_servers',  # MCP Server integration
-    'public_chatbot',  # Public Chatbot API (isolated from main system)
-    
+    # 'public_chatbot' was retired on 2026-08-05 together with its ChromaDB
+    # backend. Its data was exported to backup/chromadb-removal-2026-08-05/.
+
     # Third-party
     'rest_framework',
 ]
@@ -119,9 +120,6 @@ AUTH_USER_MODEL = 'users.User'
 
 
 MIDDLEWARE = [
-    # Custom CORS middleware for public chatbot (HIGHEST priority)
-    'public_chatbot.middleware.cors.PublicChatbotCORSMiddleware',
-    
     # Custom CORS middleware for workflow deployments (HIGH priority)
     'agent_orchestration.middleware.deployment_cors.WorkflowDeploymentCORSMiddleware',
     

@@ -25,13 +25,13 @@ IntelliDoc generates validated, operator-editable multi-agent workflows from a s
 | Runtime | Python 3.13 |
 | Backend | Django ≥5.2 + Django REST Framework |
 | Database | PostgreSQL 15 |
-| Vector DB | Milvus 2.6 (projects) · ChromaDB 1.0.20 (isolated public chatbot) |
+| Vector DB | Milvus 2.6 |
 | Cache | Redis 7 |
 | Frontend | SvelteKit 2 + Svelte 5, TypeScript, Tailwind 3, Vite 6 |
 | Auth | JWT via SimpleJWT (Bearer tokens) |
 | Real-time | Server-Sent Events |
 | Reverse proxy | Nginx |
-| Containers | Docker Compose — **11 services** |
+| Containers | Docker Compose — **10 services** |
 | Embeddings | `all-MiniLM-L6-v2` (384-dim, SentenceTransformers) |
 
 > Note: `celery` and `channels` appear in `requirements.txt` but are **not wired up** — there is no Celery app, worker or task dispatch, and no WebSocket routing. Background work uses threads; real-time uses SSE.
@@ -49,10 +49,10 @@ IntelliDoc generates validated, operator-editable multi-agent workflows from a s
           └──────┬───────┘         └──────────────┘
                  │
    ┌─────────┬───┴─────┬──────────┬───────────┐
-┌──▼───┐ ┌───▼───┐ ┌───▼────┐ ┌───▼─────┐ ┌───▼────┐
-│postgres│ │ redis │ │ milvus │ │chromadb │ │ minio  │
-│ :5432  │ │ :6379 │ │ :19530 │ │  :8001  │ │(unused)│   all loopback-only
-└────────┘ └───────┘ └───┬────┘ └─────────┘ └────────┘
+┌──▼───┐ ┌───▼───┐ ┌───▼────┐ ┌───▼────┐
+│postgres│ │ redis │ │ milvus │ │ minio  │
+│ :5432  │ │ :6379 │ │ :19530 │ │(unused)│   all loopback-only
+└────────┘ └───────┘ └───┬────┘ └────────┘
                      ┌───▼───┐
                      │ etcd  │      plus: pgadmin :8080, attu :3001
                      └───────┘
@@ -155,7 +155,6 @@ The Vite dev server proxies `/api` to `BACKEND_URL` (default `http://127.0.0.1:8
 │   ├── core/                     # settings, urls, wsgi/asgi
 │   ├── users/                    # custom User + ~30 domain models
 │   ├── vector_search/            # ingestion: parse → chunk → embed → Milvus
-│   ├── public_chatbot/           # isolated unauthenticated chatbot (ChromaDB)
 │   ├── llm_eval/                 # multi-provider comparison
 │   ├── templates/                # filesystem template registry
 │   ├── project_api_keys/         # encrypted per-project keys
@@ -179,7 +178,6 @@ The Vite dev server proxies `/api` to `BACKEND_URL` (default `http://127.0.0.1:8
 | [`docs/API.md`](docs/API.md) | Complete endpoint reference, including every public endpoint and its auth model |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Compose stack, configuration, nginx, scripts, ports, persistence, backup |
 | [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) | Verified defects and dead code, triaged by severity |
-| [`backend/public_chatbot/ARCHITECTURE.md`](backend/public_chatbot/ARCHITECTURE.md) | Public chatbot isolation model |
 | [`backend/agent_orchestration/parallelization_analysis.md`](backend/agent_orchestration/parallelization_analysis.md) | GroupChatManager / Delegate execution flow |
 
 These documents are derived from the source rather than from earlier documentation, and they record defects as well as intended behaviour. Please keep them that way — if you change behaviour, update the corresponding section; if you fix something in `KNOWN_ISSUES.md`, remove the entry.
@@ -190,7 +188,7 @@ These documents are derived from the source rather than from earlier documentati
 
 Only nginx (80/443) is published on all interfaces; every other service binds `127.0.0.1`. `DEBUG` defaults to `False`, and with `DEBUG=False` a missing or publicly-known `DJANGO_SECRET_KEY` fails startup rather than being used silently. `DB_PASSWORD`, `DJANGO_SECRET_KEY` and both encryption keys have no defaults and must be set.
 
-Redis enforces `requirepass`. Remaining known gaps — ChromaDB has no authentication and the deployment CORS middleware only blocks preflight — are tracked in [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md). Before rotating an encryption key, read [`docs/DEPLOYMENT.md` §11](docs/DEPLOYMENT.md#11-rotating-encryption-keys): `PROJECT_API_KEY_ENCRYPTION_KEY` cannot be changed without re-encrypting stored data.
+Redis enforces `requirepass`. The remaining known gap — the deployment CORS middleware only blocks preflight — is tracked in [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md). Before rotating an encryption key, read [`docs/DEPLOYMENT.md` §11](docs/DEPLOYMENT.md#11-rotating-encryption-keys): `PROJECT_API_KEY_ENCRYPTION_KEY` cannot be changed without re-encrypting stored data.
 
 ---
 

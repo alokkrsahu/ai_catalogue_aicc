@@ -1,5 +1,11 @@
 # Public Knowledge Base — Bulk Document Upload
 
+> **OBSOLETE 2026-08-05.** This documents the `public_chatbot` admin bulk-upload
+> feature, which was retired together with its ChromaDB backend. The app is no
+> longer in `INSTALLED_APPS` and its URL route is gone, so nothing described below
+> is reachable. Retained only until the `backend/public_chatbot/` package itself is
+> deleted. Data export: `backup/chromadb-removal-2026-08-05/`.
+
 **Module:** `backend/public_chatbot/`
 **Surface:** Django admin only — there is no REST endpoint for this.
 

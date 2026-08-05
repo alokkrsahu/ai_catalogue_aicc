@@ -1,5 +1,12 @@
 # Public Chatbot — Technical Architecture
 
+> **RETIRED 2026-08-05.** The ChromaDB service this module depends on has been removed
+> from the stack, and `ChatbotConfiguration.is_enabled` is `False`, so `/api/public-chatbot/*`
+> returns 503. The document below describes the original design and is kept for reference.
+> The 30 curated knowledge documents remain in PostgreSQL (backed up under
+> `backup/chromadb-removal-2026-08-05/`); reinstating the feature means restoring a
+> ChromaDB service and running `manage.py sync_public_knowledge` to rebuild the index.
+
 **Module:** `backend/public_chatbot/`
 **Audience:** Engineers, DevOps, security reviewers
 **Scope:** A self-contained, unauthenticated Q&A API that answers visitor questions from an admin-curated knowledge base, using ChromaDB retrieval + a pluggable LLM backend. It is deliberately isolated from the main AI Catalogue platform.

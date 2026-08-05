@@ -21,7 +21,7 @@ Derived by following `core/urls.py` and every `include()`/router from it. Endpoi
 | `/api/token/` | POST | public | `{email, password}` → `{access, refresh}` |
 | `/api/token/refresh/` | POST | public | `{refresh}` → `{access}` |
 | `/api/register/` | POST | public | `{email, password, password2, first_name, last_name}` → user + both tokens |
-| `/api/password-reset/` | POST | public | `{email}` → **returns `uid`, `token` and `reset_url` in the response body**; no email is sent. See KNOWN_ISSUES. |
+| `/api/password-reset/` | POST | public | `{email}` → a fixed generic `{detail}`. The reset token is emailed, never returned, and the response is identical for unknown addresses (no account enumeration). |
 | `/api/password-reset/confirm/` | POST | public | `{uid, token, new_password}` |
 | `/api/change-password/` | POST | authenticated | `{current_password, new_password}` |
 
@@ -228,11 +228,6 @@ The cookie is `pchat_<deployment_id>`, a `TimestampSigner` signature over `"<dep
 
 Rate limiting is per deployment-and-origin per minute (default 10), and **fails open on any exception**.
 
-### Standalone public chatbot — `/api/public-chatbot/`
-
-- `/` POST — `{message (required), session_id, context_limit, conversation}`. Three independent limiters: `django_ratelimit` 10/min per IP, `IPUsageLimit` daily/hourly counters, and the `ChatbotConfiguration` limits (100/day, 20/hour). Kill switches: `is_enabled`, `maintenance_mode` → 503
-- `/stream/` POST — SSE, OpenAI only; falls back to a JSON 500 if streaming is unavailable
-- `/health/` GET — 200/503 with component status
 
 ### Other unauthenticated endpoints
 

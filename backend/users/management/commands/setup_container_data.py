@@ -165,7 +165,10 @@ class Command(BaseCommand):
     def setup_embedding_model(self):
         """Pre-download SentenceTransformer model to prevent timeout errors"""
         try:
-            self.stdout.write('📦 Setting up embedding model for ChromaDB...')
+            # The model is used for Milvus document/web-search embeddings — the
+            # label previously said ChromaDB, which was never accurate and is
+            # doubly wrong now that ChromaDB has been removed.
+            self.stdout.write('📦 Setting up embedding model for vector search...')
             
             # Check if sentence-transformers is available
             try:

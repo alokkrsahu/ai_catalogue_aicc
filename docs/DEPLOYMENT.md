@@ -11,11 +11,10 @@ Everything below was verified against the compose files, Dockerfiles, nginx conf
 
 | File | Role |
 |---|---|
-| `docker-compose.yml` | Base stack, **11 services** |
+| `docker-compose.yml` | Base stack, **10 services** |
 | `docker-compose.override.yml` | Development overlay — **auto-loaded by every bare `docker compose` command** |
 | `docker-compose.prod.yml` | Production overlay (see the warning in §7) |
 | `docker-compose.ssl.yml` | Certbot / Let's Encrypt overlay |
-| `docker-compose-chroma-addon.yml` | Legacy; superseded by the base `chromadb` service |
 
 > **The single most important operational fact:** because `docker-compose.override.yml` sits in the repository root, Docker Compose merges it automatically. Any plain `docker compose …` command therefore runs the **development** configuration — Django `runserver`, `DEBUG=True`, the Vite dev server, and `nginx.dev.conf`. The only way to exclude it is to name files explicitly:
 >
@@ -34,14 +33,13 @@ Everything below was verified against the compose files, Dockerfiles, nginx conf
 | `etcd` | `quay.io/coreos/etcd:v3.5.12` | `ai_catalogue_etcd` |
 | `minio` | `minio/minio:RELEASE.2024-12-18T13-15-44Z` | `ai_catalogue_minio` |
 | `milvus` | `milvusdb/milvus:v2.6.0` | `ai_catalogue_milvus` |
-| `chromadb` | `chromadb/chroma:1.0.20` | `ai_catalogue_chromadb` |
 | `backend` | build `./backend` | `ai_catalogue_backend` |
 | `frontend` | build `./frontend` | `ai_catalogue_frontend` |
 | `nginx` | `nginx:alpine` | `ai_catalogue_nginx` |
 | `pgadmin` | `dpage/pgadmin4:latest` | `ai_catalogue_pgadmin` |
 | `attu` | `zilliz/attu:latest` | `ai_catalogue_attu` |
 
-The dev overlay adds a twelfth service, `frontend-dev` (`ai_catalogue_frontend_dev`), and replaces `frontend` in practice — when the overlay is active, `frontend` is not started.
+The dev overlay adds an eleventh service, `frontend-dev` (`ai_catalogue_frontend_dev`), and replaces `frontend` in practice — when the overlay is active, `frontend` is not started.
 
 Network: `ai_catalogue_network`, bridge driver, subnet `172.20.0.0/16` (Docker names it `ai_catalogue_ai_catalogue_network`).
 
@@ -60,7 +58,6 @@ Only **nginx (80/443)** is published on all interfaces. Every other port binds `
 | 3000 | frontend | Production Node server — loopback only |
 | 5432 | postgres | Loopback only |
 | 6379 | redis | Loopback only, and `requirepass` is enforced (`REDIS_PASSWORD`). |
-| 8001 | chromadb | Container port 8000. Loopback only — it has no auth and CORS `*`. |
 | 19530 | milvus | gRPC; authentication enabled. Loopback only. |
 | 9091 | milvus | HTTP — `/healthz`, `/webui/`. Loopback only. |
 | 8080 | pgadmin | Container port 80. Loopback only. |
@@ -69,7 +66,7 @@ Only **nginx (80/443)** is published on all interfaces. Every other port binds `
 
 To reach a loopback-bound service from your workstation, use an SSH tunnel rather than republishing the port, e.g. `ssh -L 8080:127.0.0.1:8080 <host>` for pgAdmin.
 
-**Still worth doing:** put authentication in front of ChromaDB, so the loopback binding is not the only thing protecting it.
+**Still worth doing:** nothing outstanding on port exposure. Review this table whenever a service is added.
 
 ---
 
@@ -107,7 +104,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 ### Other variable groups
 
 - **Database** — `DB_NAME` (`ai_catalogue_db`), `DB_USER` (`ai_catalogue_user`), `DB_PASSWORD`, `DB_PORT` (`5432`), `DB_AUTH_METHOD` (`md5`). `DB_HOST` is forced to `postgres` for the backend container. Tuning: `DB_CONN_MAX_AGE` (`300`, `600` in prod), `DB_CONNECT_TIMEOUT` (`60`), `DB_SSL_MODE` (`prefer`).
-- **Vector stores** — `MILVUS_HOST`/`MILVUS_PORT` (forced to `milvus`/`19530` for the backend). `CHROMADB_PORT` is overloaded: it sets the ChromaDB **host** port (default `8001`) while the backend always talks to `chromadb:8000` internally.
+- **Vector store** — `MILVUS_HOST`/`MILVUS_PORT` (forced to `milvus`/`19530` for the backend).
 - **Redis** — `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB` (`0`), `REDIS_PASSWORD` (**required**). Used as the Django cache backend and the web-search cache. The credential is carried in the cache `LOCATION` URL (URL-quoted), so the raw redis-py client used for pattern deletes inherits it automatically — there is only one place to configure it.
 - **Django** — `DEBUG`, `ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`, `CSRF_TRUSTED_ORIGINS`, `ENVIRONMENT`, `JWT_ACCESS_TOKEN_LIFETIME` (60 min), `JWT_REFRESH_TOKEN_LIFETIME` (1440 min).
 - **LLM** — `OPENAI_API_KEY` / `OPENAI_MODEL` (`gpt-3.5-turbo`), `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` / `GEMINI_MODEL` (`gemini-1.5-flash`), and `AICC_CHATBOT_OPENAI_API_KEY` — a **separate** key used only by the public chatbot so that public traffic never consumes the platform key.
@@ -151,7 +148,6 @@ Routing (consistent across dev and prod):
 | Path | Upstream | Timeout |
 |---|---|---|
 | `/` | frontend (`frontend-dev:5173` in dev) | 86400s on HTTP for HMR |
-| `/api/public-chatbot*` | backend, **buffering off** for SSE streaming | 300s |
 | `/api/workflow-deploy*` | backend (CORS handled by Django middleware) | 300s |
 | all other `/api/*` | backend | **1500s (25 min)** for long document processing |
 | `/admin/`, `/static/`, `/media/` | backend | default |
@@ -162,7 +158,6 @@ Body size limits: 500 MB in dev, 100 MB in prod.
 Known nginx issues:
 
 - **CORS wildcard fallback.** Both `nginx.dev.conf` and `nginx.prod.conf` map a `null` or empty `Origin` to `*`.
-- **`nginx.ssl.conf` omits the 1500s timeouts**, so switching to the SSL overlay would break long document-processing calls at nginx's 60s default. It also sets `Access-Control-Allow-Origin: *` on `/api/public-chatbot/`.
 - **Neither the dev nor prod config redirects HTTP to HTTPS** (the prod file has a comment claiming it does). Only `nginx.ssl.conf` does.
 - **`nginx.dev.conf` couples this repo to a different project** — it declares `chatgpt_analytics_frontend` / `chatgpt_analytics_backend` upstreams and nginx will not start if those containers are absent from the shared network.
 - Two cert layouts coexist: flat `nginx/ssl/{fullchain,privkey}.pem` (dev/prod) versus the Let's Encrypt `live/<domain>/` tree (`nginx.ssl.conf`).
@@ -187,9 +182,8 @@ Known nginx issues:
 
 Caveats worth knowing:
 
-- `scripts/stop.sh` is incomplete — it never stops `redis`, `chromadb`, `attu` or `frontend-dev`.
+- `scripts/stop.sh` is incomplete — it never stops `redis`, `attu` or `frontend-dev`.
 - `scripts/start.sh` and `scripts/start-local.sh` are superseded (`start.sh` still uses the legacy hyphenated `docker-compose` binary). `start-dev.sh` unhelpfully points readers at `start.sh` for production and at a `README-DOCKER.md` that does not exist.
-- Several scripts poll ChromaDB's **deprecated `/api/v1/heartbeat`** while the compose healthcheck uses `/api/v2/heartbeat`.
 - **Everything under `backend/*.sh` is legacy and non-functional here** — they hardcode a macOS path (`/Users/alok/Documents/AICC/...`) and a `venv` that does not exist. `workflow_complete_fix.sh` and `workflow_fix_applied.sh` only echo text.
 - **There is no backup script anywhere in the repository** — no `pg_dump`, no volume export. See §9.
 
@@ -216,7 +210,7 @@ If you need a genuine production deployment, the minimum work is: fix the Gunico
 
 - `k8s/` is listed in `.gitignore`, so it is not tracked. Last touched 2025-09-03, while compose files have changed as recently as 2026-02-05.
 - Image drift: Milvus `v2.5.15` vs `v2.6.0` in compose; etcd `v3.5.5` vs `v3.5.12`; MinIO an older release.
-- **No Redis and no ChromaDB anywhere in the manifests**, though the backend now depends on Redis for health and the public chatbot requires ChromaDB.
+- **No Redis anywhere in the manifests**, though the backend depends on it for health.
 - `k8s/base/configmap.yaml` carries a Milvus 2.4-era config with `mq.type: rocksmq`, a duplicated `common:` key, and a **plaintext MinIO password**.
 
 The `K8S_*` / `AZURE_*` variables in `.env` exist only for these scripts.
@@ -225,7 +219,7 @@ The `K8S_*` / `AZURE_*` variables in `.env` exist only for these scripts.
 
 ## 9. Persistence and backup
 
-Twelve named volumes (all `driver: local`):
+Eleven named volumes (all `driver: local`):
 
 | Volume | Holds |
 |---|---|
@@ -233,14 +227,13 @@ Twelve named volumes (all `driver: local`):
 | `backend_media` / `backend_media_dev` | **Uploaded documents** (the dev volume is the one in use under the default overlay) |
 | `milvus_data` | Project vector segments and indexes |
 | `etcd_data` | Milvus metadata — losing this orphans every collection |
-| `chromadb_data` | Public-chatbot knowledge base and embeddings |
 | `redis_data` | AOF-persisted cache (web-search cache, rate limits) |
 | `milvus_volumes` | Backend-side Milvus working files |
 | `backend_logs` / `backend_logs_dev` | Application and error logs |
 | `minio_data` | MinIO object store — effectively unused |
 | `pgadmin_data` | pgAdmin server list and preferences |
 
-`docker compose down -v` destroys all of them: the database, every uploaded document, all vectors and their metadata, and the chatbot index.
+`docker compose down -v` destroys all of them: the database, every uploaded document, and all vectors with their metadata.
 
 > **There is no backup tooling in this repository.** Before any destructive operation, take your own dump, e.g.:
 >
@@ -264,21 +257,17 @@ Collected for triage; each is verifiable in the file cited.
 | 2 | `gunicorn ai_catalogue.wsgi` — module does not exist | `backend/Dockerfile.prod` |
 | 3 | `/health/` healthcheck target is not a registered route | `Dockerfile.prod`, `docker-compose.prod.yml`, `production.sh` |
 | 4 | Literal Fernet key committed as `API_KEY_ENCRYPTION_KEY` default | `docker-compose.yml` |
-| 5 | Redis exposed on `0.0.0.0:6379` with no password | `docker-compose.yml` |
-| 6 | ChromaDB exposed on `0.0.0.0:8001`, no auth, CORS `*` | `docker-compose.yml` |
 | 7 | `nginx/nginx.conf` mounted by nothing; base nginx has no config | `docker-compose.yml` |
 | 8 | Duplicate mount target `/etc/nginx/ssl` from two sources | `docker-compose.yml` |
 | 9 | CORS maps `null`/empty Origin to `*` | `nginx.dev.conf`, `nginx.prod.conf` |
 | 10 | `nginx.ssl.conf` lacks the long AI timeouts | `nginx.ssl.conf` |
-| 11 | ChromaDB v1 vs v2 heartbeat mismatch between scripts and compose | `start-dev.sh`, `restart-dev.sh` |
 | 12 | MinIO credentials gate startup but MinIO is unused | `start-dev.sh`, `production.sh` |
-| 13 | `stop.sh` leaves redis, chromadb, attu, frontend-dev running | `scripts/stop.sh` |
+| 13 | `stop.sh` leaves redis, attu, frontend-dev running | `scripts/stop.sh` |
 | 14 | `backend/*.sh` hardcode a macOS path; two are echo-only | `backend/*.sh` |
 | 15 | `deploy.replicas` is a no-op and conflicts with fixed host ports | `docker-compose.prod.yml` |
 | 16 | `.env.example` missing ~14 variables the stack reads | `.env.example` |
 | 17 | No backup tooling for any volume | repository-wide |
 | 18 | `k8s/` drifted and untracked | `k8s/` |
-| 19 | Port 8001 claimed by both `chromadb` and the legacy chroma addon | `docker-compose-chroma-addon.yml` |
 | 20 | `nginx.dev.conf` requires another project's containers to be present | `nginx.dev.conf` |
 
 ---

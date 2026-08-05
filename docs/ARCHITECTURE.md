@@ -16,8 +16,7 @@ IntelliDoc is a Django + SvelteKit platform for building and deploying multi-age
 | Runtime | Python 3.13 |
 | Backend | Django ≥5.2, Django REST Framework ≥3.15 |
 | Database | PostgreSQL 15 |
-| Vector DB (projects) | Milvus 2.6 |
-| Vector DB (public chatbot) | ChromaDB 1.0.20 — a separate, isolated store |
+| Vector DB | Milvus 2.6 |
 | Cache | Redis 7 (Django cache backend; **not** a task broker) |
 | Frontend | SvelteKit 2, Svelte 5, TypeScript, Tailwind 3, Vite 6, `adapter-node` |
 | Auth | JWT (SimpleJWT) bearer tokens |
@@ -40,7 +39,6 @@ IntelliDoc is a Django + SvelteKit platform for building and deploying multi-age
 | `agent_orchestration` | The largest app: workflow engine, DocAware RAG, web search, LLM provider abstraction, human-in-the-loop, evaluation, AI workflow generation, and public deployment. | 7 |
 | `vector_search` | Milvus ingestion: parsing, chunking, embedding, per-project collections, summarization. | 0 |
 | `templates` | Filesystem-based project-template registry (scans `template_definitions/*/definition.py`). | 1 |
-| `public_chatbot` | Fully isolated unauthenticated chatbot over ChromaDB. | 4 |
 | `llm_eval` | Side-by-side multi-provider LLM comparison + shared model catalogue. | 0 |
 | `project_api_keys` | Per-project encrypted BYO provider keys. | 0 |
 | `mcp_servers` | Per-project encrypted MCP credentials. | 0 |
@@ -85,9 +83,18 @@ The entire workflow definition is the `graph_json` blob; relational structure st
 
 `WorkflowDeployment` (in `agent_orchestration`) belongs to a project and nullably to a workflow. A partial unique constraint allows many inactive deployments but **only one active per project**. It owns `WorkflowAllowedOrigin` (CORS + per-origin rate limits), `WorkflowDeploymentRequest` (audit), `DeploymentPublicLoginAttempt`, and `DeploymentSession` — which holds the whole conversation as a JSON list and owns `DeploymentSessionFile` and `DeploymentExecution`.
 
-### `public_chatbot` — a deliberate island
+### `public_chatbot` — removed
 
-`PublicChatRequest`, `IPUsageLimit`, `PublicKnowledgeDocument` and the `ChatbotConfiguration` singleton use explicit `db_table` names and have **zero foreign keys** to any other app (admin identity is a bare username string). It retrieves from ChromaDB, never Milvus. This is intentional blast-radius containment for anonymous traffic — see `backend/public_chatbot/ARCHITECTURE.md`.
+This app was removed on 2026-08-05 along with its ChromaDB backend. It provided an
+unauthenticated Q&A API over an admin-curated knowledge base and had **zero foreign
+keys** to any other app, which is why it could be removed without touching anything
+else. Its ChromaDB volume was already empty when it was removed, so the feature was
+non-functional in any case, and it had served no traffic since 2026-01-20.
+
+All of its data was exported before removal to `backup/chromadb-removal-2026-08-05/`
+(30 curated knowledge documents, 1,257 request records, 692 IP-usage rows) as a SQL
+dump, a Django fixture and a JSON export.
+
 
 ### Soft references
 
@@ -187,10 +194,9 @@ Three other validators exist and disagree with each other. `agent_orchestration/
 
 ## 7. Real-time: SSE, not WebSockets
 
-There are exactly two streaming endpoints, both Server-Sent Events over `StreamingHttpResponse`, both emitting `data: {json}\n\n` frames whose discriminator is a JSON `type` key:
+There is one streaming endpoint, Server-Sent Events over `StreamingHttpResponse`, both emitting `data: {json}\n\n` frames whose discriminator is a JSON `type` key:
 
 - `POST /api/workflow-deploy/<project_id>/stream/`
-- `POST /api/public-chatbot/stream/`
 
 The deployment stream returns **HTTP 200 always** — errors, including auth failures, are delivered in-band as an `error` frame. Frame types include `connected`, `thinking`, `content`, `citations`, `agent_started`, `planning`, `delegate_*`, `tool_result`, `splitter_decision`, `classifier_decision`, `awaiting_human_input`, `error`, and `done`. **Clients must prefer the `content` and `citations` in the final `done` frame**, because citation reconciliation can renumber markers after streaming has begun.
 
@@ -273,5 +279,4 @@ Stores: `auth.ts` (JWT), `workflowStore.ts`, `workflowStatus.ts`, `llmModelsStor
 - Deployment, configuration, ports, persistence → [`docs/DEPLOYMENT.md`](DEPLOYMENT.md)
 - Complete endpoint reference → [`docs/API.md`](API.md)
 - Verified defects and dead code → [`docs/KNOWN_ISSUES.md`](KNOWN_ISSUES.md)
-- Public chatbot isolation model → [`backend/public_chatbot/ARCHITECTURE.md`](../backend/public_chatbot/ARCHITECTURE.md)
 - GroupChatManager delegation → [`backend/agent_orchestration/parallelization_analysis.md`](../backend/agent_orchestration/parallelization_analysis.md)

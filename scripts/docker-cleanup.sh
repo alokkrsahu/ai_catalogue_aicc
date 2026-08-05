@@ -26,7 +26,6 @@ list_preserved_volumes() {
     echo "   - ai_catalogue_etcd_data"
     echo "   - ai_catalogue_minio_data"
     echo "   - ai_catalogue_pgadmin_data"
-    echo "   - ai_catalogue_chromadb_data"
     echo "   - ./volumes/* (bind mounts)"
     echo ""
 }

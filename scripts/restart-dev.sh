@@ -106,26 +106,6 @@ if [ "$MILVUS_HEALTHY" = "false" ]; then
     echo "⚠️  Milvus health check timed out. Application will continue startup."
 fi
 
-echo "🔧 Step 4: Starting ChromaDB..."
-docker compose up -d chromadb
-
-echo "⏳ Waiting for ChromaDB to be ready..."
-CHROMADB_TIMEOUT=30
-CHROMADB_COUNTER=0
-while [ $CHROMADB_COUNTER -lt $CHROMADB_TIMEOUT ]; do
-    if curl -f -s http://localhost:8001/api/v1/heartbeat > /dev/null 2>&1; then
-        echo "✅ ChromaDB is healthy and ready!"
-        break
-    fi
-    
-    if [ $((CHROMADB_COUNTER % 10)) -eq 0 ]; then
-        echo "   📋 Waiting for ChromaDB... ($CHROMADB_COUNTER/${CHROMADB_TIMEOUT}s)"
-    fi
-    
-    sleep 2
-    CHROMADB_COUNTER=$((CHROMADB_COUNTER + 2))
-done
-
 echo "🐍 Step 5: Starting Django backend..."
 docker compose -f docker-compose.yml -f docker-compose.override.yml up -d backend --no-deps
 
@@ -168,7 +148,6 @@ echo "   🔥 Frontend Dev Server: http://localhost:5173"
 echo "   🐍 Backend Dev Server: http://localhost:8000"
 echo "   🔧 Django Admin: http://localhost:8000/admin/"
 echo "   🗄️  PgAdmin: http://localhost:8080"
-echo "   🤖 ChromaDB API: http://localhost:8001"
 
 if [ "$MILVUS_HEALTHY" = "true" ]; then
     echo "   🔍 Attu (Milvus UI): http://localhost:3001"

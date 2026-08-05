@@ -63,10 +63,7 @@ docker-compose up -d milvus
 echo "⏳ Waiting for Milvus to be ready..."
 sleep 30
 
-echo "🤖 Starting ChromaDB (Public Chatbot Vector Database)..."
-docker-compose up -d chromadb
 
-echo "⏳ Waiting for ChromaDB to be ready..."
 sleep 15
 
 echo "🐍 Starting Django backend..."

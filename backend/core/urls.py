@@ -224,9 +224,10 @@ urlpatterns = [
     # 🔧 MCP SERVER MANAGEMENT
     path('api/mcp-servers/', include('mcp_servers.urls')),
     
-    # 🤖 PUBLIC CHATBOT API (Isolated from main system)
-    path('api/public-chatbot/', include('public_chatbot.urls')),
-    
+    # The public chatbot API (/api/public-chatbot/) was retired on 2026-08-05
+    # along with its ChromaDB backend. Data exported to
+    # backup/chromadb-removal-2026-08-05/.
+
     # Root route handler - redirect to frontend or return basic response
     path('', lambda request: JsonResponse({
         'message': 'AI Catalogue Backend API',

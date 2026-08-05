@@ -179,28 +179,6 @@ if [ "$MILVUS_HEALTHY" = "false" ]; then
 fi
 
 echo ""
-echo "🔧 Step 4: Starting ChromaDB (Public Chatbot Vector Database)..."
-echo "   📋 ChromaDB is required for the public chatbot vector search functionality"
-docker compose up -d chromadb
-
-echo "⏳ Waiting for ChromaDB to be ready..."
-CHROMADB_TIMEOUT=60
-CHROMADB_COUNTER=0
-while [ $CHROMADB_COUNTER -lt $CHROMADB_TIMEOUT ]; do
-    if curl -f -s http://localhost:8001/api/v1/heartbeat > /dev/null 2>&1; then
-        echo "✅ ChromaDB is healthy and ready!"
-        break
-    fi
-    
-    if [ $((CHROMADB_COUNTER % 10)) -eq 0 ]; then
-        echo "   📋 Waiting for ChromaDB... ($CHROMADB_COUNTER/${CHROMADB_TIMEOUT}s)"
-    fi
-    
-    sleep 2
-    CHROMADB_COUNTER=$((CHROMADB_COUNTER + 2))
-done
-
-echo ""
 echo "🔴 Step 5: Starting Redis cache..."
 echo "   📋 Redis is required for caching and WebSearch functionality"
 docker compose up -d redis
@@ -266,7 +244,6 @@ echo "   🔥 Frontend Dev Server: http://localhost:5173 (direct, hot reload)"
 echo "   🐍 Backend Dev Server: http://localhost:8000 (direct)"
 echo "   🔧 Django Admin: http://localhost:8000/admin/"
 echo "   🗄️  PgAdmin: http://localhost:8080"
-echo "   🤖 ChromaDB API: http://localhost:8001 (Public Chatbot Vector DB)"
 
 if [ "$MILVUS_HEALTHY" = "true" ]; then
     echo "   🔍 Attu (Milvus UI): http://localhost:3001"

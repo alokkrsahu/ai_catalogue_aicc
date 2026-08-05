@@ -142,7 +142,7 @@ $COMPOSE_CMD down --remove-orphans || true
 
 # Pull latest images for databases
 echo -e "${BLUE}Pulling latest database images...${NC}"
-docker compose pull postgres etcd minio milvus chromadb
+docker compose pull postgres etcd minio milvus
 
 # Enable BuildKit
 export DOCKER_BUILDKIT=1
@@ -227,18 +227,6 @@ else
     echo -e "${YELLOW}The application will continue startup and retry connecting automatically${NC}"
 fi
 
-# Step 4: ChromaDB
-echo ""
-echo -e "${BLUE}Step 4: Starting ChromaDB...${NC}"
-$COMPOSE_CMD up -d chromadb
-
-echo -e "${YELLOW}Waiting for ChromaDB to be ready...${NC}"
-if check_health "ChromaDB" "curl -f -s http://localhost:8001/api/v2/heartbeat" 60; then
-    echo -e "${GREEN}ChromaDB is healthy and ready!${NC}"
-else
-    echo -e "${YELLOW}ChromaDB health check timed out (may still be starting)${NC}"
-fi
-
 # Step 5: Backend (Gunicorn)
 echo ""
 echo -e "${BLUE}Step 5: Starting Django backend with Gunicorn...${NC}"
@@ -300,7 +288,6 @@ echo "   Backend API: http://localhost:8000"
 echo "   Django Admin: http://localhost:8000/admin/"
 echo "   Frontend: http://localhost:3000"
 echo "   PgAdmin: http://localhost:8080"
-echo "   ChromaDB API: http://localhost:8001"
 if [ "$MILVUS_HEALTHY" = true ]; then
     echo "   Attu (Milvus UI): http://localhost:3001"
     echo "   Milvus API: http://localhost:9091"

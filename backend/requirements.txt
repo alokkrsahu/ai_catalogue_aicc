@@ -22,7 +22,6 @@ sentence-transformers>=2.2.2
 python-magic
 
 # Public Chatbot Dependencies (isolated from main system)
-chromadb==1.0.20
 django-ratelimit>=4.1.0
 
 # Django Milvus Search Dependencies
