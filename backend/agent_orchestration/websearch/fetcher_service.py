@@ -59,6 +59,12 @@ class PageCapture:
     # downstream consumers can flag the page as potentially incomplete.
     spa_warning: Optional[str] = None
     anchor_fragment: Optional[str] = None  # the #fragment from the original URL, if any
+    # Informational, never fatal. Set when extraction succeeded mechanically but
+    # produced suspiciously little text (JS-rendered page, failed narrowing).
+    # Deliberately NOT extraction_error: the pipeline must keep flowing, and a
+    # thin page is still allowed to contribute whatever it has. Grep the logs
+    # for "THIN EXTRACT" / "FRAGMENT FALLBACK" to trace these.
+    quality_warning: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -118,6 +124,51 @@ class WebsiteFetcherService:
     # Minimum heading text length — reduced to 3 to preserve short but valid headings
     # like "API", "FAQ", "Usage", "Setup", "Overview", "Reference", etc.
     MIN_HEADING_LEN = 3
+
+    # -------------------------------------------------------------------------
+    # Extraction-quality thresholds
+    #
+    # None of these ever raise or set extraction_error — they only populate the
+    # non-fatal `quality_warning` field so a thin page stays usable while
+    # remaining greppable in the logs (marker: THIN EXTRACT / FRAGMENT FALLBACK).
+    # -------------------------------------------------------------------------
+
+    # Anchors that mark the top of a page / a whole-page wrapper rather than a
+    # real subsection. Narrowing to these yields just the table of contents, so
+    # they are ignored and the full page is extracted instead.
+    NON_CONTENT_ANCHORS = {
+        'topofpage', 'top', 'content', 'main', 'start',
+        'begin', 'pagetop', 'page-top', 'top-of-page', 'maincontent',
+    }
+
+    # A fragment-scoped extraction shorter than this is treated as a failed
+    # narrowing and falls back to the whole page.
+    FRAGMENT_MIN_CHARS = 500
+    # ...or shorter than this fraction of what the whole page yields.
+    FRAGMENT_MIN_RATIO = 0.20
+
+    # Absolute floor for a "we got essentially nothing" page.
+    THIN_TEXT_CHARS = 200
+    # Ratio floor: text extracted vs raw HTML size. 17 chars from 358 KB of HTML
+    # must never be reported as a clean success (observed on JS-rendered GitBook
+    # pages whose nav sidebar defeats the SPA body-text heuristic).
+    THIN_TEXT_HTML_RATIO = 0.0005
+    # Only apply the ratio test to pages with a substantial HTML payload.
+    THIN_RATIO_MIN_HTML_BYTES = 50_000
+
+    # Framework chrome that survives structural cleanup because it sits inside
+    # the content container (GitBook feedback widget / timestamp footer).
+    CHROME_TEXT_PATTERNS = [
+        r'^was this (helpful|page helpful)\??$',
+        # GitBook renders this with no separating space ("Last updated18 days
+        # ago"), so no \b after "updated".
+        r'^last updated.{0,40}ago$',
+        r'^(previous|next)$',
+        r'^on this page$',
+        r'^edit (on|this) (github|page)$',
+        r'^copy(\s+to\s+clipboard)?$',
+    ]
+    _CHROME_TEXT_COMPILED = [re.compile(p, re.I) for p in CHROME_TEXT_PATTERNS]
 
     # Element-type sets used in single-pass traversal
     HEADING_TAGS = {'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}
@@ -821,12 +872,23 @@ class WebsiteFetcherService:
             traverse_start: Optional[Tag] = None
             traverse_stop_level: Optional[int] = None
             traverse_stop_sibling_parent = None
+            # Kept so a failed narrowing can fall back to the whole page.
+            full_page_root = content_root
+            narrowed = False
 
-            if fragment:
+            if fragment and fragment.strip().lower() in self.NON_CONTENT_ANCHORS:
+                # e.g. #TopOfPage — narrowing here captures only the table of
+                # contents, so treat the URL as if it had no fragment at all.
+                logger.info(
+                    f"🔎 FRAGMENT SKIP: '#{fragment}' is a whole-page anchor — "
+                    f"extracting full page for {capture.url[:90]}"
+                )
+            elif fragment:
                 start_node, stop_level, sibling_anchor_parent = self._find_fragment_root(
                     soup, content_root, fragment
                 )
                 if start_node is not None:
+                    narrowed = True
                     if stop_level is None:
                         # Non-empty container or headingless sibling: replace content_root
                         content_root = start_node
@@ -843,17 +905,43 @@ class WebsiteFetcherService:
                 stop_at_heading_level=traverse_stop_level,
                 stop_at_sibling_parent=traverse_stop_sibling_parent,
             )
+            sections = self._drop_chrome_sections(sections)
+
+            # --- Fragment fallback -------------------------------------------
+            # A narrowed extraction that yields almost nothing means the anchor
+            # pointed at a wrapper/TOC rather than a real subsection. Recover the
+            # whole page instead of shipping a near-empty capture. Never fatal.
+            if narrowed:
+                narrowed_len = self._sections_text_len(sections)
+                if narrowed_len < self.FRAGMENT_MIN_CHARS:
+                    full_sections = self._drop_chrome_sections(
+                        self._single_pass_traverse(full_page_root)
+                    )
+                    full_len = self._sections_text_len(full_sections)
+                    if full_len > narrowed_len and (
+                        narrowed_len < self.FRAGMENT_MIN_RATIO * full_len
+                        or narrowed_len == 0
+                    ):
+                        logger.warning(
+                            f"🔁 FRAGMENT FALLBACK: '#{fragment}' yielded only "
+                            f"{narrowed_len} chars vs {full_len} for the full page — "
+                            f"using full page for {capture.url[:90]}"
+                        )
+                        sections = full_sections
 
             capture.sections = sections
 
-            # Surface SPA detection as an informational warning regardless of
-            # whether we managed to extract partial content. If extraction
-            # returned nothing at all, also promote it to extraction_error so
-            # downstream indexing skips the page.
+            # Surface SPA detection as an informational warning. This is
+            # deliberately never promoted to extraction_error, even with zero
+            # sections: a page we cannot read must not fail the surrounding
+            # fetch/index/answer flow. It is logged loudly instead.
             if spa_warning:
                 capture.spa_warning = spa_warning
                 if not sections:
-                    capture.extraction_error = spa_warning
+                    logger.warning(
+                        f"🚧 SPA NO CONTENT: {capture.url[:90]} — {spa_warning} "
+                        f"(continuing with empty content, not failing the batch)"
+                    )
                 else:
                     # Partial extraction: keep content but flag the page so
                     # callers (UI, indexer) know it may be incomplete.
@@ -885,9 +973,68 @@ class WebsiteFetcherService:
 
             capture.word_count = len(flat_text.split()) if flat_text else 0
 
+            # --- Thin-extraction detection (non-fatal) ------------------------
+            # Catches pages that parse cleanly but yield almost no text — the
+            # failure mode the SPA heuristic misses when a nav sidebar pushes
+            # body text past its 300-char threshold. Recorded as a warning so
+            # the page still flows through, but never reported as a clean success.
+            thin_reason = self._assess_thinness(flat_text, capture)
+            if thin_reason:
+                capture.quality_warning = thin_reason
+                logger.warning(
+                    f"🪧 THIN EXTRACT: {capture.url[:95]} — {thin_reason}"
+                )
+
         except Exception as e:
-            logger.error(f"❌ CONTENT EXTRACTION: Failed for {capture.url}: {e}")
-            capture.extraction_error = str(e)
+            # Extraction is best-effort: log with a traceable marker and leave
+            # whatever was gathered so far in place instead of failing the page.
+            logger.warning(
+                f"🧩 EXTRACT DEGRADED: {capture.url[:95]} — {type(e).__name__}: {e} "
+                f"(keeping {len(capture.sections or [])} section(s), continuing)"
+            )
+            capture.quality_warning = f"Extraction incomplete: {type(e).__name__}: {e}"
+
+    def _sections_text_len(self, sections: List[PageSection]) -> int:
+        """Total characters of text across sections — used for fallback decisions."""
+        return sum(len((s.text or '')) for s in sections)
+
+    def _drop_chrome_sections(self, sections: List[PageSection]) -> List[PageSection]:
+        """Drop framework chrome that sits *inside* the content container and so
+        survives structural cleanup (GitBook's "Was this helpful?" widget,
+        "Last updated N days ago", prev/next links). Text-level, exact-ish
+        matches only — never touches substantive prose."""
+        kept: List[PageSection] = []
+        for s in sections:
+            text = (s.text or '').strip()
+            if text and any(rx.match(text) for rx in self._CHROME_TEXT_COMPILED):
+                continue
+            kept.append(s)
+        return kept
+
+    def _assess_thinness(self, flat_text: str, capture: PageCapture) -> Optional[str]:
+        """Return a human-readable reason when a capture looks empty/near-empty,
+        else None. Pure assessment — sets nothing, raises nothing."""
+        n = len(flat_text)
+        if n == 0:
+            return (
+                f"no text extracted from {capture.raw_html_size} bytes of HTML "
+                f"(page content is likely rendered client-side)"
+            )
+        if n < self.THIN_TEXT_CHARS:
+            return (
+                f"only {n} chars of text extracted from "
+                f"{capture.raw_html_size} bytes of HTML"
+            )
+        if (
+            capture.raw_html_size >= self.THIN_RATIO_MIN_HTML_BYTES
+            and n < capture.raw_html_size * self.THIN_TEXT_HTML_RATIO
+        ):
+            return (
+                f"{n} chars of text from {capture.raw_html_size} bytes of HTML "
+                f"(ratio {n / max(capture.raw_html_size, 1):.5f} below "
+                f"{self.THIN_TEXT_HTML_RATIO}) — likely client-side rendered"
+            )
+        return None
 
     # =========================================================================
     # Utility Methods

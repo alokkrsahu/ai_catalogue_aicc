@@ -1018,14 +1018,31 @@ class WebSearchHandler:
                 if not page:
                     fetch_results = await self.fetcher_service.fetch_urls_parallel([url])
                     if not fetch_results:
-                        raise ValueError("Fetcher returned no results")
+                        # Non-fatal for the run: record and move to the next URL.
+                        logger.warning(f"⚠️ URL SUMMARIZE SKIP: fetcher returned no results for {url[:70]}")
+                        results.append({"url": url, "status": "failed", "error": "Fetcher returned no results"})
+                        failed += 1
+                        continue
                     page = fetch_results[0]
-                    # Cache the fetched content in Redis
-                    if page and not page.get('extraction_error'):
-                        self.cache_service.cache_urls_batch({url: page}, project_id, ttl=cache_ttl)
+                    # cache_urls_batch applies a short TTL to failed captures itself.
+                    self.cache_service.cache_urls_batch({url: page}, project_id, ttl=cache_ttl)
 
                 if page.get('extraction_error'):
-                    raise ValueError(f"Fetch error: {page['extraction_error']}")
+                    logger.warning(
+                        f"⚠️ URL SUMMARIZE SKIP: {url[:70]} — {page['extraction_error']} "
+                        f"(other URLs continue)"
+                    )
+                    results.append({"url": url, "status": "failed", "error": page['extraction_error']})
+                    failed += 1
+                    continue
+
+                # Thin pages are still summarised from whatever they yielded —
+                # logged so the gap is traceable rather than silently "ok".
+                if page.get('quality_warning'):
+                    logger.warning(
+                        f"🪧 URL SUMMARIZE THIN: {url[:70]} — {page['quality_warning']}"
+                    )
+
                 # Reconstruct plain text from PageCapture sections
                 sections = page.get('sections') or []
                 raw_text = '\n\n'.join(
@@ -1035,7 +1052,13 @@ class WebSearchHandler:
                     # Fall back to title + meta description if sections empty
                     raw_text = ' '.join(filter(None, [page.get('title'), page.get('meta_description')]))
                 if not raw_text:
-                    raise ValueError("Empty page content")
+                    logger.warning(
+                        f"⚠️ URL SUMMARIZE SKIP: {url[:70]} — no usable text "
+                        f"(title/meta also empty); other URLs continue"
+                    )
+                    results.append({"url": url, "status": "failed", "error": "Empty page content"})
+                    failed += 1
+                    continue
 
                 # Trim to ~8000 chars to stay within LLM context
                 raw_text = raw_text[:8000]

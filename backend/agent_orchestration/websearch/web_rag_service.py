@@ -670,27 +670,57 @@ class WebRAGService:
 
             col = await sync_to_async(_get_or_create_collection)(project_id)
 
+            # Over-fetch so identical chunks can be collapsed without shrinking
+            # the caller's top_k. The same page is frequently indexed under both
+            # its plain URL and a "#fragment" variant, which would otherwise let
+            # one page occupy several result slots and crowd out other sources.
+            fetch_limit = min(max(top_k * 3, top_k), 100)
+
             results = await sync_to_async(col.search)(
                 data=[query_embedding],
                 anns_field="embedding",
                 param={"metric_type": "IP", "params": {"nprobe": 16}},
-                limit=top_k,
+                limit=fetch_limit,
                 output_fields=["content", "url", "title", "section_heading", "section_type", "word_count"],
             )
 
             chunks = []
+            seen_content: Dict[str, int] = {}
+            duplicates = 0
             for hit in results[0]:
+                content = hit.entity.get('content', '') or ''
+                url = hit.entity.get('url', '') or ''
+                key = hashlib.md5(
+                    re.sub(r'\s+', ' ', content).strip().lower().encode('utf-8', 'replace')
+                ).hexdigest()
+
+                if key in seen_content:
+                    duplicates += 1
+                    # Keep the canonical (fragment-less) URL on the surviving copy
+                    # so citations point at the clean page.
+                    kept = chunks[seen_content[key]]
+                    if '#' in kept['url'] and '#' not in url:
+                        kept['url'] = url
+                    continue
+
+                seen_content[key] = len(chunks)
                 chunks.append({
-                    'content': hit.entity.get('content', ''),
-                    'url': hit.entity.get('url', ''),
+                    'content': content,
+                    'url': url,
                     'title': hit.entity.get('title', ''),
                     'section_heading': hit.entity.get('section_heading', ''),
                     'section_type': hit.entity.get('section_type', ''),
                     'word_count': hit.entity.get('word_count', 0),
                     'score': round(hit.score, 4),
                 })
+                if len(chunks) >= top_k:
+                    break
 
-            logger.info(f"🌐 WEB RAG: Found {len(chunks)} chunks for query '{query[:50]}...' (project {str(project_id)[:8]})")
+            logger.info(
+                f"🌐 WEB RAG: Found {len(chunks)} chunks for query '{query[:50]}...' "
+                f"(project {str(project_id)[:8]}"
+                + (f", {duplicates} duplicate chunk(s) collapsed)" if duplicates else ")")
+            )
             return chunks
 
         except Exception as e:

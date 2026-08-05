@@ -35,6 +35,12 @@ class WebSearchCacheService:
     # Default TTL values
     DEFAULT_URL_TTL = 3600  # 1 hour for URL content
     DEFAULT_SEARCH_TTL = 1800  # 30 minutes for search results
+
+    # TTL applied to captures that failed to fetch/extract. A transient timeout
+    # must not blank a URL for the full content TTL (observed: three pages stuck
+    # empty for days after one slow response), so failures are cached only long
+    # enough to stop a hot retry loop within a single conversation.
+    FAILED_FETCH_TTL = 300  # 5 minutes
     
     # Cache key prefixes (keys will be {prefix}{project_id}_{hash})
     URL_PREFIX = "websearch_url_"
@@ -159,17 +165,34 @@ class WebSearchCacheService:
             Number of URLs successfully cached
         """
         timeout = ttl if ttl is not None else self.default_ttl
-        
+
         try:
-            cache_data = {
-                self._make_url_cache_key(url, project_id): content
-                for url, content in url_contents.items()
-            }
-            cache.set_many(cache_data, timeout=timeout)
-            logger.info(f"💾 WEBSEARCH CACHE BATCH: Cached {len(url_contents)} URLs (project {project_id[:8]}, TTL: {timeout}s)")
+            # Split failed captures out so a transient fetch error gets a short
+            # TTL and is retried soon, instead of pinning an empty page for the
+            # full content TTL. Callers stay unaware — nothing raises here.
+            ok_items, failed_items = {}, {}
+            for url, content in url_contents.items():
+                target = failed_items if (content or {}).get('extraction_error') else ok_items
+                target[self._make_url_cache_key(url, project_id)] = content
+
+            if ok_items:
+                cache.set_many(ok_items, timeout=timeout)
+            if failed_items:
+                cache.set_many(failed_items, timeout=self.FAILED_FETCH_TTL)
+                logger.warning(
+                    f"⏱️ WEBSEARCH CACHE: {len(failed_items)} failed capture(s) cached with "
+                    f"short TTL {self.FAILED_FETCH_TTL}s (will retry) — project {project_id[:8]}"
+                )
+
+            logger.info(
+                f"💾 WEBSEARCH CACHE BATCH: Cached {len(ok_items)} URLs "
+                f"(project {project_id[:8]}, TTL: {timeout}s)"
+                + (f" + {len(failed_items)} failed @ {self.FAILED_FETCH_TTL}s" if failed_items else "")
+            )
             return len(url_contents)
         except Exception as e:
-            logger.error(f"❌ WEBSEARCH CACHE: Batch cache failed: {e}")
+            # Caching is an optimisation — never let it break the fetch flow.
+            logger.warning(f"⚠️ WEBSEARCH CACHE: Batch cache failed (continuing uncached): {e}")
             return 0
     
     # =========================================================================
