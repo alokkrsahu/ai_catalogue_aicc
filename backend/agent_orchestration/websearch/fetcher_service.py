@@ -7,11 +7,12 @@ Designed for efficient retrieval of multiple web pages concurrently.
 """
 
 import asyncio
+import json
 import logging
 import re
 from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Any, Optional, Tuple
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import aiohttp
 from bs4 import BeautifulSoup, NavigableString, Tag
@@ -147,6 +148,12 @@ class WebsiteFetcherService:
     # ...or shorter than this fraction of what the whole page yields.
     FRAGMENT_MIN_RATIO = 0.20
 
+    # Below this many extracted characters, run the format-adaptive recovery
+    # strategies (JSON-LD, hydrated SPA state, noscript, text density). Set
+    # comfortably above THIN_TEXT_CHARS so partially-extracted pages — a heading
+    # plus one stray paragraph — also get a chance at a fuller reading.
+    RECOVERY_TRIGGER_CHARS = 1000
+
     # Absolute floor for a "we got essentially nothing" page.
     THIN_TEXT_CHARS = 200
     # Ratio floor: text extracted vs raw HTML size. 17 chars from 358 KB of HTML
@@ -155,6 +162,11 @@ class WebsiteFetcherService:
     THIN_TEXT_HTML_RATIO = 0.0005
     # Only apply the ratio test to pages with a substantial HTML payload.
     THIN_RATIO_MIN_HTML_BYTES = 50_000
+
+    # How many machine-readable alternate URLs to try for an unreadable page.
+    # Kept small: this costs one extra request each, only on pages that already
+    # failed, and the first candidate is almost always the right one.
+    MAX_MARKDOWN_ALTERNATES = 2
 
     # Framework chrome that survives structural cleanup because it sits inside
     # the content container (GitBook feedback widget / timestamp footer).
@@ -172,7 +184,12 @@ class WebsiteFetcherService:
 
     # Element-type sets used in single-pass traversal
     HEADING_TAGS = {'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}
-    BLOCK_EXTRACT_TAGS = {'ul', 'ol', 'table', 'pre'}
+    BLOCK_EXTRACT_TAGS = {'ul', 'ol', 'table', 'pre', 'dl'}
+    # <summary> labels a <details> disclosure — semantically the heading of the
+    # collapsed block. Standard HTML used for FAQs, glossaries and per-term
+    # documentation; without this the label text is dropped entirely.
+    DISCLOSURE_HEADING_TAGS = {'summary'}
+    DISCLOSURE_HEADING_LEVEL = 4
     # Paragraph tags inside these block parents are captured via the parent
     INLINE_SKIP_PARENTS = {'li', 'td', 'th', 'pre'}
 
@@ -402,6 +419,13 @@ class WebsiteFetcherService:
                     None, self._populate_from_html, capture, html, fragment
                 )
 
+                # Last resort: the page itself is unreadable as HTML, but many
+                # doc platforms publish a text/markdown rendering of the same
+                # page (rel="alternate", or the llms.txt `<page>.md` convention).
+                # Fetching that recovers content no amount of HTML parsing can.
+                if capture.quality_warning:
+                    await self._try_markdown_alternate(session, capture, html)
+
                 return capture.to_dict()
 
         except asyncio.TimeoutError:
@@ -423,6 +447,51 @@ class WebsiteFetcherService:
             )
             logger.error(f"❌ CONTENT FETCH: Failed for {url}: {e}")
             return capture.to_dict()
+
+    async def _try_markdown_alternate(
+        self, session: aiohttp.ClientSession, capture: PageCapture, html: str
+    ) -> None:
+        """Fetch a markdown rendering of an unreadable page and adopt it if it
+        beats what HTML parsing managed. Best-effort and silent on failure —
+        the capture is returned unchanged if anything goes wrong."""
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            candidates = self._markdown_alternate_urls(soup, capture.final_url or capture.url)
+        except Exception:
+            return
+
+        current_len = self._sections_text_len(capture.sections or [])
+
+        for alt_url in candidates[: self.MAX_MARKDOWN_ALTERNATES]:
+            try:
+                async with session.get(alt_url, allow_redirects=True) as resp:
+                    if resp.status != 200:
+                        continue
+                    ctype = (resp.headers.get('Content-Type') or '').lower()
+                    if not any(t in ctype for t in ('text/markdown', 'text/plain', 'text/x-markdown')):
+                        continue
+                    raw = await resp.read()
+                    if len(raw) > self.max_html_bytes:
+                        raw = raw[: self.max_html_bytes]
+                    md = raw.decode(resp.charset or 'utf-8', errors='replace')
+
+                loop = asyncio.get_running_loop()
+                sections = await loop.run_in_executor(None, self._sections_from_markdown, md)
+                new_len = self._sections_text_len(sections)
+                if new_len > current_len:
+                    capture.sections = sections
+                    capture.word_count = len(
+                        ' '.join(s.text for s in sections).split()
+                    )
+                    capture.quality_warning = None
+                    logger.info(
+                        f"📝 MARKDOWN ALTERNATE: recovered {new_len} chars for "
+                        f"{capture.url[:80]} via {alt_url[-60:]} (HTML gave {current_len})"
+                    )
+                    return
+            except Exception as exc:
+                logger.debug(f"markdown alternate {alt_url[:70]} unavailable: {exc}")
+                continue
 
     # =========================================================================
     # Content Root Detection
@@ -648,6 +717,33 @@ class WebsiteFetcherService:
                 html_snippet=str(node)[:1000],
             )
 
+        if tag == 'dl':
+            # Definition lists carry glossary/field documentation on many doc
+            # sites; pair each term with its definition.
+            pairs: List[str] = []
+            term: Optional[str] = None
+            for child in node.find_all(['dt', 'dd']):
+                text = child.get_text(' ', strip=True)
+                if not text:
+                    continue
+                if child.name == 'dt':
+                    if term:
+                        pairs.append(term)
+                    term = text
+                else:
+                    pairs.append(f"{term}: {text}" if term else text)
+                    term = None
+            if term:
+                pairs.append(term)
+            if not pairs:
+                return None
+            return PageSection(
+                type='list',
+                text='\n'.join(f"- {p}" for p in pairs),
+                html_snippet=str(node)[:1000],
+                metadata={'item_count': len(pairs)},
+            )
+
         return None
 
     # =========================================================================
@@ -723,12 +819,16 @@ class WebsiteFetcherService:
             # =================================================================
             # Headings — always extracted, at document position
             # =================================================================
-            if tag in self.HEADING_TAGS:
+            if tag in self.HEADING_TAGS or tag in self.DISCLOSURE_HEADING_TAGS:
                 text = node.get_text(strip=True)
                 if text and len(text) >= self.MIN_HEADING_LEN:
                     sections.append(PageSection(
                         type='heading',
-                        level=int(tag[1]),
+                        level=(
+                            self.DISCLOSURE_HEADING_LEVEL
+                            if tag in self.DISCLOSURE_HEADING_TAGS
+                            else int(tag[1])
+                        ),
                         text=text,
                         html_snippet=str(node)[:1000],
                     ))
@@ -911,6 +1011,11 @@ class WebsiteFetcherService:
             # A narrowed extraction that yields almost nothing means the anchor
             # pointed at a wrapper/TOC rather than a real subsection. Recover the
             # whole page instead of shipping a near-empty capture. Never fatal.
+            # True while `sections` still represents a specific subsection of the
+            # page. A deliberately-scoped section is allowed to be short, so the
+            # whole-page recovery below must not second-guess it.
+            fragment_scoped = narrowed
+
             if narrowed:
                 narrowed_len = self._sections_text_len(sections)
                 if narrowed_len < self.FRAGMENT_MIN_CHARS:
@@ -928,6 +1033,28 @@ class WebsiteFetcherService:
                             f"using full page for {capture.url[:90]}"
                         )
                         sections = full_sections
+                        fragment_scoped = False
+
+            # --- Format-adaptive recovery ------------------------------------
+            # The DOM traversal above assumes server-rendered markup. When it
+            # comes back thin the page is some other shape — JSON-LD, hydrated
+            # SPA state, noscript-only, or markup matching none of the known
+            # content-root patterns — so try each of those in turn and keep the
+            # richest result. Purely additive: a healthy page never gets here,
+            # and a page still scoped to a #fragment is left alone — a short
+            # subsection is a correct result, not a failed extraction.
+            if (
+                not fragment_scoped
+                and self._sections_text_len(sections) < self.RECOVERY_TRIGGER_CHARS
+            ):
+                recovered, strategy = self._recover_thin_content(html, sections, capture.url)
+                if strategy:
+                    logger.info(
+                        f"♻️ EXTRACT RECOVERED: {capture.url[:85]} via '{strategy}' — "
+                        f"{self._sections_text_len(sections)} → "
+                        f"{self._sections_text_len(recovered)} chars"
+                    )
+                    sections = recovered
 
             capture.sections = sections
 
@@ -1010,6 +1137,447 @@ class WebsiteFetcherService:
                 continue
             kept.append(s)
         return kept
+
+    # =========================================================================
+    # Format-adaptive extraction fallbacks
+    #
+    # Layered strategies tried in order, cheapest and most-structured first,
+    # only when the primary DOM traversal came back thin. Each returns a
+    # (sections, strategy_name) pair or (None, None); none of them raise.
+    # =========================================================================
+
+    def _recover_thin_content(
+        self, html: str, current: List[PageSection], url: str
+    ) -> Tuple[List[PageSection], Optional[str]]:
+        """Try every fallback strategy and keep whichever yields the most text.
+
+        Re-parses the ORIGINAL html: the main extraction pass decomposes
+        <script>/<noscript>, which is exactly where JSON-LD, framework
+        hydration state and noscript copies live. Only runs on pages that
+        already came back thin, so the extra parse is rare.
+
+        Returns the winning sections and the strategy name, or the original
+        sections and None when nothing beat them. Individual strategy failures
+        are logged and skipped — never propagated.
+        """
+        best_sections, best_name = current, None
+        best_len = self._sections_text_len(current)
+
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+        except Exception as exc:
+            logger.warning(f"🧪 FALLBACK ERROR: could not re-parse {url[:70]}: {exc}")
+            return best_sections, best_name
+
+        # Script-reading strategies first, while the tags are still present.
+        # Density scoring runs last, after script/style noise is removed so it
+        # cannot mistake a JS bundle for prose.
+        staged = [
+            ('json-ld', self._extract_from_jsonld, False),
+            ('embedded-state', self._extract_from_embedded_state, False),
+            ('noscript', self._extract_from_noscript, False),
+            ('text-density', self._extract_by_density, True),
+        ]
+
+        for name, strategy, needs_clean_soup in staged:
+            if needs_clean_soup:
+                try:
+                    for tag_name in ('script', 'style', 'noscript', 'template'):
+                        for tag in soup.find_all(tag_name):
+                            tag.decompose()
+                except Exception:
+                    pass
+            try:
+                candidate = strategy(soup)
+            except Exception as exc:  # a broken strategy must not sink the page
+                logger.warning(
+                    f"🧪 FALLBACK ERROR: strategy '{name}' failed on {url[:70]} — "
+                    f"{type(exc).__name__}: {exc} (trying next strategy)"
+                )
+                continue
+            if not candidate:
+                continue
+            candidate = self._drop_chrome_sections(candidate)
+            cand_len = self._sections_text_len(candidate)
+            if cand_len > best_len:
+                best_sections, best_name, best_len = candidate, name, cand_len
+
+        return best_sections, best_name
+
+    def _sections_from_text_blocks(self, blocks: List[str]) -> List[PageSection]:
+        """Wrap plain text blocks as paragraph sections, dropping tiny noise."""
+        out: List[PageSection] = []
+        for raw in blocks:
+            text = re.sub(r'[ \t]+', ' ', (raw or '')).strip()
+            if len(text) < 25:
+                continue
+            out.append(PageSection(type='paragraph', text=text[:20000]))
+        return out
+
+    # -- strategy: schema.org JSON-LD -----------------------------------------
+
+    def _extract_from_jsonld(self, soup: BeautifulSoup) -> Optional[List[PageSection]]:
+        """Pull article text from schema.org JSON-LD blocks — emitted by
+        WordPress, Ghost, most news CMSes and many static-site generators.
+        Complements the existing microdata (itemprop) support."""
+        text_keys = ('articleBody', 'text', 'description', 'abstract')
+        found: List[str] = []
+
+        def walk(node):
+            if isinstance(node, dict):
+                for key in text_keys:
+                    val = node.get(key)
+                    if isinstance(val, str) and len(val.strip()) >= 100:
+                        found.append(val.strip())
+                headline = node.get('headline') or node.get('name')
+                if isinstance(headline, str) and found and len(headline) < 300:
+                    found.insert(max(len(found) - 1, 0), headline.strip())
+                for v in node.values():
+                    walk(v)
+            elif isinstance(node, list):
+                for v in node:
+                    walk(v)
+
+        for tag in soup.find_all('script', attrs={'type': re.compile(r'ld\+json', re.I)}):
+            raw = tag.string or tag.get_text() or ''
+            if not raw.strip():
+                continue
+            try:
+                walk(json.loads(raw))
+            except (ValueError, TypeError):
+                continue  # malformed JSON-LD is common; ignore quietly
+
+        if not found:
+            return None
+        # De-duplicate while preserving order (description often repeats the body)
+        seen, blocks = set(), []
+        for t in found:
+            k = t[:200]
+            if k not in seen:
+                seen.add(k)
+                blocks.append(t)
+        # JSON-LD bodies may contain HTML — strip it.
+        cleaned = [
+            BeautifulSoup(b, 'html.parser').get_text(' ', strip=True) if '<' in b else b
+            for b in blocks
+        ]
+        return self._sections_from_text_blocks(cleaned) or None
+
+    # -- strategy: embedded SPA state ----------------------------------------
+
+    def _extract_from_embedded_state(self, soup: BeautifulSoup) -> Optional[List[PageSection]]:
+        """Recover content from the JSON state that JS frameworks inline into
+        the HTML (Next.js __NEXT_DATA__, Nuxt, Gatsby, Remix, GitBook, etc.).
+
+        This is what lets a client-side-rendered page be read without running a
+        browser: the framework ships the same content as JSON so it can hydrate.
+        """
+        candidates: List[str] = []
+
+        for tag in soup.find_all('script'):
+            tag_id = (tag.get('id') or '').lower()
+            tag_type = (tag.get('type') or '').lower()
+            raw = tag.string or tag.get_text() or ''
+            if not raw or len(raw) < 200:
+                continue
+            is_state = (
+                tag_id in {'__next_data__', '__nuxt_data__', 'gatsby-page-data', '__remix_context'}
+                or 'application/json' in tag_type
+                or re.match(r'\s*(window\.)?(__NUXT__|__INITIAL_STATE__|__APOLLO_STATE__|__remixContext)\s*=', raw)
+            )
+            if not is_state:
+                continue
+            payload = raw.strip()
+            # Strip a `window.X = ...;` wrapper down to the JSON object.
+            m = re.match(r'\s*(?:window\.)?[A-Za-z_$][\w$]*\s*=\s*(.*?);?\s*$', payload, re.S)
+            if m and m.group(1).lstrip().startswith(('{', '[')):
+                payload = m.group(1)
+            try:
+                data = json.loads(payload)
+            except (ValueError, TypeError):
+                continue
+            candidates.extend(self._harvest_prose_strings(data))
+
+        if not candidates:
+            return None
+        return self._sections_from_text_blocks(candidates) or None
+
+    def _harvest_prose_strings(self, node, depth: int = 0, budget: int = 4000) -> List[str]:
+        """Collect human-prose-looking strings from an arbitrary JSON structure.
+
+        Heuristic: long strings containing sentence punctuation and spaces, that
+        do not look like URLs, ids, CSS, code or base64 blobs. Depth- and
+        count-bounded so a huge state tree cannot stall the parse.
+        """
+        out: List[str] = []
+        if depth > 12 or len(out) >= budget:
+            return out
+        if isinstance(node, str):
+            s = node.strip()
+            if len(s) < 80 or ' ' not in s:
+                return out
+            if re.match(r'^(https?://|data:|/|#|\.|[\w-]+\.(js|css|png|jpe?g|svg|woff))', s):
+                return out
+            if not re.search(r'[.!?:;]', s):
+                return out
+            # reject id/hash/base64-ish and markup-heavy blobs
+            letters = sum(c.isalpha() or c.isspace() for c in s)
+            if letters / max(len(s), 1) < 0.65:
+                return out
+            out.append(BeautifulSoup(s, 'html.parser').get_text(' ', strip=True) if '<' in s else s)
+        elif isinstance(node, dict):
+            for k, v in node.items():
+                if str(k).lower() in {'css', 'style', 'script', 'svg', 'base64', 'buildid'}:
+                    continue
+                out.extend(self._harvest_prose_strings(v, depth + 1, budget))
+                if len(out) >= budget:
+                    break
+        elif isinstance(node, list):
+            for v in node:
+                out.extend(self._harvest_prose_strings(v, depth + 1, budget))
+                if len(out) >= budget:
+                    break
+        return out
+
+    # -- strategy: <noscript> -------------------------------------------------
+
+    def _extract_from_noscript(self, soup: BeautifulSoup) -> Optional[List[PageSection]]:
+        """Some JS sites ship a static copy of the content inside <noscript>.
+        (REMOVE_TAGS strips noscript from the main pass, so re-parse it here.)"""
+        blocks: List[str] = []
+        for tag in soup.find_all('noscript'):
+            inner = tag.decode_contents() if hasattr(tag, 'decode_contents') else str(tag)
+            text = BeautifulSoup(inner, 'html.parser').get_text('\n', strip=True)
+            if len(text) >= 200:
+                blocks.append(text)
+        return self._sections_from_text_blocks(blocks) or None
+
+    # -- strategy: text density (works on unknown markup) --------------------
+
+    def _extract_by_density(self, soup: BeautifulSoup) -> Optional[List[PageSection]]:
+        """Readability-style fallback for pages whose markup matches none of the
+        known content-root patterns: score every block container by how much
+        non-link prose it holds and traverse the winner.
+
+        This is the generic safety net — it needs no knowledge of the site's
+        framework, CSS naming, or structure.
+        """
+        best, best_score = None, 0.0
+        for el in soup.find_all(['div', 'section', 'article', 'main', 'td']):
+            text = el.get_text(' ', strip=True)
+            n = len(text)
+            if n < 200:
+                continue
+            link_chars = sum(len(a.get_text(' ', strip=True)) for a in el.find_all('a'))
+            link_density = link_chars / max(n, 1)
+            if link_density > 0.5:
+                continue  # navigation / link farm, not prose
+            para_count = len(el.find_all(['p', 'li', 'pre', 'h2', 'h3']))
+            score = n * (1.0 - link_density) * (1.0 + min(para_count, 20) / 20.0)
+            if score > best_score:
+                best, best_score = el, score
+
+        if best is None:
+            return None
+        sections = self._single_pass_traverse(best)
+        if not sections:
+            # Container held prose but no recognised block tags — take its text.
+            return self._sections_from_text_blocks([best.get_text('\n', strip=True)]) or None
+        return sections
+
+    # =========================================================================
+    # Machine-readable alternates (llms.txt / rel=alternate conventions)
+    # =========================================================================
+
+    def _markdown_alternate_urls(self, soup: BeautifulSoup, url: str) -> List[str]:
+        """Candidate URLs serving a text/markdown rendering of this page.
+
+        Two sources, both open conventions rather than site-specific hacks:
+          1. <link rel="alternate" type="text/markdown"> declared by the page.
+          2. The llms.txt convention of exposing `<page>.md` (GitBook, Mintlify
+             and other doc platforms), which returns clean markdown and so
+             sidesteps client-side rendering entirely.
+        """
+        out: List[str] = []
+        try:
+            for link in soup.find_all('link', rel=True, href=True):
+                rels = link.get('rel') or []
+                rels = [r.lower() for r in (rels if isinstance(rels, list) else [rels])]
+                ltype = (link.get('type') or '').lower()
+                if 'alternate' in rels and ('markdown' in ltype or 'text/plain' in ltype):
+                    out.append(urljoin(url, link['href']))
+
+            parsed = urlparse(url)
+            path = parsed.path or '/'
+            if not re.search(r'\.(md|txt|html?|json|xml|pdf)$', path, re.I) and path not in ('', '/'):
+                out.append(urlunparse(parsed._replace(path=path.rstrip('/') + '.md', fragment='')))
+        except Exception:
+            return out
+        # preserve order, drop dupes
+        return list(dict.fromkeys(out))
+
+    # Block-level HTML tags that routinely appear inside markdown (MDX, GitBook,
+    # Docusaurus). Their contents must be parsed as HTML, not treated as prose.
+    _MD_HTML_BLOCK_TAGS = (
+        'table', 'details', 'div', 'section', 'figure', 'blockquote',
+        'ul', 'ol', 'dl', 'aside', 'article', 'picture', 'video',
+    )
+
+    def _clean_md_inline(self, text: str) -> str:
+        """Normalise a markdown text run: drop directives/entities, unwrap links,
+        strip emphasis markers, and remove any inline HTML tags via a real parser
+        (never by deleting '<'/'>' characters, which mangles embedded markup)."""
+        text = re.sub(r'\{%[^%]*%\}', ' ', text)          # GitBook/Liquid directives
+        text = re.sub(r'<!--.*?-->', ' ', text, flags=re.S)
+        text = re.sub(r'!\[[^\]]*\]\([^)]*\)', ' ', text)  # images
+        text = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', text)  # links → label
+        text = re.sub(r'<(https?://[^>]+)>', r'\1', text)     # autolinks
+        if '<' in text and '>' in text:
+            text = BeautifulSoup(text, 'html.parser').get_text(' ', strip=True)
+        text = re.sub(r'&#x[0-9A-Fa-f]+;|&[a-z]{2,8};', ' ', text)
+        text = re.sub(r'(\*\*|__|~~|`+)', '', text)
+        text = re.sub(r'^\s*>+\s?', '', text)             # blockquote markers
+        return re.sub(r'\s{2,}', ' ', text).strip()
+
+    def _sections_from_html_fragment(self, fragment: str) -> List[PageSection]:
+        """Parse an HTML block embedded in markdown into sections, preserving
+        tables and <details>/<summary> disclosure structure."""
+        out: List[PageSection] = []
+        try:
+            frag = BeautifulSoup(fragment, 'html.parser')
+        except Exception:
+            return out
+
+        for det in frag.find_all('details'):
+            summary = det.find('summary')
+            if summary:
+                label = summary.get_text(' ', strip=True)
+                if len(label) >= self.MIN_HEADING_LEN:
+                    # The disclosure label is the term being defined — keep it as
+                    # a heading so it stays searchable and scannable.
+                    out.append(PageSection(type='heading', level=4, text=label[:500]))
+                summary.decompose()
+            body = det.get_text('\n', strip=True)
+            if body:
+                out.extend(self._sections_from_text_blocks([body]))
+            det.decompose()
+
+        for tbl in frag.find_all('table'):
+            rows = []
+            for tr in tbl.find_all('tr'):
+                cells = [c.get_text(' ', strip=True) for c in tr.find_all(['th', 'td'])]
+                if any(cells):
+                    rows.append(' | '.join(cells))
+            if rows:
+                out.append(PageSection(type='table', text='\n'.join(rows)[:20000]))
+            tbl.decompose()
+
+        remainder = frag.get_text('\n', strip=True)
+        if remainder:
+            out.extend(self._sections_from_text_blocks([remainder]))
+        return out
+
+    def _sections_from_markdown(self, md: str) -> List[PageSection]:
+        """Structural parse of markdown into PageSections (headings, lists,
+        code, tables, paragraphs), including raw HTML blocks embedded in the
+        markdown. Deliberately dependency-free — it only needs to preserve
+        structure well enough for LLM context and citation."""
+        sections: List[PageSection] = []
+        lines = (md or '').replace('\r\n', '\n').split('\n')
+        buf: List[str] = []
+        code_buf: List[str] = []
+        html_buf: List[str] = []
+        in_code = False
+        html_tag: Optional[str] = None
+        html_depth = 0
+
+        def flush_para():
+            if not buf:
+                return
+            text = self._clean_md_inline(' '.join(buf))
+            buf.clear()
+            if len(text) >= 25:
+                sections.append(PageSection(type='paragraph', text=text[:20000]))
+
+        def flush_html():
+            nonlocal html_tag, html_depth
+            if html_buf:
+                sections.extend(self._sections_from_html_fragment('\n'.join(html_buf)))
+                html_buf.clear()
+            html_tag, html_depth = None, 0
+
+        for raw in lines:
+            line = raw.rstrip()
+
+            # --- inside an embedded HTML block ---
+            if html_tag:
+                html_buf.append(line)
+                html_depth += len(re.findall(rf'<{html_tag}\b', line, re.I))
+                html_depth -= len(re.findall(rf'</{html_tag}\s*>', line, re.I))
+                if html_depth <= 0:
+                    flush_html()
+                continue
+
+            # --- fenced code ---
+            if re.match(r'^\s*(```|~~~)', line):
+                if in_code:
+                    if code_buf:
+                        sections.append(PageSection(type='code', text='\n'.join(code_buf)[:20000]))
+                    code_buf, in_code = [], False
+                else:
+                    flush_para()
+                    in_code = True
+                continue
+            if in_code:
+                code_buf.append(line)
+                continue
+
+            # --- start of an embedded HTML block ---
+            html_open = re.match(
+                rf'^\s*<({"|".join(self._MD_HTML_BLOCK_TAGS)})\b', line, re.I
+            )
+            if html_open:
+                flush_para()
+                html_tag = html_open.group(1).lower()
+                html_buf.append(line)
+                html_depth = (
+                    len(re.findall(rf'<{html_tag}\b', line, re.I))
+                    - len(re.findall(rf'</{html_tag}\s*>', line, re.I))
+                )
+                if html_depth <= 0:
+                    flush_html()
+                continue
+
+            # --- markdown headings ---
+            heading = re.match(r'^(#{1,6})\s+(.*)$', line)
+            if heading:
+                flush_para()
+                htext = self._clean_md_inline(heading.group(2))
+                if len(htext) >= self.MIN_HEADING_LEN:
+                    sections.append(
+                        PageSection(type='heading', level=len(heading.group(1)), text=htext[:500])
+                    )
+                continue
+
+            # --- list items / table rows accumulate into the current block ---
+            if re.match(r'^\s*([-*+]|\d+\.)\s+', line):
+                buf.append(re.sub(r'^\s*([-*+]|\d+\.)\s+', '- ', line))
+                continue
+            if line.strip().startswith('|') and line.count('|') >= 2:
+                buf.append(re.sub(r'\s*\|\s*', ' | ', line).strip())
+                continue
+
+            if not line.strip():
+                flush_para()
+                continue
+
+            buf.append(line.strip())
+
+        if in_code and code_buf:
+            sections.append(PageSection(type='code', text='\n'.join(code_buf)[:20000]))
+        flush_html()
+        flush_para()
+        return self._drop_chrome_sections(sections)
 
     def _assess_thinness(self, flat_text: str, capture: PageCapture) -> Optional[str]:
         """Return a human-readable reason when a capture looks empty/near-empty,

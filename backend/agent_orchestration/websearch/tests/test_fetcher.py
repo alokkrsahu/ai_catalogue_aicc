@@ -276,3 +276,246 @@ class ExtractionQualityTests(TestCase):
         self.fetcher._populate_from_html(cap, html)
         flat = ' '.join(s.text for s in cap.sections)
         self.assertIn('helpful information about updating', flat)
+
+
+class FormatAdaptiveExtractionTests(TestCase):
+    """The extractor must read content out of whatever shape a page takes:
+    server-rendered HTML, JSON-LD, hydrated SPA state, noscript, unknown
+    markup, embedded HTML in markdown, and HTML disclosure widgets."""
+
+    def setUp(self):
+        self.fetcher = WebsiteFetcherService()
+
+    def _text(self, cap) -> str:
+        return ' '.join(s.text for s in cap.sections)
+
+    # -- structured data ---------------------------------------------------
+
+    def test_recovers_content_from_json_ld(self):
+        body = 'The quick brown fox jumped over the lazy dog repeatedly. ' * 12
+        html = """
+        <html><head><title>News</title>
+        <script type="application/ld+json">
+        {"@context":"https://schema.org","@type":"NewsArticle",
+         "headline":"A Headline Worth Keeping","articleBody":"%s"}
+        </script>
+        </head><body><div id="shell"></div></body></html>
+        """ % body
+        cap = _capture('https://example.com/news')
+        self.fetcher._populate_from_html(cap, html)
+        self.assertIn('quick brown fox', self._text(cap))
+        self.assertIsNone(cap.extraction_error)
+
+    def test_malformed_json_ld_does_not_break_extraction(self):
+        html = """
+        <html><head><title>T</title>
+        <script type="application/ld+json">{ this is not json </script>
+        </head><body><main><p>%s</p></main></body></html>
+        """ % ('Readable body content. ' * 40)
+        cap = _capture()
+        self.fetcher._populate_from_html(cap, html)
+        self.assertIn('Readable body content', self._text(cap))
+        self.assertIsNone(cap.extraction_error)
+
+    # -- hydrated SPA state ------------------------------------------------
+
+    def test_recovers_content_from_next_data_state(self):
+        prose = ('This paragraph lives only in the hydration payload, '
+                 'exactly as a client-rendered framework would ship it. ') * 6
+        html = """
+        <html><head><title>App</title></head><body>
+            <div id="__next"></div>
+            <script id="__NEXT_DATA__" type="application/json">
+            {"props":{"pageProps":{"doc":{"title":"Doc","content":"%s"}}}}
+            </script>
+            <script src="/a.js"></script><script src="/b.js"></script>
+            <script src="/c.js"></script>
+        </body></html>
+        """ % prose
+        cap = _capture('https://example.com/spa')
+        self.fetcher._populate_from_html(cap, html)
+        self.assertIn('hydration payload', self._text(cap))
+        self.assertIsNone(cap.extraction_error)
+
+    def test_state_harvest_rejects_urls_and_ids(self):
+        """Only prose is harvested — asset paths and hashes must not leak in."""
+        junk = {
+            'a': 'https://cdn.example.com/static/chunk.a1b2c3d4e5f6a7b8.js',
+            'b': 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2',
+            'c': '/assets/img/hero-image-2048x1024.png',
+        }
+        harvested = self.fetcher._harvest_prose_strings(junk)
+        self.assertEqual(harvested, [])
+
+    # -- noscript ----------------------------------------------------------
+
+    def test_recovers_content_from_noscript(self):
+        html = """
+        <html><head><title>App</title></head><body>
+            <div id="root"></div>
+            <noscript><article><p>%s</p></article></noscript>
+            <script src="/a.js"></script><script src="/b.js"></script>
+            <script src="/c.js"></script>
+        </body></html>
+        """ % ('Static fallback copy for crawlers. ' * 12)
+        cap = _capture()
+        self.fetcher._populate_from_html(cap, html)
+        self.assertIn('Static fallback copy', self._text(cap))
+
+    # -- unknown markup ----------------------------------------------------
+
+    def test_density_fallback_handles_unknown_markup(self):
+        """No <article>/<main>, no recognised class names, nav-heavy page."""
+        nav = ''.join(f'<a href="/p{i}">Link number {i}</a>' for i in range(40))
+        html = f"""
+        <html><head><title>Odd</title></head><body>
+            <span class="zzz-top">{nav}</span>
+            <span class="qqq-9">
+                <p>{'Genuine article prose that should win on density. ' * 14}</p>
+                <p>{'A second substantive paragraph of real content. ' * 10}</p>
+            </span>
+        </body></html>
+        """
+        cap = _capture()
+        self.fetcher._populate_from_html(cap, html)
+        text = self._text(cap)
+        self.assertIn('Genuine article prose', text)
+        self.assertIn('second substantive paragraph', text)
+
+    # -- HTML disclosure widgets ------------------------------------------
+
+    def test_details_summary_labels_are_captured(self):
+        """<summary> is the heading of a disclosure block — dropping it loses
+        the very term being defined (regression: object-type vocabulary)."""
+        html = """
+        <html><head><title>Glossary</title></head><body><main>
+            <h2>Types</h2>
+            <details><summary>terminology artifact</summary>
+                <p>%s</p></details>
+            <details><summary>software application</summary>
+                <p>%s</p></details>
+        </main></body></html>
+        """ % ('A set of defined terms and categories. ' * 6,
+               'An application or tool ready to run. ' * 6)
+        cap = _capture()
+        self.fetcher._populate_from_html(cap, html)
+        text = self._text(cap)
+        self.assertIn('terminology artifact', text)
+        self.assertIn('software application', text)
+
+    def test_definition_lists_are_captured(self):
+        html = """
+        <html><head><title>Fields</title></head><body><main>
+            <h2>Fields</h2>
+            <dl>
+              <dt>Object Types</dt><dd>At least one is mandatory.</dd>
+              <dt>Taxonomic Range</dt><dd>Controlled vocabulary field.</dd>
+            </dl>
+            <p>%s</p>
+        </main></body></html>
+        """ % ('Surrounding prose. ' * 30)
+        cap = _capture()
+        self.fetcher._populate_from_html(cap, html)
+        text = self._text(cap)
+        self.assertIn('Object Types', text)
+        self.assertIn('mandatory', text)
+        self.assertIn('Taxonomic Range', text)
+
+    # -- markdown parsing --------------------------------------------------
+
+    def test_markdown_parsed_into_structured_sections(self):
+        md = """# Title
+
+Intro paragraph with a [link](https://example.com) and **bold** text.
+
+## Section Two
+
+- first item
+- second item
+
+```python
+print('code')
+```
+"""
+        secs = self.fetcher._sections_from_markdown(md)
+        types = [s.type for s in secs]
+        text = ' '.join(s.text for s in secs)
+        self.assertIn('heading', types)
+        self.assertIn('code', types)
+        self.assertIn('Intro paragraph with a link', text)
+        # emphasis markers and link syntax must not survive
+        self.assertNotIn('**', text)
+        self.assertNotIn('](', text)
+
+    def test_markdown_with_embedded_html_is_parsed(self):
+        """MDX/GitBook markdown routinely embeds raw HTML blocks; their text
+        must be extracted rather than mangled into character soup."""
+        md = """# Object Types
+
+Intro line that is long enough to be kept as a paragraph section.
+
+<details>
+
+<summary>terminology artifact</summary>
+
+A set of defined terms, for example a glossary or ontology of some kind.
+
+</details>
+
+<table><thead><tr><th>Resource</th><th>Question</th></tr></thead>
+<tbody><tr><td>Database</td><td>What content is stored?</td></tr></tbody></table>
+"""
+        secs = self.fetcher._sections_from_markdown(md)
+        text = ' '.join(s.text for s in secs)
+        self.assertIn('terminology artifact', text)
+        self.assertIn('set of defined terms', text)
+        self.assertIn('Database', text)
+        self.assertIn('What content is stored?', text)
+        self.assertNotIn('<td>', text)
+        self.assertIn('table', [s.type for s in secs])
+
+    def test_markdown_directives_are_stripped(self):
+        md = """# T
+
+{% hint style="info" %}
+It is mandatory to provide at least one object type for all record types.
+{% endhint %}
+"""
+        secs = self.fetcher._sections_from_markdown(md)
+        text = ' '.join(s.text for s in secs)
+        self.assertIn('mandatory to provide at least one object type', text)
+        self.assertNotIn('{%', text)
+
+    # -- alternates --------------------------------------------------------
+
+    def test_markdown_alternate_candidates(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(
+            '<html><head><link rel="alternate" type="text/markdown" href="/page.md">'
+            '</head><body></body></html>', 'html.parser')
+        cands = self.fetcher._markdown_alternate_urls(soup, 'https://example.com/docs/page')
+        self.assertIn('https://example.com/page.md', cands)
+        # llms.txt convention sibling is also offered
+        self.assertIn('https://example.com/docs/page.md', cands)
+
+    def test_markdown_alternate_not_offered_for_file_urls(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup('<html><head></head><body></body></html>', 'html.parser')
+        cands = self.fetcher._markdown_alternate_urls(soup, 'https://example.com/a/file.json')
+        self.assertEqual(cands, [])
+
+    # -- no regression on healthy pages ------------------------------------
+
+    def test_healthy_page_skips_all_fallbacks(self):
+        html = """
+        <html><head><title>Good</title></head><body>
+            <nav><a href="/">Home</a></nav>
+            <article><h1>Heading</h1><p>%s</p></article>
+        </body></html>
+        """ % ('Plenty of genuine server-rendered content here. ' * 40)
+        cap = _capture()
+        cap.raw_html_size = 60_000
+        self.fetcher._populate_from_html(cap, html)
+        self.assertIsNone(cap.quality_warning)
+        self.assertIsNone(cap.extraction_error)
+        self.assertNotIn('Home', self._text(cap))
