@@ -4,6 +4,7 @@ Minimal Django settings for debugging startup issues
 
 from pathlib import Path
 import os
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -27,11 +28,24 @@ SIMPLE_JWT = {
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# NOTE: this module is NOT used by anything — manage.py, wsgi.py and asgi.py all
+# hardcode core.settings, and no Dockerfile, compose file or script references it.
+# It also diverges materially from the real configuration (SQLite, a reduced app
+# list), so activating it would be dangerous. It is kept only as a minimal
+# reference config. See docs/KNOWN_ISSUES.md (V7).
+#
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-lb=q(rt4#!kjg!ckx@t)89-0jw4uidgk+9yq5b&c6&slk^2p#b'
+# No hardcoded key here — a literal value in this file would be a committed
+# secret even though the module is inert.
+SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', '')
+if not SECRET_KEY:
+    raise ImproperlyConfigured(
+        "core.settings_minimal requires DJANGO_SECRET_KEY. This module is not the "
+        "project's real settings — you almost certainly want core.settings."
+    )
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
 
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', 'testserver', '0.0.0.0']
 

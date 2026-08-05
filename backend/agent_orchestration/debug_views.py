@@ -32,6 +32,17 @@ def debug_workflows(request, project_id=None):
         # Check if project exists
         try:
             project = get_object_or_404(IntelliDocProject, project_id=project_id)
+            # SECURITY: authentication alone is not authorization. Without this
+            # check any logged-in user could enumerate — and via POST create
+            # workflows in — any project in the system.
+            if not project.has_user_access(request.user):
+                logger.warning(
+                    f"🚫 DEBUG: {request.user} denied access to project {project.project_id}"
+                )
+                return Response(
+                    {'error': 'You do not have permission to access this project'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
             logger.info(f"✅ DEBUG: Project found: {project.name}")
         except Exception as e:
             logger.error(f"❌ DEBUG: Failed to get project: {e}")

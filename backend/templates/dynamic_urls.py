@@ -431,12 +431,49 @@ def refresh_all_template_routes():
         return False
 
 
+def _require_authenticated(request):
+    """Return a 401 JsonResponse when the caller is not authenticated, else None.
+
+    These are plain Django views (not DRF), so they get no permission classes and
+    were reachable by anyone. `request.user` here comes from session middleware;
+    JWT is not processed for non-DRF views, so these endpoints are for
+    session-authenticated admin use only.
+    """
+    user = getattr(request, 'user', None)
+    if user is None or not user.is_authenticated:
+        return JsonResponse(
+            {'status': 'error', 'error': 'Authentication required'}, status=401
+        )
+    return None
+
+
+def _require_staff(request):
+    """Return a 401/403 JsonResponse unless the caller is authenticated staff."""
+    unauthenticated = _require_authenticated(request)
+    if unauthenticated is not None:
+        return unauthenticated
+    user = request.user
+    is_privileged = (
+        user.is_superuser
+        or getattr(user, 'is_staff', False)
+        or getattr(user, 'role', None) == 'ADMIN'
+    )
+    if not is_privileged:
+        return JsonResponse(
+            {'status': 'error', 'error': 'Administrator privileges required'}, status=403
+        )
+    return None
+
+
 class TemplateURLManagementView:
     """Template URL Management API View"""
-    
+
     @staticmethod
     def discover_templates(request):
         """Discover all available templates and their routes"""
+        denied = _require_authenticated(request)
+        if denied is not None:
+            return denied
         logger.info("Template discovery API called")
         
         try:
@@ -469,6 +506,9 @@ class TemplateURLManagementView:
     @staticmethod
     def get_template_endpoints(request):
         """Get all template-specific endpoints"""
+        denied = _require_authenticated(request)
+        if denied is not None:
+            return denied
         logger.info("Template endpoints API called")
         
         try:
@@ -510,7 +550,14 @@ class TemplateURLManagementView:
     
     @staticmethod
     def refresh_urls(request):
-        """Refresh all template URLs and clear caches"""
+        """Refresh all template URLs and clear caches.
+
+        SECURITY: this clears the entire Django cache, so it is restricted to
+        staff/admin. It was previously reachable unauthenticated by a bare GET.
+        """
+        denied = _require_staff(request)
+        if denied is not None:
+            return denied
         logger.info("Template URL refresh API called")
         
         try:

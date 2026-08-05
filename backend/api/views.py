@@ -1,5 +1,6 @@
 # backend/api/views.py
 
+import logging
 import os
 import mimetypes
 from django.contrib.auth import get_user_model
@@ -9,6 +10,7 @@ from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.conf import settings
 from django.core.files.storage import default_storage
+from django.core.mail import send_mail
 from django.http import Http404
 from rest_framework import status, permissions, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
@@ -46,6 +48,7 @@ from .serializers import (
 )
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 class RegisterView(APIView):
     permission_classes = [AllowAny]
@@ -84,30 +87,60 @@ class UserViewSet(viewsets.ModelViewSet):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def password_reset_request(request):
+    """Start a password reset.
+
+    SECURITY: this endpoint is unauthenticated, so the reset material must never
+    appear in the response — returning `uid`/`token` here previously let anyone
+    who knew an email address take over that account. The token is delivered out
+    of band (email) and the response is always the same generic message, so the
+    endpoint also cannot be used to enumerate registered addresses.
+    """
     serializer = PasswordResetRequestSerializer(data=request.data)
-    if serializer.is_valid():
-        email = serializer.validated_data['email']
-        try:
-            user = User.objects.get(email=email)
-            # Generate password reset token
-            uid = urlsafe_base64_encode(force_bytes(user.pk))
-            token = default_token_generator.make_token(user)
-            
-            # In a real application, you would send an email here with the reset link
-            reset_url = f"/reset-password/{uid}/{token}/"
-            
-            # Just return the token and UID for demo purposes
-            return Response({
-                "detail": "Password reset email has been sent.",
-                "uid": uid,
-                "token": token,
-                "reset_url": reset_url
-            })
-        except User.DoesNotExist:
-            # Don't reveal that the user doesn't exist
-            pass
-            
-    return Response({"detail": "Password reset email has been sent if the account exists."})
+    generic_response = Response(
+        {"detail": "If an account exists for that address, a password reset link has been sent."}
+    )
+
+    if not serializer.is_valid():
+        # Still generic: an invalid-email 400 would distinguish inputs.
+        return generic_response
+
+    email = serializer.validated_data['email']
+    try:
+        user = User.objects.get(email=email)
+    except User.DoesNotExist:
+        return generic_response
+
+    uid = urlsafe_base64_encode(force_bytes(user.pk))
+    token = default_token_generator.make_token(user)
+    reset_path = f"/reset-password/{uid}/{token}/"
+    frontend_base = (getattr(settings, 'PASSWORD_RESET_BASE_URL', '') or '').rstrip('/')
+    reset_url = f"{frontend_base}{reset_path}" if frontend_base else reset_path
+
+    subject = "Reset your IntelliDoc password"
+    body = (
+        f"A password reset was requested for {email}.\n\n"
+        f"Use this link to choose a new password:\n{reset_url}\n\n"
+        "If you did not request this, you can ignore this message and your "
+        "password will remain unchanged.\n"
+    )
+    try:
+        send_mail(
+            subject,
+            body,
+            getattr(settings, 'DEFAULT_FROM_EMAIL', None) or 'no-reply@localhost',
+            [email],
+            fail_silently=False,
+        )
+        logger.info(f"🔑 PASSWORD RESET: reset link dispatched for user id={user.pk}")
+    except Exception as exc:
+        # Never surface the token to the caller, even when delivery fails. With
+        # the default console email backend this simply prints to the server log,
+        # which is what local development relies on.
+        logger.error(
+            f"❌ PASSWORD RESET: could not send reset email for user id={user.pk}: {exc}"
+        )
+
+    return generic_response
 
 @api_view(['POST'])
 @permission_classes([AllowAny])

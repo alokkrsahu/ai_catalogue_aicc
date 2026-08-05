@@ -51,7 +51,7 @@ IntelliDoc generates validated, operator-editable multi-agent workflows from a s
    ┌─────────┬───┴─────┬──────────┬───────────┐
 ┌──▼───┐ ┌───▼───┐ ┌───▼────┐ ┌───▼─────┐ ┌───▼────┐
 │postgres│ │ redis │ │ milvus │ │chromadb │ │ minio  │
-│ :5432  │ │ :6379 │ │ :19530 │ │  :8001  │ │(unused)│
+│ :5432  │ │ :6379 │ │ :19530 │ │  :8001  │ │(unused)│   all loopback-only
 └────────┘ └───────┘ └───┬────┘ └─────────┘ └────────┘
                      ┌───▼───┐
                      │ etcd  │      plus: pgadmin :8080, attu :3001
@@ -81,17 +81,18 @@ Then, in the app: create a project from a template, upload documents, run **Star
 
 > **API keys are per project.** There is no environment-variable fallback on the workflow path — a project with no configured `ProjectAPIKey` cannot execute any LLM node.
 
-`.env.example` is incomplete relative to what the compose stack reads; all missing variables have working defaults in `docker-compose.yml`. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the full list.
+`.env.example` documents every variable the stack reads. Those without a compose default will stop startup if unset — deliberately, so a deployment never falls back to a value published in this repository. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
 ### Required configuration
 
 | Variable | Why |
 |---|---|
 | `PROJECT_API_KEY_ENCRYPTION_KEY` | No default. Encrypts per-project provider keys. |
-| `API_KEY_ENCRYPTION_KEY` | **Set this explicitly** — the compose default is a key committed to this repository. |
+| `API_KEY_ENCRYPTION_KEY` | No default. The previous compose default is public in git history and has been rotated. |
 | `MILVUS_ROOT_USER`, `MILVUS_ROOT_PASSWORD` | No default; startup scripts abort without them. |
 | `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` | Same startup guard, though MinIO is currently unused. |
-| `DJANGO_SECRET_KEY` | Has an insecure placeholder default. |
+| `DJANGO_SECRET_KEY` | No default; required whenever `DEBUG=False`. |
+| `DB_PASSWORD` | No default; the previous default is public in this repository. |
 | One of `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` | Needed for platform-level features. |
 
 ---
@@ -186,7 +187,9 @@ These documents are derived from the source rather than from earlier documentati
 
 ## Security notes for operators
 
-Before exposing an instance to the internet, read the security section of [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md). In particular: only ports 80 and 443 should be reachable (Postgres, Redis, ChromaDB, Milvus, pgAdmin, Attu, the Django port and the Vite dev server are all bound to `0.0.0.0` by default), `DEBUG` defaults to `True`, `API_KEY_ENCRYPTION_KEY` must be overridden, and the unauthenticated password-reset endpoint returns its reset token in the response body.
+Only nginx (80/443) is published on all interfaces; every other service binds `127.0.0.1`. `DEBUG` defaults to `False`, and with `DEBUG=False` a missing or publicly-known `DJANGO_SECRET_KEY` fails startup rather than being used silently. `DB_PASSWORD`, `DJANGO_SECRET_KEY` and both encryption keys have no defaults and must be set.
+
+Remaining known gaps — Redis has no password, ChromaDB has no authentication, and the deployment CORS middleware only blocks preflight — are tracked in [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md). Before rotating an encryption key, read [`docs/DEPLOYMENT.md` §11](docs/DEPLOYMENT.md#11-rotating-encryption-keys): `PROJECT_API_KEY_ENCRYPTION_KEY` cannot be changed without re-encrypting stored data.
 
 ---
 

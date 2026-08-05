@@ -36,11 +36,32 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'django-insecure-lb=q(rt4#!kjg!ckx@t)89-0jw4uidgk+9yq5b&c6&slk^2p#b')
-
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv('DEBUG', 'True').lower() == 'true'
+# Defaults to False so that a deployment which forgets to set DEBUG is safe
+# rather than exposed. docker-compose.override.yml sets DEBUG=True explicitly
+# for local development.
+DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
+
+# SECURITY WARNING: keep the secret key used in production secret!
+# The development fallback below is public (it is committed to this repository),
+# so it is only permitted when DEBUG is on. With DEBUG off, DJANGO_SECRET_KEY
+# must be supplied or startup fails loudly instead of silently signing sessions
+# and password-reset tokens with a known key.
+_DEV_INSECURE_SECRET_KEY = 'django-insecure-lb=q(rt4#!kjg!ckx@t)89-0jw4uidgk+9yq5b&c6&slk^2p#b'
+SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', '')
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = _DEV_INSECURE_SECRET_KEY
+    else:
+        raise ImproperlyConfigured(
+            "DJANGO_SECRET_KEY must be set when DEBUG is False. Generate one with: "
+            "python -c \"from django.core.management.utils import get_random_secret_key; "
+            "print(get_random_secret_key())\""
+        )
+elif SECRET_KEY == _DEV_INSECURE_SECRET_KEY and not DEBUG:
+    raise ImproperlyConfigured(
+        "DJANGO_SECRET_KEY is set to the public development key. Generate a unique one."
+    )
 
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1,testserver,0.0.0.0,aicc.uksouth.cloudapp.azure.com').split(',')
 
@@ -233,6 +254,22 @@ MEDIA_ROOT = BASE_DIR / 'media'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 AUTH_USER_MODEL = 'users.User'
+
+# Email — used for password-reset delivery. The reset token is NEVER returned in
+# an API response (see api.views.password_reset_request), so a working backend is
+# required for self-service resets in production. The default console backend
+# writes the message to the server log, which is fine for development.
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'localhost')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', '25'))
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'False').lower() == 'true'
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'no-reply@localhost')
+
+# Absolute base URL the password-reset link should point at (the frontend origin).
+# When empty the link is emitted as a relative path.
+PASSWORD_RESET_BASE_URL = os.getenv('PASSWORD_RESET_BASE_URL', '')
 
 # LLM Eval App Settings
 # IMPORTANT: Generate a secure encryption key for API keys

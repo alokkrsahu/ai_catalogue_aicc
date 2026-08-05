@@ -15,7 +15,7 @@ services:
       NODE_ENV: development
       BACKEND_URL: http://backend:8000
     ports:
-      - "5173:5173"  # Vite dev server
+      - "127.0.0.1:5173:5173"  # Vite dev server (loopback only; reach it via nginx)
     volumes:
       # Mount source code for hot reload
       - ./frontend/my-sveltekit-app/src:/app/src:cached

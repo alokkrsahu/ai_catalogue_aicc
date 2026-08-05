@@ -49,31 +49,33 @@ Network: `ai_catalogue_network`, bridge driver, subnet `172.20.0.0/16` (Docker n
 
 ## 2. Ports
 
-Every published port binds `0.0.0.0`. Only the host firewall or cloud security group stands between these and the internet.
+Only **nginx (80/443)** is published on all interfaces. Every other port binds `127.0.0.1`, so it is reachable from the host itself but not from the network.
 
 | Host port | Service | Notes |
 |---|---|---|
 | **80** | nginx | Primary entry point |
 | **443** | nginx | TLS |
-| 8000 | backend | Django direct, including `/admin/` |
-| 5173 | frontend-dev | Vite dev server + HMR (dev overlay only) |
-| 3000 | frontend | Production Node server (prod overlay only) |
-| 5432 | postgres | Raw database access |
-| 6379 | redis | **No password or ACL is configured** |
-| 8001 | chromadb | Container port 8000; no auth, CORS `*` |
-| 19530 | milvus | gRPC; authentication enabled |
-| 9091 | milvus | HTTP — `/healthz`, `/webui/` |
-| 8080 | pgadmin | Container port 80 |
-| 3001 | attu | Milvus web UI; credentials must be entered manually |
+| 8000 | backend | Django direct, including `/admin/` — loopback only |
+| 5173 | frontend-dev | Vite dev server + HMR — loopback only; reach the app via nginx |
+| 3000 | frontend | Production Node server — loopback only |
+| 5432 | postgres | Loopback only |
+| 6379 | redis | Loopback only. **No password or ACL is configured**, so the binding is the only control. |
+| 8001 | chromadb | Container port 8000. Loopback only — it has no auth and CORS `*`. |
+| 19530 | milvus | gRPC; authentication enabled. Loopback only. |
+| 9091 | milvus | HTTP — `/healthz`, `/webui/`. Loopback only. |
+| 8080 | pgadmin | Container port 80. Loopback only. |
+| 3001 | attu | Milvus web UI. Loopback only. |
 | — | etcd, minio | Not published; container network only |
 
-**Hardening note:** in a deployment reachable from the internet, only 80 and 443 should be exposed. Postgres, Redis, ChromaDB, Milvus, pgAdmin, Attu, the Django port and the Vite dev server should all be firewalled.
+To reach a loopback-bound service from your workstation, use an SSH tunnel rather than republishing the port, e.g. `ssh -L 8080:127.0.0.1:8080 <host>` for pgAdmin.
+
+**Still worth doing:** set a Redis password and put authentication in front of ChromaDB, so the loopback binding is not the only thing protecting them.
 
 ---
 
 ## 3. Configuration
 
-Copy `.env.example` to `.env`. Note that **`.env.example` is currently incomplete** — it omits variables the compose stack reads, including `AICC_CHATBOT_OPENAI_API_KEY`, `CORS_ALLOWED_ORIGINS`, `CSRF_TRUSTED_ORIGINS`, `CHROMADB_PORT`, `REDIS_PORT`, `DB_AUTH_METHOD`, `ENVIRONMENT`, `DOMAIN_NAME`, `SSL_EMAIL`, `PGADMIN_*`, `ATTU_*`, `VITE_BACKEND_URL` and `VITE_API_BASE_URL`. All of those have working defaults in `docker-compose.yml`, so the stack starts without them.
+Copy `.env.example` to `.env` and fill in the values marked REQUIRED. Variables without a compose default will stop the stack from starting if unset, which is deliberate — it is safer than falling back to a value published in this repository.
 
 ### Genuinely required
 
@@ -82,7 +84,9 @@ Copy `.env.example` to `.env`. Note that **`.env.example` is currently incomplet
 | `PROJECT_API_KEY_ENCRYPTION_KEY` | No default. Fernet key encrypting per-project API keys at rest. |
 | `MILVUS_ROOT_USER`, `MILVUS_ROOT_PASSWORD` | No default; `start-dev.sh` and `production.sh` abort if empty. |
 | `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` | Same startup guards — see the note below. |
-| `DJANGO_SECRET_KEY` | Has an insecure placeholder default; must be set for any real deployment. |
+| `DJANGO_SECRET_KEY` | No compose default. Also enforced in settings: with `DEBUG=False`, a missing or public dev key raises `ImproperlyConfigured` at startup. |
+| `API_KEY_ENCRYPTION_KEY` | No default. Encrypts `llm_eval.APIKeyConfig`. A literal key was previously hardcoded in `docker-compose.yml` and is public in git history — it has been rotated and must not be reused. |
+| `DB_PASSWORD` | No default. The previous default (`ai_catalogue_password`) is published in this repository. |
 | At least one of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` | Otherwise no LLM node can execute. |
 
 Generate the keys:
@@ -95,7 +99,7 @@ python -c "from django.core.management.utils import get_random_secret_key; print
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-> **Security issue to fix:** `docker-compose.yml` supplies a **literal, committed Fernet key** as the default for `API_KEY_ENCRYPTION_KEY`. Any deployment that does not set that variable is encrypting with a key published in this repository. Set `API_KEY_ENCRYPTION_KEY` explicitly in `.env`.
+> **On rotating either encryption key, read §11 first.** `PROJECT_API_KEY_ENCRYPTION_KEY` cannot be changed without re-encrypting stored data.
 
 > **MinIO is required but unused.** The startup scripts refuse to run without `MINIO_ROOT_*`, yet Milvus is configured with `MINIO_ADDRESS: ""` and `COMMON_STORAGETYPE: local`, so it stores segments on its own volume and never contacts MinIO. Set the variables to satisfy the guard; expect the `minio` service to sit idle.
 
@@ -275,3 +279,71 @@ Collected for triage; each is verifiable in the file cited.
 | 18 | `k8s/` drifted and untracked | `k8s/` |
 | 19 | Port 8001 claimed by both `chromadb` and the legacy chroma addon | `docker-compose-chroma-addon.yml` |
 | 20 | `nginx.dev.conf` requires another project's containers to be present | `nginx.dev.conf` |
+
+---
+
+## 11. Rotating encryption keys
+
+Two keys encrypt data at rest. They behave very differently, so read this before touching either.
+
+| Key | Encrypts | Rotating it needs re-encryption? |
+|---|---|---|
+| `PROJECT_API_KEY_ENCRYPTION_KEY` | `ProjectAPIKey.encrypted_api_key`, `MCPServerCredential.encrypted_credentials` — via PBKDF2 with the project id as salt | **Yes.** Changing it without re-encrypting makes every stored provider key unreadable, and no workflow can call an LLM. |
+| `API_KEY_ENCRYPTION_KEY` | `llm_eval.APIKeyConfig.api_key` only | Only if that table has rows. |
+
+`ProjectAPIKeyEncryption` reads `PROJECT_API_KEY_ENCRYPTION_KEY` **directly from the process environment**, not from Django settings, so the `PROJECT_API_KEY_SETTINGS['ENCRYPTION_KEY']` fallback in `settings.py` does not apply to it.
+
+### Procedure
+
+```bash
+# 0. Back up first. Non-negotiable — there is no other copy.
+docker exec ai_catalogue_postgres pg_dump -U "$DB_USER" "$DB_NAME" > db-backup.sql
+
+# 1. Generate the new key
+NEWKEY=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+
+# 2. Dry run — proves every row decrypts with the current key and that
+#    re-encryption round-trips. Writes nothing.
+docker compose exec backend python manage.py rotate_encryption_key --new-key "$NEWKEY" --dry-run
+
+# 3. Apply. The database now holds ciphertext for the NEW key, while the running
+#    container still has the OLD key in its environment — do step 4 immediately.
+docker compose exec backend python manage.py rotate_encryption_key --new-key "$NEWKEY" --apply
+
+# 4. Update .env, then restart so the process picks up the new key
+#    PROJECT_API_KEY_ENCRYPTION_KEY=<new key>
+docker compose up -d --no-deps backend
+
+# 5. Verify every key decrypts under the new environment
+docker compose exec backend python manage.py shell -c "
+from project_api_keys.services import ProjectAPIKeyService
+from users.models import ProjectAPIKey
+svc = ProjectAPIKeyService()
+bad = [k.pk for k in ProjectAPIKey.objects.select_related('project')
+       if not svc.get_project_api_key(k.project, k.provider_type)]
+print('failed:', bad or 'none')"
+```
+
+The command refuses to write anything unless **every** row decrypts with the old key, verifies each new ciphertext round-trips before committing, and runs inside a single transaction — so a partially-rotated table is not reachable. It never logs plaintext; rows are identified by a short SHA-256 fingerprint.
+
+Between steps 3 and 4 the running container cannot decrypt these rows, so LLM calls fail. Keep that window to seconds.
+
+### Rotating the database password
+
+```bash
+NEWPW=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+docker exec -e PGPASSWORD="$OLD" ai_catalogue_postgres \
+  psql -U "$DB_USER" -d "$DB_NAME" -c "ALTER USER $DB_USER WITH PASSWORD '$NEWPW';"
+# update DB_PASSWORD in .env, then:
+docker compose up -d --no-deps backend
+```
+
+`POSTGRES_PASSWORD` in compose only applies when the data volume is first initialised, so it does not change an existing cluster — `ALTER USER` is what actually rotates it.
+
+### If a key reaches version control
+
+Treat it as public permanently; rewriting history does not help, because clones and forks retain it. Rotate, remove the value from the working tree, and confirm nothing re-introduces it:
+
+```bash
+git grep -nIE "[A-Za-z0-9_-]{43}=" -- .     # Fernet-shaped literals in tracked files
+```

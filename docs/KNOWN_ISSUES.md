@@ -2,7 +2,7 @@
 
 A register of defects and vestigial code found while deriving the documentation from the source. Everything here was verified in the code; nothing is speculative. Grouped by severity so it can be triaged.
 
-Nothing in this file has been fixed — it is a to-do list, not a changelog.
+Open items are a to-do list. Items that have been fixed are moved to the **Resolved** section at the end rather than deleted, so the history of what was wrong stays visible.
 
 ---
 
@@ -10,19 +10,11 @@ Nothing in this file has been fixed — it is a to-do list, not a changelog.
 
 | # | Issue | Where |
 |---|---|---|
-| S1 | **Password reset returns the reset token in the HTTP response.** `POST /api/password-reset/` is unauthenticated and responds with `uid`, `token` and a ready-made `reset_url` for any email address supplied. No email is sent (the code comments say one "would" be). This is a working account-takeover primitive. | `api/views.py` |
-| S2 | **A literal Fernet key is committed as a default.** `API_KEY_ENCRYPTION_KEY` falls back to a key published in `docker-compose.yml`, and the live backend is using it because `.env` does not set it. | `docker-compose.yml` |
-| S3 | **The debug workflow endpoint ignores project access.** `/api/debug/projects/<uuid>/workflows/` requires authentication but never calls `has_user_access`, so any logged-in user can enumerate workflow counts for — and `POST` a real workflow row into — **any** project. | `agent_orchestration/debug_views.py` |
-| S4 | **Milvus HTTP API is completely unauthenticated.** All six `/api/milvus/*` endpoints are plain Django views with no permission classes, including `POST /api/milvus/search/` and `POST /api/milvus/test/`. | `django_milvus_search/views.py` |
-| S5 | **`/api/templates/refresh/` is unauthenticated and clears the Django cache**, reachable by a bare GET. | `templates/dynamic_urls.py` |
-| S6 | **Infrastructure ports are bound to `0.0.0.0`** with no application-level auth: Redis (no password), ChromaDB (no auth, CORS `*`), Postgres, pgAdmin, Attu, the Django port with `DEBUG=True`, and the Vite dev server. Only the host firewall separates them from the internet. | `docker-compose.yml` |
-| S7 | **`DEBUG` defaults to `True`** in settings, and the dev compose overlay forces `DEBUG: "True"`, overriding `.env`. With DEBUG on, `/media/<path>` is publicly served. | `core/settings.py`, `docker-compose.override.yml` |
 | S8 | **CORS maps a `null` or empty `Origin` to `*`** in both the dev and prod nginx configs; `nginx.ssl.conf` sets `Access-Control-Allow-Origin: *` on the public chatbot path. | `nginx/nginx.dev.conf`, `nginx.prod.conf`, `nginx.ssl.conf` |
 | S9 | The **deployment CORS middleware only blocks preflight**. A cross-origin `POST` from a disallowed origin still executes; only the response headers are withheld. Requests with **no** `Origin` header are always allowed. | `agent_orchestration/middleware/deployment_cors.py` |
 | S10 | **Deployment rate limiting fails open** — any exception in the limiter allows the request. | `agent_orchestration/deployment_rate_limiter.py` |
 | S11 | The **trusted-admin-origin bypass** in the public chat gate accepts a matching `Referer` as well as `Origin`, which is attacker-controllable in some contexts. A management command (`audit_public_chat_cors`) exists to detect the dangerous configuration. | `agent_orchestration/deployment_views.py` |
 | S12 | `create_default_icons` **creates a superuser `admin@example.com` / `adminpassword`** if no superuser exists. | `users/management/commands/create_default_icons.py` |
-| S13 | `k8s/base/configmap.yaml` contains a **plaintext MinIO password**. (The directory is gitignored and abandoned — see V10.) | `k8s/` |
 
 ---
 
@@ -76,7 +68,6 @@ Nothing in this file has been fixed — it is a to-do list, not a changelog.
 | M12 | **Project update (`PUT`/`PATCH`) has no admin gate**, while project create and delete do. | `api/universal_project_views.py` |
 | M13 | **`/api/projects/health/` and `/api/vector-search/health/` require a JWT**, which is unusual for health endpoints and makes them unusable for external monitoring. | `api/universal_project_views.py`, `vector_search/api_views.py` |
 | M14 | **`MinIO` credentials gate startup but MinIO is unused** — Milvus runs with `COMMON_STORAGETYPE: local` and `MINIO_ADDRESS: ""`. | `docker-compose.yml`, `scripts/*.sh` |
-| M15 | **`.env.example` is missing ~14 variables** the compose stack reads (`AICC_CHATBOT_OPENAI_API_KEY`, `CORS_ALLOWED_ORIGINS`, `CSRF_TRUSTED_ORIGINS`, `CHROMADB_PORT`, `REDIS_PORT`, `DOMAIN_NAME`, `SSL_EMAIL`, `PGADMIN_*`, `ATTU_*`, `VITE_*`, …). | `.env.example` |
 | M16 | **`WEBSEARCH_CONFIG['FETCH_CONCURRENCY']` is read but never defined**, so the fetcher always uses its hardcoded default of 10. | `core/settings.py`, `websearch/fetcher_service.py` |
 | M17 | **`VECTOR_SEARCH_LIMIT` has no consumers**; `VECTOR_EMBEDDING_MODEL` is only used at query time (ingestion hardcodes the short model name); `GEMINI_MODEL` is not what the live extractor uses (`gemini-2.5-flash`). | `core/settings.py` |
 | M18 | **`SIMPLE_JWT['BLACKLIST_AFTER_ROTATION']` is inert** — `token_blacklist` is not installed and rotation is disabled. | `core/settings.py` |
@@ -123,3 +114,23 @@ Nothing in this file has been fixed — it is a to-do list, not a changelog.
 - **`generate_collection_name()` is duplicated** in `vector_search/database.py` and `users/models.py`, with comments in both insisting they must stay in sync.
 - **`api/permissions.py` uses bare `print()`** for authorization decisions instead of logging.
 - **`project_api_keys/integration_examples.py`** — an "examples" module imported by production code.
+
+---
+
+## Resolved — 2026-08-05 security pass
+
+| Was | Issue | Resolution |
+|---|---|---|
+| S1 | Password reset returned the reset token in the response body | Token is now emailed only; the response is a fixed generic message, so the endpoint also no longer enumerates accounts. Verified: response contains only `detail`. |
+| S2 | A literal Fernet key was committed as `API_KEY_ENCRYPTION_KEY`'s default | Key **rotated**; the default removed from `docker-compose.yml` (now `:?` required). The old value must never be reintroduced — treat it as public. |
+| S3 | Debug workflow endpoint ignored project access | `has_user_access` check added. Verified: non-member GET/POST → 403, superuser → 200. |
+| S4 | All six `/api/milvus/*` endpoints were unauthenticated | Staff-only guard on every view. Verified: all six → 401 anonymous. Nothing in the product calls them. |
+| S5 | `/api/templates/refresh/` was unauthenticated and cleared the whole cache | `refresh` is staff-only; `discover` and `endpoints` require authentication. Verified: all → 401 anonymous. The frontend uses the DRF `/enhanced-project-templates/` routes, so nothing broke. |
+| S6 | Infrastructure ports bound to `0.0.0.0` | Postgres, Redis, ChromaDB, Milvus, Django, pgAdmin, Attu and both frontends now bind `127.0.0.1`. Only nginx (80/443) is public. Verified from the host's own interface: every infra port refused, port 80 open. |
+| S7 | `DEBUG` defaulted to `True`; the insecure `SECRET_KEY` fallback was silent | `DEBUG` now defaults to `False`. The public dev `SECRET_KEY` is only permitted while `DEBUG` is on; with `DEBUG=False` a missing or dev key raises `ImproperlyConfigured` at startup. |
+| M15 | `.env.example` was missing ~14 variables the compose stack reads | Completed: the required ones are marked REQUIRED and an "additional variables" block documents the rest (53 variables total). |
+| S13 | Hardcoded `SECRET_KEY` in `core/settings_minimal.py` | Replaced with an env lookup that raises if unset, so the inert module no longer carries a committed secret. (The module remains unused — see V7.) |
+
+**Also rotated in the same pass**, though not previously listed: `DB_PASSWORD` was the publicly-known default `ai_catalogue_password` from `docker-compose.yml`. Rotated via `ALTER USER`, and the weak default removed from compose (now required). `DJANGO_SECRET_KEY`'s weak compose default was likewise made required.
+
+`PROJECT_API_KEY_ENCRYPTION_KEY` was **not** leaked (`.env` has never been committed) but was rotated anyway as hygiene. All 20 stored provider keys were re-encrypted and verified — see the runbook in [`DEPLOYMENT.md`](DEPLOYMENT.md#11-rotating-encryption-keys).

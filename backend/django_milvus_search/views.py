@@ -16,6 +16,27 @@ from django_milvus_search.exceptions import MilvusSearchBaseException
 logger = logging.getLogger(__name__)
 
 
+def _deny_unauthenticated(request):
+    """Return a 401 JsonResponse unless the caller is authenticated staff, else None.
+
+    SECURITY: these are plain Django views, so they receive no DRF permission
+    classes and were previously reachable by anyone who could reach the port —
+    including raw vector search and the collection listing. They expose direct
+    Milvus access and are diagnostic tools, so they are restricted to
+    session-authenticated staff/admin users. Nothing in the product calls them.
+    """
+    user = getattr(request, 'user', None)
+    if user is None or not user.is_authenticated:
+        return JsonResponse({'success': False, 'error': 'Authentication required'}, status=401)
+    if not (user.is_superuser or getattr(user, 'is_staff', False)
+            or getattr(user, 'role', None) == 'ADMIN'):
+        return JsonResponse(
+            {'success': False, 'error': 'Administrator privileges required'}, status=403
+        )
+    return None
+
+
+
 class MilvusSearchView(View):
     """
     RESTful API view for Milvus search operations
@@ -27,6 +48,9 @@ class MilvusSearchView(View):
     
     @method_decorator(csrf_exempt)
     def dispatch(self, request, *args, **kwargs):
+        denied = _deny_unauthenticated(request)
+        if denied is not None:
+            return denied
         return super().dispatch(request, *args, **kwargs)
     
     def post(self, request: HttpRequest) -> JsonResponse:
@@ -113,6 +137,12 @@ class MilvusSearchView(View):
 
 
 class MilvusCollectionsView(View):
+    def dispatch(self, request, *args, **kwargs):
+        denied = _deny_unauthenticated(request)
+        if denied is not None:
+            return denied
+        return super().dispatch(request, *args, **kwargs)
+
     """
     API view for collection operations
     """
@@ -174,6 +204,9 @@ class MilvusTestView(View):
     
     @method_decorator(csrf_exempt)
     def dispatch(self, request, *args, **kwargs):
+        denied = _deny_unauthenticated(request)
+        if denied is not None:
+            return denied
         return super().dispatch(request, *args, **kwargs)
     
     def post(self, request: HttpRequest) -> JsonResponse:
@@ -224,6 +257,9 @@ def search_vectors(request: HttpRequest) -> JsonResponse:
     """
     Simple function-based view for vector search
     """
+    denied = _deny_unauthenticated(request)
+    if denied is not None:
+        return denied
     view = MilvusSearchView()
     return view.post(request)
 
@@ -233,6 +269,9 @@ def list_collections(request: HttpRequest) -> JsonResponse:
     """
     Simple function-based view for listing collections
     """
+    denied = _deny_unauthenticated(request)
+    if denied is not None:
+        return denied
     view = MilvusCollectionsView()
     return view.get(request)
 
@@ -242,5 +281,8 @@ def health_check(request: HttpRequest) -> JsonResponse:
     """
     Simple function-based view for health check
     """
+    denied = _deny_unauthenticated(request)
+    if denied is not None:
+        return denied
     view = MilvusSearchView()
     return view.get(request)
