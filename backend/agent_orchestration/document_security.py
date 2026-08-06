@@ -1,6 +1,7 @@
-"""
-Security validation for Public Chatbot document uploads
-Enhanced security checks for file uploads and content validation
+"""Upload security validation (magic-byte checks, extension policy, size caps).
+
+Relocated from the retired `public_chatbot` app on 2026-08-06 because
+`document_processor` depends on it. Self-contained.
 """
 import os
 import re
@@ -21,7 +22,7 @@ from django.core.files.uploadedfile import UploadedFile
 from django.conf import settings
 from django.utils import timezone
 
-logger = logging.getLogger('public_chatbot.security')
+logger = logging.getLogger('agent_orchestration.document_security')
 
 
 class DocumentSecurityValidator:

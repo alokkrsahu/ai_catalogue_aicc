@@ -36,7 +36,7 @@ def _extract_attached_files_text(uploaded_files: list) -> Optional[str]:
         return None
 
     # Lazy-import to avoid Django app-loading issues at module import time.
-    from public_chatbot.document_processor import DocumentProcessor
+    from .document_processor import DocumentProcessor
 
     processor = DocumentProcessor()
     supported = DocumentProcessor.SUPPORTED_FORMATS  # ext → method name

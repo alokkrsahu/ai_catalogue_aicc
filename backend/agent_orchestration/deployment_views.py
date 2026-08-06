@@ -3008,7 +3008,7 @@ def upload_chat_file(request, project_id):
         extracted_text = ''
 
         # Always extract text FIRST (before default_storage.save moves the temp file)
-        from public_chatbot.document_processor import DocumentProcessor
+        from .document_processor import DocumentProcessor
         _dp = DocumentProcessor()
         _dp_method = _dp.SUPPORTED_FORMATS.get(ext)
         if _dp_method:

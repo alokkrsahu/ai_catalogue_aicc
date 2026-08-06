@@ -1,7 +1,10 @@
-"""
-Document Processor for Public Chatbot - File Upload & Format Conversion
-Supports PDF, Word, HTML, TXT, CSV, JSON and other formats
-Integrates with existing PublicKnowledgeDocument workflow
+"""Document text extraction for uploaded files.
+
+Relocated from the retired `public_chatbot` app on 2026-08-06. It is used by
+the deployed-chatbot file upload path (`deployment_views`) and by the AI
+Builder's file handling (`workflow_generation_views`), both of which live in
+this app — so it moved here with them when `public_chatbot` was deleted.
+Self-contained: standard library plus Django and optional parser libraries.
 """
 import os
 import logging
@@ -48,7 +51,7 @@ except ImportError:
 from django.core.files.uploadedfile import UploadedFile
 from django.core.exceptions import ValidationError
 
-logger = logging.getLogger('public_chatbot')
+logger = logging.getLogger('agent_orchestration')
 
 
 class DocumentProcessor:
@@ -117,7 +120,7 @@ class DocumentProcessor:
         
         # Security validation
         if enable_security_scan:
-            from .security import DocumentSecurityValidator
+            from .document_security import DocumentSecurityValidator
             security_validator = DocumentSecurityValidator()
             security_result = security_validator.validate_upload_batch(files)
             

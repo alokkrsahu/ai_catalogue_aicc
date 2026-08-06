@@ -91,9 +91,10 @@ keys** to any other app, which is why it could be removed without touching anyth
 else. Its ChromaDB volume was already empty when it was removed, so the feature was
 non-functional in any case, and it had served no traffic since 2026-01-20.
 
-All of its data was exported before removal to `backup/chromadb-removal-2026-08-05/`
-(30 curated knowledge documents, 1,257 request records, 692 IP-usage rows) as a SQL
-dump, a Django fixture and a JSON export.
+The package, its four PostgreSQL tables and its `django_migrations` rows have all been
+deleted. Everything was exported first to `backup/chromadb-removal-2026-08-05/` — 30
+curated knowledge documents, 1,257 request records and 692 IP-usage rows — as a SQL
+dump, a Django fixture and a JSON export, so the feature can be reconstructed if needed.
 
 
 ### Soft references
