@@ -318,3 +318,48 @@ backup/
 # Local Environment Overrides
 docker-compose.local.yml
 docker-compose.override.local.yml
+
+# ============================================================================
+# SECRET SAFETY NET — this repository is PUBLIC.
+# Anything matching these must never be committed. Added 2026-08-06.
+# The scripts/git-hooks/pre-commit hook enforces this at commit time; install
+# it once per clone with ./scripts/install-git-hooks.sh
+# ============================================================================
+
+# SSH / PGP private keys
+id_rsa
+id_rsa.*
+id_dsa
+id_ecdsa
+id_ed25519
+*.ppk
+*.gpg
+*.asc
+.ssh/
+
+# Runtime data directories (may contain database files / uploads)
+volumes/
+/logs/
+media/
+
+# Cloud provider credentials
+.aws/
+.azure/
+gcloud-service-key.json
+*-service-account*.json
+azure-credentials*.json
+kubeconfig
+*.kubeconfig
+
+# Anything explicitly named as a secret
+*secret*.yml
+*secret*.yaml
+*secrets*.json
+*.secrets
+.secrets/
+*password*.txt
+*credentials*.txt
+
+# Database dumps / archives that may embed data
+*.dump
+*.bak

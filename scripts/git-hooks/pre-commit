@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+#
+# Blocks a commit that would introduce a secret. This repository is PUBLIC —
+# anything committed here is world-readable immediately and permanently, because
+# rewriting history does not reach clones, forks or caches.
+#
+# Install with:  ./scripts/install-git-hooks.sh
+# Bypass (only when you are certain it is a false positive):  git commit --no-verify
+#
+# Scans only the STAGED content, so it cannot be confused by working-tree files
+# that are not being committed.
+
+set -uo pipefail
+
+RED=$'\033[0;31m'; YEL=$'\033[0;33m'; GRN=$'\033[0;32m'; NC=$'\033[0m'
+fail=0
+
+note() { printf '%s\n' "$1"; }
+
+# --- 1. Reject sensitive file paths outright ---------------------------------
+staged_files=$(git diff --cached --name-only --diff-filter=ACMR)
+
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    case "$f" in
+        .env|.env.*|*/.env|*/.env.*)
+            # .env.example / .env.template are the documented, value-free templates
+            case "$f" in
+                *.example|*.template|*.sample) ;;
+                *) note "${RED}BLOCKED${NC} $f — environment files must never be committed"; fail=1 ;;
+            esac
+            ;;
+        *.pem|*.key|*.p12|*.pfx|*.jks|id_rsa|id_rsa.*|id_ed25519|id_ecdsa|*.ppk)
+            note "${RED}BLOCKED${NC} $f — looks like a private key or certificate"; fail=1 ;;
+        backup/*|*/backup/*)
+            note "${RED}BLOCKED${NC} $f — backup artefacts may embed database contents"; fail=1 ;;
+        *.sql|*.dump)
+            note "${RED}BLOCKED${NC} $f — database dumps may contain user data"; fail=1 ;;
+    esac
+done <<< "$staged_files"
+
+# --- 2. Scan staged content for secret-shaped values --------------------------
+# Only added lines (^+) are considered, so pre-existing history does not block work.
+added=$(git diff --cached -U0 --diff-filter=ACMR | grep '^+' | grep -v '^+++' || true)
+
+scan() {  # scan <regex> <human description>
+    local hits
+    hits=$(printf '%s\n' "$added" | grep -nEc "$1" 2>/dev/null || true)
+    if [ "${hits:-0}" -gt 0 ]; then
+        note "${RED}BLOCKED${NC} $2 (${hits} added line(s))"
+        printf '%s\n' "$added" | grep -nE "$1" | head -3 \
+          | sed -E 's/(sk-ant-|sk-|AIza|ghp_|AKIA|xox.-)[A-Za-z0-9_-]{6,}/\1<REDACTED>/g' \
+          | sed 's/^/        /'
+        fail=1
+    fi
+}
+
+scan 'sk-[A-Za-z0-9]{20,}'                        'OpenAI API key'
+scan 'sk-ant-[A-Za-z0-9_-]{20,}'                  'Anthropic API key'
+scan 'AIza[A-Za-z0-9_-]{30,}'                     'Google API key'
+scan 'ghp_[A-Za-z0-9]{30,}'                       'GitHub personal access token'
+scan 'xox[baprs]-[A-Za-z0-9-]{10,}'               'Slack token'
+scan 'AKIA[0-9A-Z]{16}'                           'AWS access key id'
+scan 'BEGIN [A-Z ]*PRIVATE KEY'                   'private key block'
+
+# A 43-char urlsafe-base64 run followed by '=' is the shape of a Fernet key —
+# exactly the leak this repository had, which appeared as a docker-compose
+# default (${VAR:-<key>}). Matched anywhere on the line rather than only after
+# an assignment, because that form put the value after ':-' where an
+# assignment-anchored pattern misses it.
+scan '[A-Za-z0-9_-]{43}=' 'Fernet-style key literal (43 chars + "=")'
+
+# Obvious inline credential assignment with a real-looking value. Placeholders,
+# interpolation and env lookups are all excluded.
+scan '(PASSWORD|SECRET_KEY|API_KEY)[A-Z_]*\s*[:=]\s*["'"'"'][^"'"'"'$<{[:space:]]{12,}["'"'"']' \
+     'hardcoded credential literal'
+
+if [ "$fail" -ne 0 ]; then
+    printf '\n%s\n' "${RED}Commit blocked: possible secret detected.${NC}"
+    note "This repository is PUBLIC — a pushed secret is compromised permanently,"
+    note "even if you delete it afterwards. Move the value into .env (git-ignored)"
+    note "and read it with os.getenv()."
+    note ""
+    note "If this is genuinely a false positive: ${YEL}git commit --no-verify${NC}"
+    exit 1
+fi
+
+printf '%s\n' "${GRN}pre-commit: no secrets detected in staged changes${NC}"
+exit 0

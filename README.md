@@ -184,6 +184,16 @@ These documents are derived from the source rather than from earlier documentati
 
 ---
 
+## Security
+
+**This repository is public** — never commit secrets. Configuration lives in `.env` (git-ignored); a pre-commit hook blocks accidental exposure and must be installed once per clone:
+
+```bash
+./scripts/install-git-hooks.sh
+```
+
+See [`SECURITY.md`](SECURITY.md) for the full policy, what to do if a credential is exposed, and the known historical exposure.
+
 ## Security notes for operators
 
 Only nginx (80/443) is published on all interfaces; every other service binds `127.0.0.1`. `DEBUG` defaults to `False`, and with `DEBUG=False` a missing or publicly-known `DJANGO_SECRET_KEY` fails startup rather than being used silently. `DB_PASSWORD`, `DJANGO_SECRET_KEY` and both encryption keys have no defaults and must be set.
