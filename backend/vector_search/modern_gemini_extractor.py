@@ -35,8 +35,12 @@ class ModernGeminiPDFExtractor:
                 self.genai = genai
                 self.types = types
 
-                # Test the connection
-                self._test_connection()
+                # Deliberately no eager connection test. Validating the key by
+                # generating content costs a real billed request every time an
+                # extractor is constructed — which happens on each project's
+                # processing run — and tells us nothing that the first actual
+                # extraction won't, since extract_pdf_text already falls back to
+                # pdfplumber/PyPDF2 on any failure.
                 self.gemini_available = True
                 logger.info("✅ Modern Gemini 2.5 Flash API configured successfully")
 
@@ -53,16 +57,24 @@ class ModernGeminiPDFExtractor:
             logger.info("ℹ️ No Gemini API key provided - using pdfplumber/PyPDF2 for PDF extraction")
     
     def _test_connection(self):
-        """Test the Gemini connection with a simple request"""
+        """Verify the Gemini credential with a live request.
+
+        Retained for explicit diagnostic use (e.g. from a shell when someone asks
+        "is this project's Google key valid?"). It is no longer called during
+        construction, because every call is a real billed request.
+        """
         try:
-            response = self.client.models.generate_content(
+            self.client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents="Hello, test connection."
             )
             logger.info("✅ Gemini 2.5 Flash connection test successful")
+            return True
         except Exception as e:
             logger.warning(f"⚠️ Gemini connection test failed: {e}")
-    
+            return False
+
+
     def _try_fallback_library(self):
         """Fallback to old google-generativeai library if new one fails"""
         try:

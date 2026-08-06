@@ -1,40 +1,35 @@
 # backend/vector_search/startup.py
 """
-Startup initialization for vector search components
-Ensures singleton embedder and Gemini extractor are created once during application startup
+Startup initialization for vector search components.
+
+Only the embedding model is warmed here. It is a local SentenceTransformer that
+is expensive to load and shared by every project, so loading it once at startup
+is worthwhile and costs nothing external.
+
+The Gemini PDF extractor is deliberately NOT initialised here. API keys in this
+platform are per project (`ProjectAPIKey`), and
+`EnhancedHierarchicalProcessor._initialize_extractors()` already constructs the
+extractor with the correct project's key — or with None, so PDF extraction falls
+back to pdfplumber/PyPDF2 — every time a project's documents are processed. A
+startup-time initialisation from the global GOOGLE_API_KEY was therefore
+redundant (its result was overwritten before any extraction ran), used the wrong
+key source, and issued a real billed API call on every boot and every autoreload.
 """
 
 import logging
-import os
 from django.conf import settings
 from .embeddings import get_embedder_instance
-from .modern_gemini_extractor import initialize_gemini_extractor
 
 logger = logging.getLogger(__name__)
 
 def initialize_vector_search():
-    """Initialize vector search components at startup"""
+    """Warm the shared embedding model at startup."""
     try:
         logger.info("🚀 Initializing AICC IntelliDoc Vector Search components...")
-        
+
         # Create singleton embedder instance
         embedder = get_embedder_instance()
-        
-        # Initialize Gemini PDF extractor if API key is available
-        try:
-            gemini_api_key = os.getenv('GOOGLE_API_KEY')
-            if gemini_api_key:
-                gemini_extractor = initialize_gemini_extractor(gemini_api_key)
-                if gemini_extractor and gemini_extractor.gemini_available:
-                    logger.info("🤖 Gemini API initialized successfully for PDF extraction")
-                else:
-                    logger.warning("⚠️ Google API key provided but initialization failed")
-            else:
-                logger.warning("⚠️ No GOOGLE_API_KEY found in environment - PDF extraction will use PyPDF2 only")
-        except Exception as e:
-            logger.error(f"❌ Gemini API initialization failed: {e}")
-            logger.warning("🔄 PDF extraction will fall back to PyPDF2")
-        
+
         logger.info(f"✅ Vector Search initialization complete!")
         logger.info(f"📊 Embedder dimension: {embedder.vector_dim}")
         
