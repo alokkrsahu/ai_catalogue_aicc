@@ -55,7 +55,10 @@ scan() {  # scan <regex> <human description>
     fi
 }
 
-scan 'sk-[A-Za-z0-9]{20,}'                        'OpenAI API key'
+# Hyphens/underscores must be allowed after the prefix: current OpenAI keys are
+# project-scoped ("sk-proj-..."), and an alphanumeric-only class stops at the
+# first hyphen and misses them entirely.
+scan 'sk-[A-Za-z0-9_-]{20,}'                      'OpenAI API key'
 scan 'sk-ant-[A-Za-z0-9_-]{20,}'                  'Anthropic API key'
 scan 'AIza[A-Za-z0-9_-]{30,}'                     'Google API key'
 scan 'ghp_[A-Za-z0-9]{30,}'                       'GitHub personal access token'
