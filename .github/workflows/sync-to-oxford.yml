@@ -32,6 +32,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # Essential. Without this, checkout stores its own credentials as a
+          # global http.https://github.com/.extraheader, which takes precedence
+          # over the token embedded in the push URL below. The push is then
+          # attempted as github-actions[bot] — which has no access to the Oxford
+          # org — and fails with 403 even though OXFORD_PAT is set correctly.
+          persist-credentials: false
 
       - name: Force-push mirror (workflows excluded)
         env:
