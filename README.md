@@ -74,6 +74,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"                    # API_KEY_ENCRYPTION_KEY
 
 ./scripts/start-dev.sh          # first run: 8–12 min (images + embedding model)
+./scripts/bootstrap.sh          # rotate Milvus password, seed providers, create an admin
 open http://localhost
 ```
 

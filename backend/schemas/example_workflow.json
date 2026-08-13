@@ -1,0 +1,117 @@
+{
+  "schema_version": "1",
+  "exported_at": "2026-08-11T00:00:00Z",
+  "source": {
+    "note": "Synthetic reference workflow shipped with the repository. It contains no real prompts, URLs or organisational content — replace the placeholder system messages with your own.",
+    "project": "example",
+    "workflow": "Example — Splitter fan-out"
+  },
+  "workflow": {
+    "name": "Example — Splitter fan-out",
+    "description": "Minimal but complete multi-agent workflow: a Splitter routes each question to one of two specialists, and a synthesiser merges the result. Import it to see the engine run end to end.",
+    "version": "1.0.0",
+    "status": "draft",
+    "graph_json": {
+      "nodes": [
+        {
+          "id": "start-1",
+          "type": "StartNode",
+          "position": { "x": 0, "y": 200 },
+          "data": {
+            "name": "Start",
+            "prompt": "Enter your initial prompt here...",
+            "description": "Workflow entry point. In a deployed chatbot this prompt is replaced at runtime with the visitor's conversation."
+          }
+        },
+        {
+          "id": "splitter-1",
+          "type": "SplitterAgent",
+          "position": { "x": 300, "y": 200 },
+          "data": {
+            "name": "Router",
+            "description": "Routes each question to the specialist whose remit fits.",
+            "system_message": "You route user questions to the specialist agent whose remit fits best.\n- Send product questions to the Product Specialist.\n- Send policy questions to the Policy Specialist.\nRoute to exactly ONE agent unless a question genuinely spans both remits.",
+            "overlap_allowed": false,
+            "llm_provider": "openai",
+            "llm_model": "gpt-5.4-mini",
+            "temperature": 0.7
+          }
+        },
+        {
+          "id": "agent-product",
+          "type": "AssistantAgent",
+          "position": { "x": 620, "y": 80 },
+          "data": {
+            "name": "Product Specialist",
+            "description": "Answers questions about the product.",
+            "system_message": "You answer questions about the product: what it does, how to access it, and its features.\n\nReplace this with your own instructions. If web search is enabled below, list the pages this agent may use.\n\nIf the material available to you does not answer the question, say so plainly rather than guessing.\n\nAlways respond in ENGLISH.",
+            "llm_provider": "openai",
+            "llm_model": "gpt-5.5",
+            "temperature": 0.7,
+            "doc_aware": false,
+            "web_search_enabled": false,
+            "web_search_mode": "urls",
+            "web_search_urls": [],
+            "web_search_cache_ttl": 604800,
+            "web_search_max_results": 5,
+            "web_search_top_k": 5,
+            "search_method": "hybrid_search"
+          }
+        },
+        {
+          "id": "agent-policy",
+          "type": "AssistantAgent",
+          "position": { "x": 620, "y": 320 },
+          "data": {
+            "name": "Policy Specialist",
+            "description": "Answers questions about policy and guidance.",
+            "system_message": "You answer questions about policy, guidance and acceptable use.\n\nReplace this with your own instructions.\n\nIf the material available to you does not answer the question, say so plainly rather than guessing, and point the user at a human contact.\n\nAlways respond in ENGLISH.",
+            "llm_provider": "openai",
+            "llm_model": "gpt-5.5",
+            "temperature": 0.7,
+            "doc_aware": false,
+            "web_search_enabled": false,
+            "web_search_mode": "urls",
+            "web_search_urls": [],
+            "web_search_cache_ttl": 604800,
+            "web_search_max_results": 5,
+            "web_search_top_k": 5,
+            "search_method": "hybrid_search"
+          }
+        },
+        {
+          "id": "synth-1",
+          "type": "AssistantAgent",
+          "position": { "x": 940, "y": 200 },
+          "data": {
+            "name": "Response Synthesizer",
+            "description": "Merges specialist answers into one reply.",
+            "system_message": "You receive one or more candidate answers from upstream specialists.\n\nProduce a single clear, coherent reply. If several agents responded, merge them without duplication or contradiction. If only one responded, return it with minimal modification.\n\nDo not add restrictions or refusals the specialists did not make. Always preserve any URLs or citations they provided.",
+            "llm_provider": "openai",
+            "llm_model": "gpt-5.5",
+            "temperature": 0.7,
+            "doc_aware": false,
+            "web_search_enabled": false
+          }
+        },
+        {
+          "id": "end-1",
+          "type": "EndNode",
+          "position": { "x": 1240, "y": 200 },
+          "data": {
+            "name": "End",
+            "message": "Workflow completed successfully."
+          }
+        }
+      ],
+      "edges": [
+        { "id": "e1", "source": "start-1",       "target": "splitter-1",    "type": "sequential" },
+        { "id": "e2", "source": "splitter-1",    "target": "agent-product", "type": "sequential" },
+        { "id": "e3", "source": "splitter-1",    "target": "agent-policy",  "type": "sequential" },
+        { "id": "e4", "source": "agent-product", "target": "synth-1",       "type": "sequential" },
+        { "id": "e5", "source": "agent-policy",  "target": "synth-1",       "type": "sequential" },
+        { "id": "e6", "source": "synth-1",       "target": "end-1",         "type": "sequential" }
+      ]
+    }
+  }
+}

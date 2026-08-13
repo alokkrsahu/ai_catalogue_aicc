@@ -249,6 +249,11 @@ deleted/
 !package-lock.json
 !**/package.json
 !**/package-lock.json
+# Reference material, not data: the workflow JSON Schema and a synthetic
+# example bundle a cloner can import to see the engine run. Both are
+# deliberately free of real prompts, URLs and project content.
+!backend/schemas/agent_workflow_schema.json
+!backend/schemas/example_workflow.json
 data/
 datasets/
 

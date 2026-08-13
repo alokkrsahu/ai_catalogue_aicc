@@ -337,3 +337,65 @@ Treat it as public permanently; rewriting history does not help, because clones 
 ```bash
 git grep -nIE "[A-Za-z0-9_-]{43}=" -- .     # Fernet-shaped literals in tracked files
 ```
+
+---
+
+## 12. First run on a fresh clone
+
+`docker compose up` gives you running containers, not a working system. Three things
+live only in the datastores and must be established once — see
+[`REPRODUCIBILITY_ANALYSIS.md`](REPRODUCIBILITY_ANALYSIS.md) for why each is not
+already covered.
+
+```bash
+cp .env.example .env          # fill in every value marked REQUIRED
+./scripts/start-dev.sh        # first run: 8-12 min
+./scripts/bootstrap.sh        # rotates the Milvus password, seeds providers, creates an admin
+```
+
+`bootstrap.sh` is idempotent — safe to re-run. It:
+
+1. **Rotates the Milvus root password.** Milvus ships with the public default
+   `Milvus` and creates no other user; nothing else in the codebase changes it. The
+   new value is written to `.env`, so restart the backend afterwards
+   (`docker compose up -d --no-deps backend`).
+2. **Seeds the `LLMProvider` registry.** The `llm_eval` comparison feature reads rows
+   that no migration creates, so without this the feature is inert.
+3. **Creates an administrator** with a generated password, printed once. A superuser is
+   no longer created implicitly — the previous fallback used a published password.
+4. **Restores dashboard icons** via the existing management command.
+
+Then, in the app: create a project from a template, upload documents, run **Start
+Processing**, and add a provider API key under the project's API-key settings. LLM
+nodes read **per-project** keys; there is no environment-variable fallback, so a
+project without a key cannot execute any LLM node.
+
+### Try a workflow without building one
+
+`backend/schemas/example_workflow.json` is a valid import bundle — Start → Splitter →
+two specialists → synthesiser → End, with placeholder prompts. Import it from the
+workflow designer, or:
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  --data @backend/schemas/example_workflow.json \
+  http://localhost/api/projects/<project-uuid>/workflows/import/
+```
+
+### Recommended agent defaults
+
+These live in each node's `graph_json` and have no documented default, so new agents
+are easy to configure inconsistently. Sensible starting points:
+
+| Setting | Suggested | Notes |
+|---|---|---|
+| `llm_model` (content agents) | `gpt-5.5` | Verify the model is current before relying on it — a deprecated model fails at call time even while it still appears in `/v1/models`. |
+| `llm_model` (routers) | `gpt-5.4-mini` | Routing is a small, frequent call; a mini model is both cheaper and faster. |
+| `search_method` | `hybrid_search` | The code default. Note `index_type` and `metric_type` have no runtime effect (KNOWN_ISSUES M1/M2). |
+| `web_search_cache_ttl` | `604800` (7 days) | Match it to how often the source site changes. Keep it consistent across projects. |
+| `web_search_max_results` / `top_k` | `5` / `5` | |
+| `temperature` | `0.7` | A literal `0` is silently coerced to `0.7` (KNOWN_ISSUES B11). |
+
+A full cache refresh (clear + re-fetch + re-embed + re-index) takes roughly **8 minutes
+for ~300 URLs**. Fetching is fast; embedding and the Milvus insert dominate at about
+seven times the fetch time.

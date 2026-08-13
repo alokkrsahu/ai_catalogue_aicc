@@ -9,6 +9,19 @@ services:
       POSTGRES_USER: ${DB_USER:-ai_catalogue_user}
       POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env}
       POSTGRES_HOST_AUTH_METHOD: ${DB_AUTH_METHOD:-md5}
+    # Tuning lives in the BASE stack deliberately. It was previously only in
+    # docker-compose.prod.yml, which cannot start (see docs/KNOWN_ISSUES.md B1/B2),
+    # so in practice every deployment ran on stock defaults: 128MB shared_buffers
+    # and 4MB work_mem. These values suit a modest single-host install; raise
+    # shared_buffers toward 25% of host RAM on a larger machine.
+    command: >
+      postgres
+      -c max_connections=${DB_MAX_CONNECTIONS:-200}
+      -c shared_buffers=${DB_SHARED_BUFFERS:-256MB}
+      -c effective_cache_size=${DB_EFFECTIVE_CACHE_SIZE:-1GB}
+      -c work_mem=${DB_WORK_MEM:-8MB}
+      -c maintenance_work_mem=${DB_MAINTENANCE_WORK_MEM:-128MB}
+      -c log_min_duration_statement=${DB_LOG_MIN_DURATION_MS:-2000}
     ports:
       - "127.0.0.1:${DB_PORT:-5432}:5432"
     volumes:
@@ -31,9 +44,18 @@ services:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
+    # maxmemory + allkeys-lru are load-bearing, not tuning. This cache holds
+    # fetched web-page content for the web-search feature, which grows with every
+    # URL added to an agent. Redis defaults to maxmemory=0 / noeviction, which
+    # means it grows unbounded and then REJECTS WRITES rather than discarding old
+    # pages — web-search caching fails instead of degrading. allkeys-lru drops
+    # the least-recently-used page, which is the correct behaviour for a cache.
+    # Size it via REDIS_MAXMEMORY; leave headroom over expected page volume.
     command: >
       redis-server --appendonly yes
       --requirepass "${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}"
+      --maxmemory ${REDIS_MAXMEMORY:-512mb}
+      --maxmemory-policy allkeys-lru
     environment:
       # Consumed by redis-cli in the healthcheck below (avoids -a on the cmdline)
       REDISCLI_AUTH: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}

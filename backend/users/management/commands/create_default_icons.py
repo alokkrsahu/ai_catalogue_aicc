@@ -15,10 +15,19 @@ class Command(BaseCommand):
         try:
             admin_user = User.objects.filter(is_superuser=True).first()
             if not admin_user:
-                admin_user = User.objects.create_superuser('admin@example.com', 'adminpassword')
-                self.stdout.write(self.style.WARNING('No superuser found, created a dummy admin@example.com. Please change password!'))
+                # Previously this created admin@example.com with the literal password
+                # 'adminpassword'. That is a published credential on a system that may
+                # be internet-facing, so a superuser is no longer created implicitly.
+                # scripts/bootstrap.sh creates one with a generated password instead.
+                self.stdout.write(self.style.ERROR(
+                    'No superuser exists. Refusing to create one with a default password.\n'
+                    'Create an administrator first, then re-run this command:\n'
+                    '  ./scripts/bootstrap.sh          (generates a password for you)\n'
+                    '  or: python manage.py createsuperuser'
+                ))
+                return
         except Exception as e:
-            self.stdout.write(self.style.ERROR(f'Failed to get or create admin user: {e}'))
+            self.stdout.write(self.style.ERROR(f'Failed to get admin user: {e}'))
             return
 
         icons_to_create = [

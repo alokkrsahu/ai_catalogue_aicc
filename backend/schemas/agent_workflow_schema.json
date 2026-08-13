@@ -1,0 +1,639 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aicc.com/schemas/agent-workflow-v1.json",
+  "title": "AICC Agent Workflow Schema",
+  "description": "Custom JSON schema for defining agent workflows with precise connection flow, start/end nodes, and conversation orchestration",
+  "type": "object",
+  "version": "1.0.0",
+  "properties": {
+    "workflow_id": {
+      "type": "string",
+      "description": "Unique identifier for the workflow",
+      "pattern": "^[0-9a-fA-F-]{36}$"
+    },
+    "workflow_name": {
+      "type": "string",
+      "description": "Human-readable name for the workflow",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "workflow_description": {
+      "type": "string",
+      "description": "Detailed description of the workflow purpose and functionality",
+      "maxLength": 500
+    },
+    "version": {
+      "type": "string",
+      "description": "Workflow version",
+      "default": "1.0.0"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when workflow was created"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when workflow was last updated"
+    },
+    "project_id": {
+      "type": "string",
+      "description": "Project ID this workflow belongs to",
+      "pattern": "^[0-9a-fA-F-]{36}$"
+    },
+    "agents": {
+      "type": "array",
+      "description": "Array of all agents in the workflow",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/Agent"
+      }
+    },
+    "connections": {
+      "type": "array",
+      "description": "Array defining how agents are connected and conversation flow",
+      "items": {
+        "$ref": "#/$defs/Connection"
+      }
+    },
+    "flow_configuration": {
+      "$ref": "#/$defs/FlowConfiguration"
+    },
+    "execution_settings": {
+      "$ref": "#/$defs/ExecutionSettings"
+    },
+    "metadata": {
+      "$ref": "#/$defs/WorkflowMetadata"
+    }
+  },
+  "required": [
+    "workflow_id",
+    "workflow_name",
+    "agents",
+    "connections",
+    "flow_configuration"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "Agent": {
+      "type": "object",
+      "description": "Individual agent definition with capabilities and configuration",
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "description": "Unique identifier for the agent",
+          "pattern": "^[0-9a-fA-F-]{36}$"
+        },
+        "agent_name": {
+          "type": "string",
+          "description": "Human-readable name for the agent",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "agent_type": {
+          "type": "string",
+          "description": "Type of agent defining its core functionality",
+          "enum": [
+            "DocumentAnalyzerAgent",
+            "HierarchicalProcessorAgent", 
+            "CategoryClassifierAgent",
+            "ContentReconstructorAgent",
+            "ResearchAgent",
+            "UserProxyAgent",
+            "CoordinatorAgent",
+            "ValidationAgent",
+            "SummaryAgent",
+            "CustomAgent"
+          ]
+        },
+        "system_message": {
+          "type": "string",
+          "description": "System prompt that defines the agent's behavior and instructions",
+          "maxLength": 2000
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of what this agent does",
+          "maxLength": 200
+        },
+        "capabilities": {
+          "type": "array",
+          "description": "List of capabilities this agent has",
+          "items": {
+            "type": "string",
+            "enum": [
+              "document_analysis",
+              "text_processing",
+              "classification",
+              "web_search",
+              "code_execution",
+              "file_handling",
+              "human_interaction",
+              "rag_retrieval",
+              "summarization",
+              "validation",
+              "coordination"
+            ]
+          }
+        },
+        "llm_configuration": {
+          "$ref": "#/$defs/LLMConfiguration"
+        },
+        "tools": {
+          "type": "array",
+          "description": "Tools available to this agent",
+          "items": {
+            "$ref": "#/$defs/Tool"
+          }
+        },
+        "position": {
+          "$ref": "#/$defs/Position"
+        },
+        "is_start_node": {
+          "type": "boolean",
+          "description": "Whether this agent is a starting point for the workflow",
+          "default": false
+        },
+        "is_end_node": {
+          "type": "boolean", 
+          "description": "Whether this agent is an ending point for the workflow",
+          "default": false
+        },
+        "human_input_mode": {
+          "type": "string",
+          "description": "When this agent should request human input",
+          "enum": ["ALWAYS", "NEVER", "TERMINATE", "ON_ERROR"],
+          "default": "NEVER"
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "description": "Maximum execution time for this agent in seconds",
+          "minimum": 1,
+          "maximum": 3600,
+          "default": 300
+        },
+        "max_iterations": {
+          "type": "integer",
+          "description": "Maximum number of iterations this agent can perform",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 10
+        }
+      },
+      "required": [
+        "agent_id",
+        "agent_name", 
+        "agent_type",
+        "system_message"
+      ],
+      "additionalProperties": false
+    },
+    "Connection": {
+      "type": "object",
+      "description": "Defines how agents are connected and conversation flows between them",
+      "properties": {
+        "connection_id": {
+          "type": "string",
+          "description": "Unique identifier for this connection",
+          "pattern": "^[0-9a-fA-F-]{36}$"
+        },
+        "from_agent_id": {
+          "type": "string",
+          "description": "ID of the source agent",
+          "pattern": "^[0-9a-fA-F-]{36}$"
+        },
+        "to_agent_id": {
+          "type": "string",
+          "description": "ID of the destination agent",
+          "pattern": "^[0-9a-fA-F-]{36}$"
+        },
+        "connection_type": {
+          "type": "string",
+          "description": "Type of connection defining how conversation flows",
+          "enum": [
+            "direct",
+            "conditional",
+            "broadcast",
+            "handoff",
+            "loop_back",
+            "termination"
+          ]
+        },
+        "conditions": {
+          "type": "array",
+          "description": "Conditions that must be met for this connection to activate",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          }
+        },
+        "message_transform": {
+          "$ref": "#/$defs/MessageTransform"
+        },
+        "priority": {
+          "type": "integer",
+          "description": "Priority order when multiple connections are possible (higher = higher priority)",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        },
+        "delay_seconds": {
+          "type": "integer",
+          "description": "Optional delay before activating this connection",
+          "minimum": 0,
+          "maximum": 300,
+          "default": 0
+        }
+      },
+      "required": [
+        "connection_id",
+        "from_agent_id",
+        "to_agent_id",
+        "connection_type"
+      ],
+      "additionalProperties": false
+    },
+    "FlowConfiguration": {
+      "type": "object",
+      "description": "Defines overall flow behavior and termination conditions",
+      "properties": {
+        "start_agent_id": {
+          "type": "string",
+          "description": "ID of the agent that starts the workflow",
+          "pattern": "^[0-9a-fA-F-]{36}$"
+        },
+        "end_agent_ids": {
+          "type": "array",
+          "description": "IDs of agents that can end the workflow",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F-]{36}$"
+          },
+          "minItems": 1
+        },
+        "max_total_messages": {
+          "type": "integer",
+          "description": "Maximum total messages across all agents before termination",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 100
+        },
+        "max_execution_time_seconds": {
+          "type": "integer",
+          "description": "Maximum total execution time before termination",
+          "minimum": 1,
+          "maximum": 7200,
+          "default": 1800
+        },
+        "termination_conditions": {
+          "type": "array",
+          "description": "Conditions that will terminate the entire workflow",
+          "items": {
+            "$ref": "#/$defs/TerminationCondition"
+          }
+        },
+        "flow_mode": {
+          "type": "string",
+          "description": "How the conversation flows between agents",
+          "enum": [
+            "sequential",
+            "round_robin",
+            "selective",
+            "broadcast",
+            "custom"
+          ],
+          "default": "selective"
+        },
+        "loop_prevention": {
+          "type": "object",
+          "description": "Settings to prevent infinite loops",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "max_same_agent_consecutive": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 3
+            },
+            "detect_repetitive_patterns": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        }
+      },
+      "required": [
+        "start_agent_id",
+        "end_agent_ids"
+      ],
+      "additionalProperties": false
+    },
+    "ExecutionSettings": {
+      "type": "object",
+      "description": "Settings for workflow execution",
+      "properties": {
+        "environment": {
+          "type": "string",
+          "description": "Execution environment",
+          "enum": ["development", "staging", "production"],
+          "default": "development"
+        },
+        "logging_level": {
+          "type": "string",
+          "description": "Logging verbosity",
+          "enum": ["DEBUG", "INFO", "WARNING", "ERROR"],
+          "default": "INFO"
+        },
+        "enable_streaming": {
+          "type": "boolean",
+          "description": "Whether to enable real-time message streaming",
+          "default": true
+        },
+        "save_conversation_history": {
+          "type": "boolean",
+          "description": "Whether to save the full conversation history",
+          "default": true
+        },
+        "enable_human_feedback": {
+          "type": "boolean",
+          "description": "Whether to allow human intervention during execution",
+          "default": false
+        },
+        "rate_limiting": {
+          "type": "object",
+          "description": "Rate limiting settings for API calls",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "max_requests_per_minute": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 60
+            },
+            "max_tokens_per_minute": {
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 1000000,
+              "default": 100000
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "LLMConfiguration": {
+      "type": "object",
+      "description": "Configuration for the Language Model used by an agent",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "LLM provider",
+          "enum": ["openai", "anthropic", "google", "azure_openai", "local"]
+        },
+        "model": {
+          "type": "string",
+          "description": "Specific model to use",
+          "examples": [
+            "gpt-4-turbo",
+            "gpt-3.5-turbo",
+            "claude-3-5-sonnet-20241022",
+            "claude-3-opus-20240229",
+            "gemini-2.5-flash",
+            "gemini-pro"
+          ]
+        },
+        "temperature": {
+          "type": "number",
+          "description": "Temperature for response generation",
+          "minimum": 0.0,
+          "maximum": 2.0,
+          "default": 0.7
+        },
+        "max_tokens": {
+          "type": "integer",
+          "description": "Maximum tokens in response",
+          "minimum": 1,
+          "maximum": 32000,
+          "default": 2000
+        },
+        "api_key_reference": {
+          "type": "string",
+          "description": "Reference to API key (not the actual key)",
+          "maxLength": 100
+        },
+        "custom_parameters": {
+          "type": "object",
+          "description": "Provider-specific parameters",
+          "additionalProperties": true
+        }
+      },
+      "required": ["provider", "model"],
+      "additionalProperties": false
+    },
+    "Tool": {
+      "type": "object",
+      "description": "Tool that an agent can use",
+      "properties": {
+        "tool_name": {
+          "type": "string",
+          "description": "Name of the tool",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "tool_type": {
+          "type": "string",
+          "description": "Type of tool",
+          "enum": [
+            "function",
+            "api_call",
+            "file_operation",
+            "web_search",
+            "database_query",
+            "rag_retrieval",
+            "code_execution",
+            "custom"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "description": "What this tool does",
+          "maxLength": 200
+        },
+        "parameters": {
+          "type": "object",
+          "description": "Tool-specific parameters",
+          "additionalProperties": true
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether this tool is enabled",
+          "default": true
+        }
+      },
+      "required": ["tool_name", "tool_type"],
+      "additionalProperties": false
+    },
+    "Position": {
+      "type": "object",
+      "description": "Visual position for UI display",
+      "properties": {
+        "x": {
+          "type": "number",
+          "description": "X coordinate"
+        },
+        "y": {
+          "type": "number", 
+          "description": "Y coordinate"
+        }
+      },
+      "required": ["x", "y"],
+      "additionalProperties": false
+    },
+    "Condition": {
+      "type": "object",
+      "description": "Condition that must be met for a connection to activate",
+      "properties": {
+        "condition_type": {
+          "type": "string",
+          "description": "Type of condition",
+          "enum": [
+            "message_contains",
+            "message_length",
+            "agent_status",
+            "custom_function",
+            "user_input",
+            "error_occurred",
+            "timeout_reached"
+          ]
+        },
+        "parameters": {
+          "type": "object",
+          "description": "Condition-specific parameters",
+          "additionalProperties": true
+        },
+        "expected_value": {
+          "description": "Expected value for comparison",
+          "oneOf": [
+            {"type": "string"},
+            {"type": "number"},
+            {"type": "boolean"}
+          ]
+        },
+        "operator": {
+          "type": "string",
+          "description": "Comparison operator",
+          "enum": ["equals", "contains", "greater_than", "less_than", "exists", "not_exists"],
+          "default": "equals"
+        }
+      },
+      "required": ["condition_type"],
+      "additionalProperties": false
+    },
+    "MessageTransform": {
+      "type": "object",
+      "description": "How to transform messages when passing between agents",
+      "properties": {
+        "transform_type": {
+          "type": "string",
+          "description": "Type of message transformation",
+          "enum": ["none", "summarize", "extract_key_points", "reformat", "filter", "custom"]
+        },
+        "parameters": {
+          "type": "object",
+          "description": "Transform-specific parameters",
+          "additionalProperties": true
+        }
+      },
+      "required": ["transform_type"],
+      "additionalProperties": false
+    },
+    "TerminationCondition": {
+      "type": "object",
+      "description": "Condition that will terminate the entire workflow",
+      "properties": {
+        "condition_type": {
+          "type": "string",
+          "description": "Type of termination condition",
+          "enum": [
+            "max_messages_reached",
+            "max_time_reached",
+            "all_agents_completed", 
+            "error_threshold_reached",
+            "user_termination",
+            "success_criteria_met",
+            "custom_condition"
+          ]
+        },
+        "parameters": {
+          "type": "object",
+          "description": "Condition-specific parameters",
+          "additionalProperties": true
+        },
+        "priority": {
+          "type": "integer",
+          "description": "Priority of this termination condition (higher = checked first)",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        }
+      },
+      "required": ["condition_type"],
+      "additionalProperties": false
+    },
+    "WorkflowMetadata": {
+      "type": "object",
+      "description": "Additional metadata about the workflow",
+      "properties": {
+        "author": {
+          "type": "string",
+          "description": "Who created this workflow",
+          "maxLength": 100
+        },
+        "tags": {
+          "type": "array",
+          "description": "Tags for categorizing workflows",
+          "items": {
+            "type": "string",
+            "maxLength": 50
+          }
+        },
+        "category": {
+          "type": "string",
+          "description": "Workflow category",
+          "enum": [
+            "document_analysis",
+            "research",
+            "content_creation",
+            "data_processing",
+            "customer_service",
+            "debugging",
+            "general"
+          ]
+        },
+        "estimated_duration_minutes": {
+          "type": "integer",
+          "description": "Estimated execution time in minutes",
+          "minimum": 1,
+          "maximum": 1440
+        },
+        "complexity_level": {
+          "type": "string",
+          "description": "Complexity level",
+          "enum": ["simple", "moderate", "complex", "expert"]
+        },
+        "custom_fields": {
+          "type": "object",
+          "description": "Custom metadata fields",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
