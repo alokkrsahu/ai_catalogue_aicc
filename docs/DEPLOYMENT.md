@@ -183,8 +183,7 @@ Known nginx issues:
 Caveats worth knowing:
 
 - `scripts/stop.sh` is incomplete — it never stops `redis`, `attu` or `frontend-dev`.
-- `scripts/start.sh` and `scripts/start-local.sh` are superseded (`start.sh` still uses the legacy hyphenated `docker-compose` binary). `start-dev.sh` unhelpfully points readers at `start.sh` for production and at a `README-DOCKER.md` that does not exist.
-- **Everything under `backend/*.sh` is legacy and non-functional here** — they hardcode a macOS path (`/Users/alok/Documents/AICC/...`) and a `venv` that does not exist. `workflow_complete_fix.sh` and `workflow_fix_applied.sh` only echo text.
+- **There are no shell scripts under `backend/`.** Run management commands through the container: `docker compose exec backend python manage.py <command>`.
 - **There is no backup script anywhere in the repository** — no `pg_dump`, no volume export. See §9.
 
 ---

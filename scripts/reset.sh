@@ -25,13 +25,13 @@ fi
 
 echo ""
 echo "🛑 Stopping all containers..."
-docker-compose -f docker-compose.yml -f docker-compose.override.yml down
+docker compose -f docker-compose.yml -f docker-compose.override.yml down
 
 echo "🗑️  Removing containers and volumes..."
-docker-compose -f docker-compose.yml -f docker-compose.override.yml down -v --remove-orphans
+docker compose -f docker-compose.yml -f docker-compose.override.yml down -v --remove-orphans
 
 echo "🧹 Removing images..."
-docker-compose -f docker-compose.yml -f docker-compose.override.yml down --rmi all
+docker compose -f docker-compose.yml -f docker-compose.override.yml down --rmi all
 
 echo "🧹 Cleaning up Docker system..."
 docker system prune -f
@@ -55,7 +55,7 @@ echo ""
 echo "✅ Environment reset complete!"
 echo ""
 echo "🆕 To start fresh:"
-echo "   1. Run: ./scripts/start.sh (production) or ./scripts/start-dev.sh (development)"
+echo "   1. Run: ./scripts/start-dev.sh (development) or ./scripts/production.sh (production)"
 echo "   2. Edit .env file with your API keys and configuration"
 echo ""
 echo "📝 Note: You may need to recreate your .env file if it was in a mounted volume."

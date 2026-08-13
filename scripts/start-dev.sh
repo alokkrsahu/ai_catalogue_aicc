@@ -179,7 +179,7 @@ if [ "$MILVUS_HEALTHY" = "false" ]; then
 fi
 
 echo ""
-echo "🔴 Step 5: Starting Redis cache..."
+echo "🔴 Step 4: Starting Redis cache..."
 echo "   📋 Redis is required for caching and WebSearch functionality"
 docker compose up -d redis
 
@@ -201,7 +201,7 @@ while [ $REDIS_COUNTER -lt $REDIS_TIMEOUT ]; do
 done
 
 echo ""
-echo "🐍 Step 6: Starting Django backend (development mode)..."
+echo "🐍 Step 5: Starting Django backend (development mode)..."
 docker compose -f docker-compose.yml -f docker-compose.override.yml up -d backend --no-deps
 
 echo "⏳ Waiting for Django backend to be ready..."
@@ -221,13 +221,13 @@ while [ $BACKEND_COUNTER -lt $BACKEND_TIMEOUT ]; do
     BACKEND_COUNTER=$((BACKEND_COUNTER + 2))
 done
 
-echo "⚛️  Step 7: Starting SvelteKit frontend (development with HMR)..."
+echo "⚛️  Step 6: Starting SvelteKit frontend (development with HMR)..."
 docker compose -f docker-compose.yml -f docker-compose.override.yml up -d frontend-dev --no-deps
 
-echo "🌐 Step 8: Starting Nginx reverse proxy..."
+echo "🌐 Step 7: Starting Nginx reverse proxy..."
 docker compose -f docker-compose.yml -f docker-compose.override.yml up -d nginx --no-deps
 
-echo "🎛️  Step 9: Starting management tools..."
+echo "🎛️  Step 8: Starting management tools..."
 docker compose up -d pgadmin attu
 
 # Show comprehensive status
@@ -310,5 +310,5 @@ echo "   2. Check application logs for any issues"
 echo "   3. Test Milvus connection through the Django admin or API"
 echo "   4. Configure your AI API keys in the web interface"
 echo ""
-echo "💡 For production deployment, use: ./scripts/start.sh"
-echo "🆘 For support, check the logs and README-DOCKER.md"
+echo "💡 For production deployment, use: ./scripts/production.sh"
+echo "🆘 For support, check the logs and docs/DEPLOYMENT.md"

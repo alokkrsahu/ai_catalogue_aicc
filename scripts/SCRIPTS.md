@@ -10,6 +10,7 @@ Every shell script in this directory, verified against its source. Deeper contex
 
 | Scenario | Script | Downtime |
 |---|---|---|
+| First run after cloning | `start-dev.sh` then `bootstrap.sh` | ~8–12 min |
 | Code changes (`.py`, `.svelte`, `.ts`) | `quick-deploy.sh` | ~2 s |
 | New migrations | `quick-deploy.sh` | ~2 s |
 | nginx config changes | `quick-deploy.sh` | 0 s |
@@ -20,8 +21,40 @@ Every shell script in this directory, verified against its source. Deeper contex
 | Production mode | `production.sh` | see the warning below |
 | First-time TLS certificate | `setup-ssl.sh` | interactive |
 | Renew TLS certificate | `renew-ssl.sh` | 0 s |
+| Stale Vite chunk 404s | `fix-frontend-cache.sh` | frontend only |
 | Reclaim disk (keeps data) | `docker-cleanup.sh` | full stop |
 | Destroy everything | `reset.sh` | irreversible |
+
+---
+
+## First run
+
+### `start-dev.sh` — full build and ordered startup
+
+Validates that `.env` exists and that `MILVUS_ROOT_*` and `MINIO_ROOT_*` are non-empty, creates `./volumes` and `./logs`, prunes builders older than 24 h, builds with `--no-cache`, then starts eight groups in dependency order with health gates:
+
+```
+postgres → etcd + minio → milvus (240 s gate) → redis → backend → frontend-dev → nginx → pgadmin + attu
+```
+
+### `bootstrap.sh` — make a fresh clone usable
+
+```bash
+./scripts/bootstrap.sh
+```
+
+Idempotent, and safe to re-run. Four steps that `docker compose up` does not cover:
+
+1. Rotates the Milvus root password away from the vendor default `Milvus` and writes the new value into `.env`.
+2. Seeds the `LLMProvider` rows that the llm_eval comparison feature reads — no migration creates them.
+3. Creates an administrator with a generated password, shown once and never stored.
+4. Restores the dashboard icons.
+
+It prints no secret other than that admin password. Run it after `start-dev.sh`, with the backend already up.
+
+### `install-git-hooks.sh` — one-time, per clone
+
+Installs the repository's pre-commit hook, which blocks commits containing API keys, Fernet keys, private keys or `.env` files. Git does not version `.git/hooks`, so **every clone must run this once**.
 
 ---
 
@@ -49,12 +82,6 @@ This works only because the backend runs `runserver` against a bind mount. It is
 
 Same ordered, health-gated startup as `start-dev.sh` but with no build and no image pull. This is the everyday "turn it off and on again".
 
-### `start-dev.sh` — full rebuild
-
-Validates that `.env` exists and that `MILVUS_ROOT_*` and `MINIO_ROOT_*` are non-empty, creates `./volumes` and `./logs`, prunes builders older than 24 h, builds with `--no-cache`, then starts nine groups in dependency order with health gates: postgres → etcd + minio → milvus (240 s) → chromadb → redis → backend → frontend-dev → nginx → pgadmin + attu.
-
-Two stale pointers in its closing output: it recommends `start.sh` for production (superseded by `production.sh`) and references a `README-DOCKER.md` that does not exist.
-
 ---
 
 ## Production and TLS
@@ -79,6 +106,8 @@ Interactive first-time Let's Encrypt issuance. Writes `DOMAIN_NAME` and `SSL_EMA
 
 Renews using the **host's** certbot, not the container — and hardcodes `/home/alokkrsahu/ai_catalogue`. It relies on a `deploy_hook` in the renewal config to copy certificates into `nginx/ssl/` and reload nginx. Note that its success check always reports 0 because of `set -e`.
 
+This script is installed in the crontab and runs unattended; do not rename or move it without updating cron.
+
 ---
 
 ## Maintenance
@@ -86,29 +115,22 @@ Renews using the **host's** certbot, not the container — and hardcodes `/home/
 | Script | What it does |
 |---|---|
 | `docker-cleanup.sh` | Interactive. Stops the stack, removes exited containers, dangling images, unused networks and build cache. **Never touches volumes.** Its claim that `./volumes/*` holds preserved data is wrong — those directories are mounted by nothing. |
-| `stop.sh` | Stops frontend, nginx, backend, milvus, postgres, etcd, minio, pgadmin. **Leaves `redis`, `chromadb`, `attu` and `frontend-dev` running** — use `docker compose stop` if you want everything down. |
+| `stop.sh` | Stops frontend, nginx, backend, milvus, postgres, etcd, minio, pgadmin. **Leaves `redis`, `attu` and `frontend-dev` running** — use `docker compose stop` if you want everything down. |
 | `fix-frontend-cache.sh` | Deletes the Vite caches to clear stale-chunk 404s. |
-| `fix-dependencies.sh` | Wipes `node_modules` and `package-lock.json`, reinstalls, runs `npm audit fix --force`. Note that deleting the lockfile breaks the production image's `npm ci` until it is regenerated. |
 | `reset.sh` | **Destructive.** `docker compose down -v`, deletes `./volumes` and `./logs`, wipes frontend and backend caches. Destroys the database, every uploaded document, and all vector data. There is no backup tooling in this repository — take a dump first (see DEPLOYMENT.md §9). |
 
 ---
 
-## Superseded
+## Also in this directory
 
-Kept for reference; prefer the alternatives above.
+Not deployment-related: `analyze_experiment_logs.py`, `extract_experiment_metrics.py`, `check_evaluation_times.py` — research utilities that bootstrap Django and query the evaluation models.
 
-| Script | Why |
-|---|---|
-| `start.sh` | Old production script. Uses the legacy hyphenated `docker-compose` binary, fixed `sleep` waits instead of health checks, no credential validation, and starts the prod `frontend` service. Use `production.sh`. |
-| `start-local.sh` | Near-duplicate of `start-dev.sh`. |
-| `git-pull.sh` / `git-push.sh` | Interactive git wrappers. `git-push.sh` does `git add .`, renames the branch to `main` and force-sets upstream — use git directly. |
-| `debug_model_cache.sh`, `test_cache_detection.sh` | Diagnostics for the sentence-transformers cache. |
-| `start-dev-updated.sh.backup` | Dead file. |
+`git-hooks/pre-commit` is the hook source installed by `install-git-hooks.sh`.
 
-Also here, and not deployment-related: `analyze_experiment_logs.py`, `extract_experiment_metrics.py`, `check_evaluation_times.py` — research utilities that bootstrap Django and query the evaluation models.
+## Running management commands
 
-## Scripts in `backend/`
+There are no shell scripts under `backend/`. Use the container directly:
 
-**All of them are legacy and non-functional on this host.** `check_and_migrate.sh`, `run_migration.sh`, `run_migration_fixed.sh`, `cleanup_milvus_files.sh` and `test_setup.sh` hardcode a macOS developer path (`/Users/alok/Documents/AICC/...`) and a `venv` that does not exist. `setup_postgres.sh` predates Docker. `workflow_complete_fix.sh` and `workflow_fix_applied.sh` only echo text and execute nothing.
-
-Use `docker compose exec backend python manage.py <command>` instead.
+```bash
+docker compose exec backend python manage.py <command>
+```

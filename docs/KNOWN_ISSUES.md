@@ -45,7 +45,6 @@ Open items are a to-do list. Items that have been fixed are moved to the **Resol
 | B21 | **`nginx.ssl.conf` lacks the 1500 s API timeouts** present in the dev and prod configs, so switching to the SSL overlay would break long document processing at nginx's 60 s default. | `nginx/nginx.ssl.conf` |
 | B22 | **`deploy.replicas: 2` is a no-op** under `docker compose` and conflicts with the fixed `8000:8000` / `3000:3000` host bindings. | `docker-compose.prod.yml` |
 | B23 | **`stop.sh` never stops** `redis`, `attu` or `frontend-dev`. | `scripts/stop.sh` |
-| B24 | **Every `backend/*.sh` script hardcodes a macOS path** (`/Users/alok/Documents/AICC/...`) and a `venv` that does not exist here. `workflow_complete_fix.sh` and `workflow_fix_applied.sh` only echo text. | `backend/*.sh` |
 
 ---
 
@@ -98,7 +97,7 @@ Open items are a to-do list. Items that have been fixed are moved to the **Resol
 | V15 | **Empty template includes** — `/api/templates/legal/`, `/medical/`, `/history/` include `urlpatterns = []`. The `aicc-intellidoc` include is commented out and replaced by a hardcoded lambda labelled "EMERGENCY FIX". | |
 | V16 | **Unreachable executor branches** — the `StartNode` branch inside the main loop and the `EndNode` branch are both dead because `_find_ready_nodes` skips those types. `workflow_end` messages come only from the resume loop. | |
 | V17 | **No-caller functions** — `WebRAGService.ensure_indexed`, `DuckDuckGoService.search_news`, `get_rate_limit_info`, `_is_public_chat_access_allowed`, `_extract_document_fields`, and ~190 lines of legacy parsing helpers in `workflow_views.py`. | |
-| V18 | **Junk in the repo** — `backend/=4.0.0` (captured pip stdout), `backend/venv/` (broken stale artifact), `conversation_orchestrator.py.backup.*` (three ~114 KB copies), `reflection_debug_test.py`, `scripts/start-dev-updated.sh.backup`, `backend/documents/` (one orphaned PDF, not a package). | |
+| V18 | **Junk in the repo** — `backend/=4.0.0` (captured pip stdout), `backend/venv/` (broken stale artifact), `conversation_orchestrator.py.backup.*` (three ~114 KB copies), `backend/documents/` (one orphaned PDF, not a package). | |
 | V19 | **`api/` and `users/` have no `__init__.py`** (implicit namespace packages); `llm_eval` has no `apps.py`. | |
 | V20 | **`AUTH_USER_MODEL` is declared twice** in settings; `IconClass`/`ColorTheme` embed ~115 UI enum values in the model layer. | |
 
@@ -128,6 +127,8 @@ Open items are a to-do list. Items that have been fixed are moved to the **Resol
 | — | Redis ran with no password or ACL | `requirepass` enabled via `REDIS_PASSWORD`; the credential travels in the Django cache `LOCATION` URL so every consumer (including the raw redis-py pattern-delete path) picks it up. Verified: anonymous `PING`, `SET` and `FLUSHALL` all refused with `NOAUTH`. |
 | M15 | `.env.example` was missing ~14 variables the compose stack reads | Completed: the required ones are marked REQUIRED and an "additional variables" block documents the rest (53 variables total). |
 | S13 | Hardcoded `SECRET_KEY` in `core/settings_minimal.py` | Replaced with an env lookup that raises if unset, so the inert module no longer carries a committed secret. (The module remains unused — see V7.) |
+| B24 | Every `backend/*.sh` script hardcoded a macOS path (`/Users/alok/Documents/AICC/...`) and a `venv` that does not exist here; two of them only echoed text | All ten removed (2026-08-13). Two also referenced project UUIDs that no longer exist in the database. Management commands now run via `docker compose exec backend python manage.py <command>`. Seven redundant or unsafe `scripts/` entries were removed in the same pass — see the Resolved note below. |
+| — | `scripts/` carried superseded and actively harmful scripts | Removed (2026-08-13): `start.sh` and `start-local.sh` (superseded by `production.sh` / `start-dev.sh`), `git-pull.sh` / `git-push.sh` (the latter did `git add .` then force-set upstream — dangerous now the repo is public), `debug_model_cache.sh` and `test_cache_detection.sh` (one-off diagnostics), and `fix-dependencies.sh` (deleted `package-lock.json`, which the production image's `npm ci` requires). Thirteen scripts remain, all referenced and syntax-checked. |
 
 **Also rotated in the same pass**, though not previously listed: `DB_PASSWORD` was the publicly-known default `ai_catalogue_password` from `docker-compose.yml`. Rotated via `ALTER USER`, and the weak default removed from compose (now required). `DJANGO_SECRET_KEY`'s weak compose default was likewise made required.
 
